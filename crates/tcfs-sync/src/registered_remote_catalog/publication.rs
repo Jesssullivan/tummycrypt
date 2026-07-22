@@ -9,13 +9,16 @@
 //!
 //! This checkpoint deliberately stops before production authority. Bootstrap
 //! completeness, exact-current high-water, and the all-writer credential epoch
-//! are opaque external receipts with no production constructors. The module
-//! can validate and compose their exact bindings and publish the exact immutable
-//! predecessor-HEAD archive. A separately namespaced journal draft exercises
-//! bounded artifact mechanics but cannot become authoritative recovery evidence
-//! or enter a publishing fence. This module still cannot mint authority, write
-//! a live `HEAD`, mutate the namespace, produce a plan digest, or authorize an
-//! action.
+//! are opaque external receipts with no production constructors. One external
+//! control acquisition binds those receipts and must move monotonically from
+//! exact-current `Ready` to one exact `PublicationPending` successor before a
+//! future visible `HEAD` CAS. A terminal matcher also specifies the required
+//! `PublicationPending` to exact-current `Ready(n+1)` advance, but cannot mint a
+//! fresh guard. The module can publish the exact immutable predecessor-HEAD
+//! archive. A separately namespaced journal draft exercises bounded artifact
+//! mechanics but cannot become authoritative recovery evidence or enter a
+//! publishing fence. This module still cannot mint authority, write a live
+//! `HEAD`, mutate the namespace, produce a plan digest, or authorize an action.
 
 use std::num::NonZeroU64;
 
@@ -46,6 +49,10 @@ const MUTATION_JOURNAL_OBJECT_DOMAIN_V1: &str =
     "tinyland.tcfs.remote-catalog-mutation-journal-object.b3v1";
 const UNTRUSTED_MUTATION_JOURNAL_DRAFT_OBJECT_DOMAIN_V1: &str =
     "tinyland.tcfs.remote-catalog-mutation-journal-draft-object.b3v1";
+const PUBLISHING_HEAD_RESERVATION_DOMAIN_V1: &str =
+    "tinyland.tcfs.remote-catalog-publishing-head-reservation.b3v1";
+const PREDECESSOR_HEAD_STORAGE_BINDING_DOMAIN_V1: &str =
+    "tinyland.tcfs.remote-catalog-predecessor-head-storage-binding.b3v1";
 const ARCHIVED_HEAD_OBJECT_SUFFIX_V1: &str = ".tcfs-catalog/v1/publications/archived-heads";
 const MUTATION_JOURNAL_OBJECT_SUFFIX_V1: &str = ".tcfs-catalog/v1/publications/mutation-journals";
 const UNTRUSTED_MUTATION_JOURNAL_DRAFT_OBJECT_SUFFIX_V1: &str =
@@ -162,6 +169,9 @@ pub(crate) enum CatalogPublicationContractErrorV1 {
     WriterFenceMismatch,
     StorageAuthorityMismatch,
     ControlAuthorityMismatch,
+    ControlTransitionMismatch,
+    PublishingHeadTooLarge,
+    HighWaterAdvanceMismatch,
     PredecessorArchiveMismatch,
     MutationJournalMismatch,
     InvalidMutationJournal(InvalidCatalogMutationJournalReasonV1),
@@ -211,17 +221,60 @@ pub(crate) struct TrustedCatalogStorageAuthorityV1<'a> {
 
 /// External attestation that sequence one was built from complete truth while
 /// every legacy/out-of-tree writer was quiesced under its bootstrap credential
-/// epoch. Later publications may use a rotated current epoch.
+/// epoch. V1 does not model credential-epoch rotation.
 ///
 /// There is intentionally no production constructor in this checkpoint.
 pub(crate) struct TrustedCatalogBootstrapReceiptV1 {
     context: CatalogAuthorityContextV1,
-    bootstrap_head_revision: [u8; 32],
-    bootstrap_publication_nonce: [u8; 32],
-    complete_corpus_attestation: [u8; 32],
-    bootstrap_writer_epoch: [u8; 32],
+    bootstrap: CatalogBootstrapIdentityV1,
     storage_authority_fingerprint: [u8; 32],
     control_authority_fingerprint: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CatalogBootstrapIdentityV1 {
+    head_revision: [u8; 32],
+    publication_nonce: [u8; 32],
+    complete_corpus_attestation: [u8; 32],
+    writer_epoch: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CatalogHighWaterPointV1 {
+    sequence: NonZeroU64,
+    head_revision: [u8; 32],
+    publication_nonce: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CatalogControlAuthorityRevisionV1 {
+    generation: NonZeroU64,
+    /// Preselected non-secret logical state identifier. This is neither a
+    /// backend-generated ETag nor the content fingerprint of the record that
+    /// embeds it; the latter is computed separately after canonical encoding.
+    fingerprint: [u8; 32],
+}
+
+/// A non-secret identifier suitable for logs and serialized recovery state.
+/// Bearer lease material, renewal credentials, and signing keys must never be
+/// stored in this value or in any catalog object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NonSecretLeasePublicFingerprintV1([u8; 32]);
+
+/// Exact `Ready` state held by one exclusive external control acquisition.
+///
+/// V1 deliberately freezes the writer epoch to the bootstrap epoch. A future
+/// credential rotation must be its own monotonic, revocation-backed protocol;
+/// copied current-epoch fields are not continuity evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CatalogControlAcquisitionBindingV1 {
+    context: CatalogAuthorityContextV1,
+    bootstrap: CatalogBootstrapIdentityV1,
+    current: CatalogHighWaterPointV1,
+    storage_authority_fingerprint: [u8; 32],
+    control_authority_fingerprint: [u8; 32],
+    ready_revision: CatalogControlAuthorityRevisionV1,
+    lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
 }
 
 /// Exclusive external exact-current guard anchored to one trusted bootstrap.
@@ -236,18 +289,7 @@ pub(crate) struct TrustedCatalogBootstrapReceiptV1 {
 /// release; retaining this non-cloneable value alone is not a production
 /// liveness proof.
 pub(crate) struct TrustedCatalogHighWaterGuardV1 {
-    context: CatalogAuthorityContextV1,
-    bootstrap_head_revision: [u8; 32],
-    bootstrap_publication_nonce: [u8; 32],
-    complete_corpus_attestation: [u8; 32],
-    current_writer_epoch: [u8; 32],
-    current_sequence: NonZeroU64,
-    current_head_revision: [u8; 32],
-    current_publication_nonce: [u8; 32],
-    storage_authority_fingerprint: [u8; 32],
-    authority_revision: [u8; 32],
-    lease_nonce: [u8; 32],
-    control_authority_fingerprint: [u8; 32],
+    binding: CatalogControlAcquisitionBindingV1,
 }
 
 /// External proof that every credential and code path able to mutate the
@@ -259,21 +301,26 @@ pub(crate) struct TrustedCatalogHighWaterGuardV1 {
 /// HEAD CAS, every namespace mutation, committed-HEAD finalization, and
 /// high-water advancement.
 pub(crate) struct AllNamespaceWritersFencedLeaseV1 {
-    context: CatalogAuthorityContextV1,
-    bootstrap_head_revision: [u8; 32],
-    current_writer_epoch: [u8; 32],
-    authority_revision: [u8; 32],
-    lease_nonce: [u8; 32],
-    storage_authority_fingerprint: [u8; 32],
-    control_authority_fingerprint: [u8; 32],
+    control_binding: CatalogControlAcquisitionBindingV1,
+    authority_revision_fingerprint: [u8; 32],
+    lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
+}
+
+/// One held external control acquisition. High-water and all-writer fencing
+/// are inseparable views of this capability; callers cannot submit two
+/// independently acquired field bags to the publication matcher.
+///
+/// There is intentionally no production constructor in this checkpoint.
+pub(crate) struct HeldReadyCatalogControlGuardV1 {
+    high_water: TrustedCatalogHighWaterGuardV1,
+    all_writers: AllNamespaceWritersFencedLeaseV1,
 }
 
 /// Exact receipt match for one observed predecessor. This still is not remote
 /// completeness authority and has no planner/action conversion.
 pub(crate) struct MatchedCatalogPublicationPrerequisitesV1<'a> {
     storage_authority: TrustedCatalogStorageAuthorityV1<'a>,
-    high_water_guard: TrustedCatalogHighWaterGuardV1,
-    writer_fence_lease: AllNamespaceWritersFencedLeaseV1,
+    control_guard: HeldReadyCatalogControlGuardV1,
     context: CatalogAuthorityContextV1,
     sequence: NonZeroU64,
     publication_nonce: [u8; 32],
@@ -299,9 +346,10 @@ pub(crate) fn match_catalog_publication_prerequisites_v1<'a>(
     storage_authority: TrustedCatalogStorageAuthorityV1<'a>,
     observed: &ObservedPublishedCatalogHeadV1,
     bootstrap: &TrustedCatalogBootstrapReceiptV1,
-    high_water: TrustedCatalogHighWaterGuardV1,
-    writers: AllNamespaceWritersFencedLeaseV1,
+    control: HeldReadyCatalogControlGuardV1,
 ) -> Result<MatchedCatalogPublicationPrerequisitesV1<'a>, CatalogPublicationContractErrorV1> {
+    let high_water = &control.high_water;
+    let writers = &control.all_writers;
     if !storage_authority
         .conditional_write_receipt
         .authorizes(storage_authority.operator, &observed.context.remote_prefix)
@@ -309,10 +357,10 @@ pub(crate) fn match_catalog_publication_prerequisites_v1<'a>(
     {
         return Err(CatalogPublicationContractErrorV1::StorageSemanticsUnverified);
     }
-    let bootstrap_fields_nonzero = bootstrap.bootstrap_head_revision != [0; 32]
-        && bootstrap.bootstrap_publication_nonce != [0; 32]
-        && bootstrap.complete_corpus_attestation != [0; 32]
-        && bootstrap.bootstrap_writer_epoch != [0; 32]
+    let bootstrap_fields_nonzero = bootstrap.bootstrap.head_revision != [0; 32]
+        && bootstrap.bootstrap.publication_nonce != [0; 32]
+        && bootstrap.bootstrap.complete_corpus_attestation != [0; 32]
+        && bootstrap.bootstrap.writer_epoch != [0; 32]
         && bootstrap.storage_authority_fingerprint != [0; 32]
         && bootstrap.control_authority_fingerprint != [0; 32]
         && storage_authority.authority_fingerprint != [0; 32];
@@ -323,54 +371,51 @@ pub(crate) fn match_catalog_publication_prerequisites_v1<'a>(
         return Err(CatalogPublicationContractErrorV1::BootstrapMismatch);
     }
     if bootstrap.storage_authority_fingerprint != storage_authority.authority_fingerprint
-        || high_water.storage_authority_fingerprint != storage_authority.authority_fingerprint
-        || writers.storage_authority_fingerprint != storage_authority.authority_fingerprint
+        || high_water.binding.storage_authority_fingerprint
+            != storage_authority.authority_fingerprint
+        || writers.control_binding.storage_authority_fingerprint
+            != storage_authority.authority_fingerprint
     {
         return Err(CatalogPublicationContractErrorV1::StorageAuthorityMismatch);
     }
-    if high_water.control_authority_fingerprint != bootstrap.control_authority_fingerprint
-        || writers.control_authority_fingerprint != bootstrap.control_authority_fingerprint
+    if high_water.binding.control_authority_fingerprint != bootstrap.control_authority_fingerprint
+        || writers.control_binding.control_authority_fingerprint
+            != bootstrap.control_authority_fingerprint
     {
         return Err(CatalogPublicationContractErrorV1::ControlAuthorityMismatch);
     }
-    if high_water.context != observed.context
-        || high_water.bootstrap_head_revision != bootstrap.bootstrap_head_revision
-        || high_water.bootstrap_publication_nonce != bootstrap.bootstrap_publication_nonce
-        || high_water.complete_corpus_attestation != bootstrap.complete_corpus_attestation
-        || high_water.current_writer_epoch == [0; 32]
-        || high_water.current_sequence != observed.sequence
-        || high_water.current_head_revision != observed.head_revision
-        || high_water.current_publication_nonce != observed.publication_nonce
-        || high_water.authority_revision == [0; 32]
-        || high_water.lease_nonce == [0; 32]
+    if high_water.binding.context != observed.context
+        || high_water.binding.bootstrap != bootstrap.bootstrap
+        || high_water.binding.current.sequence != observed.sequence
+        || high_water.binding.current.head_revision != observed.head_revision
+        || high_water.binding.current.publication_nonce != observed.publication_nonce
+        || high_water.binding.ready_revision.fingerprint == [0; 32]
+        || high_water.binding.lease_public_fingerprint.0 == [0; 32]
     {
         return Err(CatalogPublicationContractErrorV1::HighWaterMismatch);
     }
-    if writers.context != observed.context
-        || writers.bootstrap_head_revision != bootstrap.bootstrap_head_revision
-        || writers.current_writer_epoch != high_water.current_writer_epoch
-        || writers.authority_revision == [0; 32]
-        || writers.lease_nonce == [0; 32]
+    if writers.control_binding != high_water.binding
+        || writers.authority_revision_fingerprint == [0; 32]
+        || writers.lease_public_fingerprint.0 == [0; 32]
     {
         return Err(CatalogPublicationContractErrorV1::WriterFenceMismatch);
     }
     if observed.sequence.get() == 1
-        && (bootstrap.bootstrap_head_revision != observed.head_revision
-            || bootstrap.bootstrap_publication_nonce != observed.publication_nonce)
+        && (bootstrap.bootstrap.head_revision != observed.head_revision
+            || bootstrap.bootstrap.publication_nonce != observed.publication_nonce)
     {
         return Err(CatalogPublicationContractErrorV1::BootstrapMismatch);
     }
     Ok(MatchedCatalogPublicationPrerequisitesV1 {
         storage_authority,
-        high_water_guard: high_water,
-        writer_fence_lease: writers,
+        control_guard: control,
         context: observed.context.clone(),
         sequence: observed.sequence,
         publication_nonce: observed.publication_nonce,
         head_revision: observed.head_revision,
         committed_head_bytes: observed.committed_head_bytes.clone(),
         current_head_etag: observed.current_head_etag.clone(),
-        bootstrap_head_revision: bootstrap.bootstrap_head_revision,
+        bootstrap_head_revision: bootstrap.bootstrap.head_revision,
     })
 }
 
@@ -1182,8 +1227,7 @@ struct CatalogSuccessorClaimV1 {
 /// with the canonical publishing wire. This type cannot itself mutate storage.
 pub(crate) struct PreparedCatalogPublicationFenceV1<'a> {
     storage_authority: TrustedCatalogStorageAuthorityV1<'a>,
-    high_water_guard: TrustedCatalogHighWaterGuardV1,
-    writer_fence_lease: AllNamespaceWritersFencedLeaseV1,
+    control_guard: HeldReadyCatalogControlGuardV1,
     context: CatalogAuthorityContextV1,
     sequence: NonZeroU64,
     publication_nonce: [u8; 32],
@@ -1275,8 +1319,7 @@ fn validate_catalog_successor_claim_v1<'a>(
     }
     Ok(PreparedCatalogPublicationFenceV1 {
         storage_authority: prerequisites.storage_authority,
-        high_water_guard: prerequisites.high_water_guard,
-        writer_fence_lease: prerequisites.writer_fence_lease,
+        control_guard: prerequisites.control_guard,
         context: prerequisites.context,
         sequence: NonZeroU64::new(expected_sequence)
             .expect("checked nonzero successor of a nonzero sequence"),
@@ -1311,6 +1354,106 @@ pub(crate) fn prepare_catalog_publication_fence_v1<'a>(
     validate_catalog_successor_claim_v1(prerequisites, claim, predecessor_archive, mutation_journal)
 }
 
+/// Untrusted proposal for the exact `Ready -> PublicationPending` control CAS.
+/// It still carries no authority to write either control state or catalog
+/// `HEAD`.
+pub(crate) struct PreparedCatalogControlTransitionV1<'a> {
+    publication: PreparedCatalogPublicationFenceV1<'a>,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    canonical_publishing_head_bytes: Vec<u8>,
+    publishing_head_reservation_fingerprint: [u8; 32],
+    canonical_pending_control_record_bytes: Vec<u8>,
+    pending_control_record_fingerprint: [u8; 32],
+}
+
+/// Opaque external receipt proving that the exact predecessor `Ready` record
+/// was atomically replaced by the exact `PublicationPending` proposal.
+///
+/// There is intentionally no production constructor in this checkpoint.
+pub(crate) struct TrustedCatalogPublicationPendingReceiptV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    publishing_head_reservation_fingerprint: [u8; 32],
+    pending_control_record_fingerprint: [u8; 32],
+}
+
+/// The only future input permitted to arm a visible publishing-HEAD CAS. This
+/// checkpoint cannot construct one in production and cannot write `HEAD`.
+pub(crate) struct BoundPendingCatalogControlV1<'a> {
+    transition: PreparedCatalogControlTransitionV1<'a>,
+    pending_receipt: TrustedCatalogPublicationPendingReceiptV1,
+}
+
+impl std::fmt::Debug for BoundPendingCatalogControlV1<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BoundPendingCatalogControlV1")
+            .field(
+                "remote_prefix",
+                &self.transition.publication.context.remote_prefix,
+            )
+            .field("sequence", &self.transition.publication.sequence)
+            .field(
+                "control_generation",
+                &self.transition.pending_revision.generation,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opaque future proof that the exact reserved successor became the canonical
+/// committed `HEAD`. No production constructor exists until visible fencing,
+/// fact-bound mutation, and committed-HEAD finalization are implemented.
+pub(crate) struct BoundCommittedCatalogSuccessorV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    publishing_head_reservation_fingerprint: [u8; 32],
+    pending_control_record_fingerprint: [u8; 32],
+    context: CatalogAuthorityContextV1,
+    sequence: NonZeroU64,
+    publication_nonce: [u8; 32],
+    parent_head_revision: [u8; 32],
+    head_revision: [u8; 32],
+    committed_head_bytes: Vec<u8>,
+}
+
+/// Opaque receipt for the external `PublicationPending -> Ready(n+1)` CAS.
+/// It binds the exact committed successor and a strictly later control record.
+/// There is intentionally no production constructor in this checkpoint.
+pub(crate) struct TrustedCatalogHighWaterAdvanceReceiptV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    publishing_head_reservation_fingerprint: [u8; 32],
+    pending_control_record_fingerprint: [u8; 32],
+    successor: CatalogHighWaterPointV1,
+    ready_revision: CatalogControlAuthorityRevisionV1,
+    ready_control_record_fingerprint: [u8; 32],
+}
+
+/// Terminal proof that one exact successor advanced the monotonic high-water.
+/// It intentionally cannot be converted back into a reusable guard; the next
+/// publication must acquire a fresh exact-current external control guard.
+pub(crate) struct AdvancedCatalogHighWaterV1 {
+    context: CatalogAuthorityContextV1,
+    bootstrap: CatalogBootstrapIdentityV1,
+    successor: CatalogHighWaterPointV1,
+    storage_authority_fingerprint: [u8; 32],
+    control_authority_fingerprint: [u8; 32],
+    ready_revision: CatalogControlAuthorityRevisionV1,
+    ready_control_record_fingerprint: [u8; 32],
+}
+
+impl std::fmt::Debug for AdvancedCatalogHighWaterV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdvancedCatalogHighWaterV1")
+            .field("remote_prefix", &self.context.remote_prefix)
+            .field("sequence", &self.successor.sequence)
+            .field("control_generation", &self.ready_revision.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum RemoteCatalogPublishingStateWireV1 {
@@ -1323,6 +1466,81 @@ struct RemoteCatalogPublicationObjectReferenceWireV1 {
     object_id: String,
     raw_bytes_len: u64,
     binding: RemoteCatalogObjectBindingWireV1,
+}
+
+const CATALOG_CONTROL_RECORD_SCHEMA_VERSION_V1: u32 = 1;
+const CATALOG_CONTROL_CONTRACT_DOMAIN_V1: &str =
+    "tinyland.tcfs.remote-catalog-control-contract.b3v1";
+const CATALOG_CONTROL_RECORD_DOMAIN_V1: &str = "tinyland.tcfs.remote-catalog-control-record.b3v1";
+
+fn catalog_control_contract_fingerprint_v1() -> [u8; 32] {
+    super::domain_object_id_v1(
+        CATALOG_CONTROL_CONTRACT_DOMAIN_V1,
+        b"ready-exact-current->publication-pending-exact-successor->ready-exact-current-v1",
+    )
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogControlBootstrapWireV1 {
+    head_revision: String,
+    publication_nonce: String,
+    complete_corpus_attestation: String,
+    writer_epoch: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogControlHeadPointWireV1 {
+    catalog_sequence: u64,
+    head_revision: String,
+    publication_nonce: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogControlPendingStateWireV1 {
+    ready_control_generation: u64,
+    ready_control_revision_fingerprint: String,
+    parent: CatalogControlHeadPointWireV1,
+    successor_catalog_sequence: u64,
+    successor_publication_nonce: String,
+    publishing_head_reservation_fingerprint: String,
+    predecessor_head_storage_binding_fingerprint: String,
+    predecessor_head_archive: RemoteCatalogPublicationObjectReferenceWireV1,
+    mutation_journal: RemoteCatalogPublicationObjectReferenceWireV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+enum CatalogControlStateWireV1 {
+    Ready {
+        current: CatalogControlHeadPointWireV1,
+    },
+    PublicationPending {
+        pending: Box<CatalogControlPendingStateWireV1>,
+    },
+}
+
+/// Canonical external control-record representation. Parsing this wire never
+/// creates a trusted guard: only a future authenticated control backend may do
+/// that. The serialized lease value is explicitly a non-secret correlation
+/// fingerprint, never bearer authority.
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogControlRecordWireV1 {
+    version: u32,
+    remote_prefix: String,
+    context: RemoteCatalogContextWireV1,
+    control_contract_fingerprint: String,
+    control_authority_fingerprint: String,
+    storage_authority_fingerprint: String,
+    control_generation: u64,
+    control_revision_fingerprint: String,
+    lease_public_fingerprint: String,
+    bootstrap: CatalogControlBootstrapWireV1,
+    writer_epoch: String,
+    control_state: CatalogControlStateWireV1,
 }
 
 /// Visible root-wide fence installed before the first catalog-corpus write.
@@ -1339,16 +1557,25 @@ struct RemoteCatalogPublishingHeadWireV1 {
     storage_authority_fingerprint: String,
     control_authority_fingerprint: String,
     writer_epoch: String,
-    high_water_authority_revision: String,
-    high_water_lease_nonce: String,
-    writer_fence_authority_revision: String,
-    writer_fence_lease_nonce: String,
+    control_ready_generation: u64,
+    control_ready_revision_fingerprint: String,
+    control_pending_generation: u64,
+    control_pending_revision_fingerprint: String,
+    control_lease_public_fingerprint: String,
+    writer_fence_authority_revision_fingerprint: String,
+    writer_fence_lease_public_fingerprint: String,
+    predecessor_head_storage_binding_fingerprint: String,
     predecessor_head_archive: RemoteCatalogPublicationObjectReferenceWireV1,
     mutation_journal: RemoteCatalogPublicationObjectReferenceWireV1,
 }
 
+fn predecessor_head_storage_binding_fingerprint_v1(etag: &str) -> [u8; 32] {
+    super::domain_object_id_v1(PREDECESSOR_HEAD_STORAGE_BINDING_DOMAIN_V1, etag.as_bytes())
+}
+
 fn canonical_publishing_head_bytes_v1(
     successor: &PreparedCatalogPublicationFenceV1<'_>,
+    pending_revision: CatalogControlAuthorityRevisionV1,
 ) -> Vec<u8> {
     debug_assert!(
         successor
@@ -1373,15 +1600,61 @@ fn canonical_publishing_head_bytes_v1(
             &successor.storage_authority.authority_fingerprint,
         ),
         control_authority_fingerprint: lower_hex(
-            &successor.writer_fence_lease.control_authority_fingerprint,
+            &successor
+                .control_guard
+                .all_writers
+                .control_binding
+                .control_authority_fingerprint,
         ),
-        writer_epoch: lower_hex(&successor.writer_fence_lease.current_writer_epoch),
-        high_water_authority_revision: lower_hex(&successor.high_water_guard.authority_revision),
-        high_water_lease_nonce: lower_hex(&successor.high_water_guard.lease_nonce),
-        writer_fence_authority_revision: lower_hex(
-            &successor.writer_fence_lease.authority_revision,
+        writer_epoch: lower_hex(
+            &successor
+                .control_guard
+                .all_writers
+                .control_binding
+                .bootstrap
+                .writer_epoch,
         ),
-        writer_fence_lease_nonce: lower_hex(&successor.writer_fence_lease.lease_nonce),
+        control_ready_generation: successor
+            .control_guard
+            .high_water
+            .binding
+            .ready_revision
+            .generation
+            .get(),
+        control_ready_revision_fingerprint: lower_hex(
+            &successor
+                .control_guard
+                .high_water
+                .binding
+                .ready_revision
+                .fingerprint,
+        ),
+        control_pending_generation: pending_revision.generation.get(),
+        control_pending_revision_fingerprint: lower_hex(&pending_revision.fingerprint),
+        control_lease_public_fingerprint: lower_hex(
+            &successor
+                .control_guard
+                .high_water
+                .binding
+                .lease_public_fingerprint
+                .0,
+        ),
+        writer_fence_authority_revision_fingerprint: lower_hex(
+            &successor
+                .control_guard
+                .all_writers
+                .authority_revision_fingerprint,
+        ),
+        writer_fence_lease_public_fingerprint: lower_hex(
+            &successor
+                .control_guard
+                .all_writers
+                .lease_public_fingerprint
+                .0,
+        ),
+        predecessor_head_storage_binding_fingerprint: lower_hex(
+            &predecessor_head_storage_binding_fingerprint_v1(&successor.expected_parent_head_etag),
+        ),
         predecessor_head_archive: RemoteCatalogPublicationObjectReferenceWireV1 {
             object_id: lower_hex(&successor.predecessor_archive.object_id),
             raw_bytes_len: successor.predecessor_archive.raw_bytes_len.get(),
@@ -1394,6 +1667,337 @@ fn canonical_publishing_head_bytes_v1(
         },
     })
     .expect("catalog publishing wire is infallibly serializable")
+}
+
+fn control_bootstrap_wire_v1(
+    bootstrap: &CatalogBootstrapIdentityV1,
+) -> CatalogControlBootstrapWireV1 {
+    CatalogControlBootstrapWireV1 {
+        head_revision: lower_hex(&bootstrap.head_revision),
+        publication_nonce: lower_hex(&bootstrap.publication_nonce),
+        complete_corpus_attestation: lower_hex(&bootstrap.complete_corpus_attestation),
+        writer_epoch: lower_hex(&bootstrap.writer_epoch),
+    }
+}
+
+fn control_head_point_wire_v1(point: CatalogHighWaterPointV1) -> CatalogControlHeadPointWireV1 {
+    CatalogControlHeadPointWireV1 {
+        catalog_sequence: point.sequence.get(),
+        head_revision: lower_hex(&point.head_revision),
+        publication_nonce: lower_hex(&point.publication_nonce),
+    }
+}
+
+fn publication_reference_wire_v1(
+    object_id: &[u8; 32],
+    raw_bytes_len: NonZeroU64,
+    binding: &RegisteredRootRemoteObjectBindingV1,
+) -> RemoteCatalogPublicationObjectReferenceWireV1 {
+    RemoteCatalogPublicationObjectReferenceWireV1 {
+        object_id: lower_hex(object_id),
+        raw_bytes_len: raw_bytes_len.get(),
+        binding: binding_wire_v1(binding),
+    }
+}
+
+fn canonical_pending_control_record_bytes_v1(
+    publication: &PreparedCatalogPublicationFenceV1<'_>,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    publishing_head_reservation_fingerprint: [u8; 32],
+) -> Vec<u8> {
+    let binding = &publication.control_guard.high_water.binding;
+    serde_json::to_vec(&CatalogControlRecordWireV1 {
+        version: CATALOG_CONTROL_RECORD_SCHEMA_VERSION_V1,
+        remote_prefix: binding.context.remote_prefix.clone(),
+        context: binding.context.to_wire(),
+        control_contract_fingerprint: lower_hex(&catalog_control_contract_fingerprint_v1()),
+        control_authority_fingerprint: lower_hex(&binding.control_authority_fingerprint),
+        storage_authority_fingerprint: lower_hex(&binding.storage_authority_fingerprint),
+        control_generation: pending_revision.generation.get(),
+        control_revision_fingerprint: lower_hex(&pending_revision.fingerprint),
+        lease_public_fingerprint: lower_hex(&binding.lease_public_fingerprint.0),
+        bootstrap: control_bootstrap_wire_v1(&binding.bootstrap),
+        writer_epoch: lower_hex(&binding.bootstrap.writer_epoch),
+        control_state: CatalogControlStateWireV1::PublicationPending {
+            pending: Box::new(CatalogControlPendingStateWireV1 {
+                ready_control_generation: binding.ready_revision.generation.get(),
+                ready_control_revision_fingerprint: lower_hex(&binding.ready_revision.fingerprint),
+                parent: control_head_point_wire_v1(binding.current),
+                successor_catalog_sequence: publication.sequence.get(),
+                successor_publication_nonce: lower_hex(&publication.publication_nonce),
+                publishing_head_reservation_fingerprint: lower_hex(
+                    &publishing_head_reservation_fingerprint,
+                ),
+                predecessor_head_storage_binding_fingerprint: lower_hex(
+                    &predecessor_head_storage_binding_fingerprint_v1(
+                        &publication.expected_parent_head_etag,
+                    ),
+                ),
+                predecessor_head_archive: publication_reference_wire_v1(
+                    &publication.predecessor_archive.object_id,
+                    publication.predecessor_archive.raw_bytes_len,
+                    &publication.predecessor_archive.binding,
+                ),
+                mutation_journal: publication_reference_wire_v1(
+                    &publication.mutation_journal.object_id,
+                    publication.mutation_journal.raw_bytes_len,
+                    &publication.mutation_journal.binding,
+                ),
+            }),
+        },
+    })
+    .expect("catalog control wire is infallibly serializable")
+}
+
+fn canonical_ready_control_record_bytes_v1(
+    committed: &BoundCommittedCatalogSuccessorV1,
+    ready_revision: CatalogControlAuthorityRevisionV1,
+) -> Vec<u8> {
+    let binding = &committed.control_binding;
+    serde_json::to_vec(&CatalogControlRecordWireV1 {
+        version: CATALOG_CONTROL_RECORD_SCHEMA_VERSION_V1,
+        remote_prefix: binding.context.remote_prefix.clone(),
+        context: binding.context.to_wire(),
+        control_contract_fingerprint: lower_hex(&catalog_control_contract_fingerprint_v1()),
+        control_authority_fingerprint: lower_hex(&binding.control_authority_fingerprint),
+        storage_authority_fingerprint: lower_hex(&binding.storage_authority_fingerprint),
+        control_generation: ready_revision.generation.get(),
+        control_revision_fingerprint: lower_hex(&ready_revision.fingerprint),
+        lease_public_fingerprint: lower_hex(&binding.lease_public_fingerprint.0),
+        bootstrap: control_bootstrap_wire_v1(&binding.bootstrap),
+        writer_epoch: lower_hex(&binding.bootstrap.writer_epoch),
+        control_state: CatalogControlStateWireV1::Ready {
+            current: control_head_point_wire_v1(CatalogHighWaterPointV1 {
+                sequence: committed.sequence,
+                head_revision: committed.head_revision,
+                publication_nonce: committed.publication_nonce,
+            }),
+        },
+    })
+    .expect("catalog control wire is infallibly serializable")
+}
+
+/// Prepare the exact external control transition without acquiring authority.
+/// The future backend must CAS the authenticated predecessor `Ready` bytes to
+/// these exact `PublicationPending` bytes before any catalog `HEAD` write.
+pub(crate) fn prepare_catalog_control_transition_v1<'a>(
+    publication: PreparedCatalogPublicationFenceV1<'a>,
+    pending_revision_fingerprint: [u8; 32],
+) -> Result<PreparedCatalogControlTransitionV1<'a>, CatalogPublicationContractErrorV1> {
+    let expected_successor_sequence = publication
+        .control_guard
+        .high_water
+        .binding
+        .current
+        .sequence
+        .get()
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .ok_or(CatalogPublicationContractErrorV1::SequenceOverflow)?;
+    if publication.control_guard.all_writers.control_binding
+        != publication.control_guard.high_water.binding
+        || publication.sequence != expected_successor_sequence
+        || publication.parent_head_revision
+            != publication
+                .control_guard
+                .high_water
+                .binding
+                .current
+                .head_revision
+        || publication.publication_nonce == [0; 32]
+        || publication.publication_nonce
+            == publication
+                .control_guard
+                .high_water
+                .binding
+                .current
+                .publication_nonce
+        || publication.bootstrap_head_revision
+            != publication
+                .control_guard
+                .high_water
+                .binding
+                .bootstrap
+                .head_revision
+        || pending_revision_fingerprint == [0; 32]
+        || pending_revision_fingerprint
+            == publication
+                .control_guard
+                .high_water
+                .binding
+                .ready_revision
+                .fingerprint
+    {
+        return Err(CatalogPublicationContractErrorV1::ControlTransitionMismatch);
+    }
+    let pending_generation = publication
+        .control_guard
+        .high_water
+        .binding
+        .ready_revision
+        .generation
+        .get()
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .ok_or(CatalogPublicationContractErrorV1::SequenceOverflow)?;
+    let pending_revision = CatalogControlAuthorityRevisionV1 {
+        generation: pending_generation,
+        fingerprint: pending_revision_fingerprint,
+    };
+    let canonical_publishing_head_bytes =
+        canonical_publishing_head_bytes_v1(&publication, pending_revision);
+    let publishing_head_bytes_len = u64::try_from(canonical_publishing_head_bytes.len())
+        .map_err(|_| CatalogPublicationContractErrorV1::PublishingHeadTooLarge)?;
+    if publishing_head_bytes_len
+        > RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_catalog_head_object_bytes()
+    {
+        return Err(CatalogPublicationContractErrorV1::PublishingHeadTooLarge);
+    }
+    let publishing_head_reservation_fingerprint = super::domain_object_id_v1(
+        PUBLISHING_HEAD_RESERVATION_DOMAIN_V1,
+        &canonical_publishing_head_bytes,
+    );
+    let canonical_pending_control_record_bytes = canonical_pending_control_record_bytes_v1(
+        &publication,
+        pending_revision,
+        publishing_head_reservation_fingerprint,
+    );
+    let pending_control_record_fingerprint = super::domain_object_id_v1(
+        CATALOG_CONTROL_RECORD_DOMAIN_V1,
+        &canonical_pending_control_record_bytes,
+    );
+    Ok(PreparedCatalogControlTransitionV1 {
+        publication,
+        pending_revision,
+        canonical_publishing_head_bytes,
+        publishing_head_reservation_fingerprint,
+        canonical_pending_control_record_bytes,
+        pending_control_record_fingerprint,
+    })
+}
+
+/// Bind an externally authenticated `Ready -> PublicationPending` CAS receipt
+/// to the exact proposed successor. Field equality is necessary but not a
+/// production liveness proof; only the future backend may construct `receipt`.
+pub(crate) fn match_catalog_publication_pending_receipt_v1<'a>(
+    transition: PreparedCatalogControlTransitionV1<'a>,
+    receipt: TrustedCatalogPublicationPendingReceiptV1,
+) -> Result<BoundPendingCatalogControlV1<'a>, CatalogPublicationContractErrorV1> {
+    let binding = &transition.publication.control_guard.high_water.binding;
+    let expected_publishing_bytes =
+        canonical_publishing_head_bytes_v1(&transition.publication, transition.pending_revision);
+    let publishing_fingerprint = super::domain_object_id_v1(
+        PUBLISHING_HEAD_RESERVATION_DOMAIN_V1,
+        &expected_publishing_bytes,
+    );
+    let expected_control_bytes = canonical_pending_control_record_bytes_v1(
+        &transition.publication,
+        transition.pending_revision,
+        publishing_fingerprint,
+    );
+    let control_fingerprint =
+        super::domain_object_id_v1(CATALOG_CONTROL_RECORD_DOMAIN_V1, &expected_control_bytes);
+    if receipt.control_binding != *binding
+        || receipt.pending_revision != transition.pending_revision
+        || receipt.publishing_head_reservation_fingerprint
+            != transition.publishing_head_reservation_fingerprint
+        || receipt.pending_control_record_fingerprint
+            != transition.pending_control_record_fingerprint
+        || transition.canonical_publishing_head_bytes != expected_publishing_bytes
+        || transition.canonical_pending_control_record_bytes != expected_control_bytes
+        || publishing_fingerprint != transition.publishing_head_reservation_fingerprint
+        || control_fingerprint != transition.pending_control_record_fingerprint
+    {
+        return Err(CatalogPublicationContractErrorV1::ControlTransitionMismatch);
+    }
+    Ok(BoundPendingCatalogControlV1 {
+        transition,
+        pending_receipt: receipt,
+    })
+}
+
+/// Bind an exact committed successor to the external monotonic
+/// `PublicationPending -> Ready(n+1)` advance. This returns terminal evidence,
+/// never a reusable exact-current guard or action capability.
+pub(crate) fn match_catalog_high_water_advance_v1(
+    committed: BoundCommittedCatalogSuccessorV1,
+    receipt: TrustedCatalogHighWaterAdvanceReceiptV1,
+) -> Result<AdvancedCatalogHighWaterV1, CatalogPublicationContractErrorV1> {
+    let expected_pending_generation = committed
+        .control_binding
+        .ready_revision
+        .generation
+        .get()
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .ok_or(CatalogPublicationContractErrorV1::SequenceOverflow)?;
+    let expected_successor_sequence = committed
+        .control_binding
+        .current
+        .sequence
+        .get()
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .ok_or(CatalogPublicationContractErrorV1::SequenceOverflow)?;
+    let expected_ready_generation = committed
+        .pending_revision
+        .generation
+        .get()
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .ok_or(CatalogPublicationContractErrorV1::SequenceOverflow)?;
+    let exact_successor = CatalogHighWaterPointV1 {
+        sequence: committed.sequence,
+        head_revision: committed.head_revision,
+        publication_nonce: committed.publication_nonce,
+    };
+    let committed_revision = super::catalog_head_revision_v1(&committed.committed_head_bytes);
+    let ready_bytes = canonical_ready_control_record_bytes_v1(&committed, receipt.ready_revision);
+    let ready_record_fingerprint =
+        super::domain_object_id_v1(CATALOG_CONTROL_RECORD_DOMAIN_V1, &ready_bytes);
+    if committed.context != committed.control_binding.context
+        || committed.pending_revision.generation != expected_pending_generation
+        || committed.pending_revision.fingerprint == [0; 32]
+        || committed.pending_revision.fingerprint
+            == committed.control_binding.ready_revision.fingerprint
+        || committed.publishing_head_reservation_fingerprint == [0; 32]
+        || committed.pending_control_record_fingerprint == [0; 32]
+        || committed.sequence != expected_successor_sequence
+        || committed.parent_head_revision != committed.control_binding.current.head_revision
+        || committed.publication_nonce == [0; 32]
+        || committed.publication_nonce == committed.control_binding.current.publication_nonce
+        || committed.head_revision == [0; 32]
+        || committed.head_revision == committed.control_binding.current.head_revision
+        || committed_revision != committed.head_revision
+        || receipt.control_binding != committed.control_binding
+        || receipt.pending_revision != committed.pending_revision
+        || receipt.publishing_head_reservation_fingerprint
+            != committed.publishing_head_reservation_fingerprint
+        || receipt.pending_control_record_fingerprint
+            != committed.pending_control_record_fingerprint
+        || receipt.successor != exact_successor
+        || receipt.ready_revision.generation != expected_ready_generation
+        || receipt.ready_revision.fingerprint == [0; 32]
+        || receipt.ready_revision.fingerprint == committed.pending_revision.fingerprint
+        || receipt.ready_revision.fingerprint
+            == committed.control_binding.ready_revision.fingerprint
+        || receipt.ready_control_record_fingerprint == [0; 32]
+        || receipt.ready_control_record_fingerprint == committed.pending_control_record_fingerprint
+        || receipt.ready_control_record_fingerprint != ready_record_fingerprint
+    {
+        return Err(CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch);
+    }
+    Ok(AdvancedCatalogHighWaterV1 {
+        context: committed.control_binding.context,
+        bootstrap: committed.control_binding.bootstrap,
+        successor: exact_successor,
+        storage_authority_fingerprint: committed.control_binding.storage_authority_fingerprint,
+        control_authority_fingerprint: committed.control_binding.control_authority_fingerprint,
+        ready_revision: receipt.ready_revision,
+        ready_control_record_fingerprint: ready_record_fingerprint,
+    })
 }
 
 pub(super) fn classify_publishing_head_v1(
@@ -1421,10 +2025,18 @@ pub(super) fn classify_publishing_head_v1(
         && valid_nonzero_hex(&wire.storage_authority_fingerprint)
         && valid_nonzero_hex(&wire.control_authority_fingerprint)
         && valid_nonzero_hex(&wire.writer_epoch)
-        && valid_nonzero_hex(&wire.high_water_authority_revision)
-        && valid_nonzero_hex(&wire.high_water_lease_nonce)
-        && valid_nonzero_hex(&wire.writer_fence_authority_revision)
-        && valid_nonzero_hex(&wire.writer_fence_lease_nonce)
+        && wire.control_ready_generation > 0
+        && valid_nonzero_hex(&wire.control_ready_revision_fingerprint)
+        && wire
+            .control_ready_generation
+            .checked_add(1)
+            .is_some_and(|next| next == wire.control_pending_generation)
+        && valid_nonzero_hex(&wire.control_pending_revision_fingerprint)
+        && wire.control_pending_revision_fingerprint != wire.control_ready_revision_fingerprint
+        && valid_nonzero_hex(&wire.control_lease_public_fingerprint)
+        && valid_nonzero_hex(&wire.writer_fence_authority_revision_fingerprint)
+        && valid_nonzero_hex(&wire.writer_fence_lease_public_fingerprint)
+        && valid_nonzero_hex(&wire.predecessor_head_storage_binding_fingerprint)
         && valid_nonzero_hex(&wire.predecessor_head_archive.object_id)
         && wire.predecessor_head_archive.raw_bytes_len > 0
         && super::validate_binding_wire_v1(&wire.predecessor_head_archive.binding).is_some()
@@ -1436,6 +2048,88 @@ pub(super) fn classify_publishing_head_v1(
     } else {
         Err(InvalidRemoteCatalogReasonV1::Lineage)
     })
+}
+
+#[cfg(test)]
+fn is_canonical_control_record_v1(
+    raw_bytes: &[u8],
+    selected: &ValidatedSelectedRegisteredRootRemoteContextV1,
+) -> bool {
+    let Ok(raw_bytes_len) = u64::try_from(raw_bytes.len()) else {
+        return false;
+    };
+    if raw_bytes_len
+        > RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_catalog_page_object_bytes()
+    {
+        return false;
+    }
+    let Ok(wire) = serde_json::from_slice::<CatalogControlRecordWireV1>(raw_bytes) else {
+        return false;
+    };
+    if serde_json::to_vec(&wire).ok().as_deref() != Some(raw_bytes)
+        || wire.version != CATALOG_CONTROL_RECORD_SCHEMA_VERSION_V1
+        || wire.remote_prefix != selected.spec().remote_prefix
+        || validate_catalog_context_v1(&wire.context, selected).is_none()
+        || wire.control_contract_fingerprint
+            != lower_hex(&catalog_control_contract_fingerprint_v1())
+        || wire.control_generation == 0
+    {
+        return false;
+    }
+    let nonzero_hex = |value: &str| {
+        super::parse_lower_hex_32(value).is_some_and(|fingerprint| fingerprint != [0; 32])
+    };
+    if !nonzero_hex(&wire.control_authority_fingerprint)
+        || !nonzero_hex(&wire.storage_authority_fingerprint)
+        || !nonzero_hex(&wire.control_revision_fingerprint)
+        || !nonzero_hex(&wire.lease_public_fingerprint)
+        || !nonzero_hex(&wire.bootstrap.head_revision)
+        || !nonzero_hex(&wire.bootstrap.publication_nonce)
+        || !nonzero_hex(&wire.bootstrap.complete_corpus_attestation)
+        || !nonzero_hex(&wire.bootstrap.writer_epoch)
+        || wire.writer_epoch != wire.bootstrap.writer_epoch
+    {
+        return false;
+    }
+    let valid_point = |point: &CatalogControlHeadPointWireV1| {
+        point.catalog_sequence > 0
+            && nonzero_hex(&point.head_revision)
+            && nonzero_hex(&point.publication_nonce)
+            && (point.catalog_sequence != 1
+                || (point.head_revision == wire.bootstrap.head_revision
+                    && point.publication_nonce == wire.bootstrap.publication_nonce))
+    };
+    match &wire.control_state {
+        CatalogControlStateWireV1::Ready { current } => valid_point(current),
+        CatalogControlStateWireV1::PublicationPending { pending } => {
+            let valid_reference = |reference: &RemoteCatalogPublicationObjectReferenceWireV1| {
+                nonzero_hex(&reference.object_id)
+                    && reference.raw_bytes_len > 0
+                    && super::validate_binding_wire_v1(&reference.binding).is_some()
+            };
+            valid_point(&pending.parent)
+                && pending.ready_control_generation > 0
+                && pending
+                    .ready_control_generation
+                    .checked_add(1)
+                    .is_some_and(|next| next == wire.control_generation)
+                && nonzero_hex(&pending.ready_control_revision_fingerprint)
+                && pending.ready_control_revision_fingerprint != wire.control_revision_fingerprint
+                && pending
+                    .parent
+                    .catalog_sequence
+                    .checked_add(1)
+                    .is_some_and(|next| next == pending.successor_catalog_sequence)
+                && nonzero_hex(&pending.successor_publication_nonce)
+                && pending.successor_publication_nonce != pending.parent.publication_nonce
+                && nonzero_hex(&pending.publishing_head_reservation_fingerprint)
+                && nonzero_hex(&pending.predecessor_head_storage_binding_fingerprint)
+                && valid_reference(&pending.predecessor_head_archive)
+                && valid_reference(&pending.mutation_journal)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1461,10 +2155,14 @@ pub(super) fn canonical_publishing_head_bytes_for_test_v1(
         storage_authority_fingerprint: "99".repeat(32),
         control_authority_fingerprint: "9a".repeat(32),
         writer_epoch: "77".repeat(32),
-        high_water_authority_revision: "ab".repeat(32),
-        high_water_lease_nonce: "aa".repeat(32),
-        writer_fence_authority_revision: "89".repeat(32),
-        writer_fence_lease_nonce: "88".repeat(32),
+        control_ready_generation: 7,
+        control_ready_revision_fingerprint: "ab".repeat(32),
+        control_pending_generation: 8,
+        control_pending_revision_fingerprint: "ac".repeat(32),
+        control_lease_public_fingerprint: "aa".repeat(32),
+        writer_fence_authority_revision_fingerprint: "89".repeat(32),
+        writer_fence_lease_public_fingerprint: "88".repeat(32),
+        predecessor_head_storage_binding_fingerprint: "87".repeat(32),
         predecessor_head_archive: RemoteCatalogPublicationObjectReferenceWireV1 {
             object_id: "bb".repeat(32),
             raw_bytes_len: 1,
@@ -1541,6 +2239,31 @@ mod tests {
         Default
     );
     static_assertions::assert_not_impl_any!(
+        HeldReadyCatalogControlGuardV1: Clone,
+        serde::Serialize,
+        Default
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogControlRecordWireV1:
+        Into<TrustedCatalogBootstrapReceiptV1>,
+        Into<HeldReadyCatalogControlGuardV1>,
+        Into<TrustedCatalogHighWaterGuardV1>,
+        Into<AllNamespaceWritersFencedLeaseV1>,
+        Into<TrustedCatalogPublicationPendingReceiptV1>,
+        Into<TrustedCatalogHighWaterAdvanceReceiptV1>,
+        Into<BoundPendingCatalogControlV1<'static>>,
+        Into<BoundCommittedCatalogSuccessorV1>
+    );
+    static_assertions::assert_not_impl_any!(
+        RemoteCatalogPublishingHeadWireV1:
+        Into<TrustedCatalogBootstrapReceiptV1>,
+        Into<HeldReadyCatalogControlGuardV1>,
+        Into<TrustedCatalogPublicationPendingReceiptV1>,
+        Into<TrustedCatalogHighWaterAdvanceReceiptV1>,
+        Into<BoundPendingCatalogControlV1<'static>>,
+        Into<BoundCommittedCatalogSuccessorV1>
+    );
+    static_assertions::assert_not_impl_any!(
         BoundArchivedCatalogHeadV1: Clone,
         serde::Serialize,
         Default
@@ -1577,6 +2300,46 @@ mod tests {
         PreparedCatalogPublicationFenceV1<'static>: Clone,
         serde::Serialize,
         Default,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        PreparedCatalogControlTransitionV1<'static>: Clone,
+        serde::Serialize,
+        Default,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        TrustedCatalogPublicationPendingReceiptV1: Clone,
+        serde::Serialize,
+        Default
+    );
+    static_assertions::assert_not_impl_any!(
+        BoundPendingCatalogControlV1<'static>: Clone,
+        serde::Serialize,
+        Default,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        BoundCommittedCatalogSuccessorV1: Clone,
+        serde::Serialize,
+        Default,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        TrustedCatalogHighWaterAdvanceReceiptV1: Clone,
+        serde::Serialize,
+        Default
+    );
+    static_assertions::assert_not_impl_any!(
+        AdvancedCatalogHighWaterV1: Clone,
+        serde::Serialize,
+        Default,
+        Into<TrustedCatalogHighWaterGuardV1>,
+        Into<HeldReadyCatalogControlGuardV1>,
         Into<crate::reconcile::ReconcilePlan>,
         Into<Vec<crate::reconcile::ReconcileAction>>
     );
@@ -1621,41 +2384,44 @@ mod tests {
     ) {
         let bootstrap_head_revision = observed.head_revision;
         let bootstrap_writer_epoch = [0x21; 32];
-        let current_writer_epoch = [0x22; 32];
         let storage_authority_fingerprint = [0x99; 32];
         let control_authority_fingerprint = [0x9a; 32];
+        let bootstrap = CatalogBootstrapIdentityV1 {
+            head_revision: bootstrap_head_revision,
+            publication_nonce: observed.publication_nonce,
+            complete_corpus_attestation: [0x33; 32],
+            writer_epoch: bootstrap_writer_epoch,
+        };
+        let control_binding = CatalogControlAcquisitionBindingV1 {
+            context: observed.context.clone(),
+            bootstrap: bootstrap.clone(),
+            current: CatalogHighWaterPointV1 {
+                sequence: observed.sequence,
+                head_revision: observed.head_revision,
+                publication_nonce: observed.publication_nonce,
+            },
+            storage_authority_fingerprint,
+            control_authority_fingerprint,
+            ready_revision: CatalogControlAuthorityRevisionV1 {
+                generation: NonZeroU64::new(7).unwrap(),
+                fingerprint: [0xab; 32],
+            },
+            lease_public_fingerprint: NonSecretLeasePublicFingerprintV1([0xaa; 32]),
+        };
         (
             TrustedCatalogBootstrapReceiptV1 {
                 context: observed.context.clone(),
-                bootstrap_head_revision,
-                bootstrap_publication_nonce: observed.publication_nonce,
-                complete_corpus_attestation: [0x33; 32],
-                bootstrap_writer_epoch,
+                bootstrap,
                 storage_authority_fingerprint,
                 control_authority_fingerprint,
             },
             TrustedCatalogHighWaterGuardV1 {
-                context: observed.context.clone(),
-                bootstrap_head_revision,
-                bootstrap_publication_nonce: observed.publication_nonce,
-                complete_corpus_attestation: [0x33; 32],
-                current_writer_epoch,
-                current_sequence: observed.sequence,
-                current_head_revision: observed.head_revision,
-                current_publication_nonce: observed.publication_nonce,
-                storage_authority_fingerprint,
-                authority_revision: [0xab; 32],
-                lease_nonce: [0xaa; 32],
-                control_authority_fingerprint,
+                binding: control_binding.clone(),
             },
             AllNamespaceWritersFencedLeaseV1 {
-                context: observed.context.clone(),
-                bootstrap_head_revision,
-                current_writer_epoch,
-                authority_revision: [0x89; 32],
-                lease_nonce: [0x88; 32],
-                storage_authority_fingerprint,
-                control_authority_fingerprint,
+                control_binding,
+                authority_revision_fingerprint: [0x89; 32],
+                lease_public_fingerprint: NonSecretLeasePublicFingerprintV1([0x88; 32]),
             },
         )
     }
@@ -1667,6 +2433,16 @@ mod tests {
             operator: fixture.operator(),
             conditional_write_receipt: fixture.receipt(),
             authority_fingerprint: [0x99; 32],
+        }
+    }
+
+    fn held_control(
+        high_water: TrustedCatalogHighWaterGuardV1,
+        all_writers: AllNamespaceWritersFencedLeaseV1,
+    ) -> HeldReadyCatalogControlGuardV1 {
+        HeldReadyCatalogControlGuardV1 {
+            high_water,
+            all_writers,
         }
     }
 
@@ -1725,10 +2501,106 @@ mod tests {
             trusted_storage(fixture),
             observed,
             &bootstrap,
-            high_water,
-            writers,
+            held_control(high_water, writers),
         )
         .unwrap()
+    }
+
+    fn prepared_control_transition<'a>(
+        fixture: &'a SemanticRemoteCatalogFixtureV1,
+        observed: &ObservedPublishedCatalogHeadV1,
+    ) -> PreparedCatalogControlTransitionV1<'a> {
+        let publication_nonce = [0x44; 32];
+        let (archive, journal) = bound_publication_objects(observed, publication_nonce);
+        let publication = prepare_catalog_publication_fence_v1(
+            matched(fixture, observed),
+            publication_nonce,
+            archive,
+            journal,
+        )
+        .unwrap();
+        prepare_catalog_control_transition_v1(publication, [0xac; 32]).unwrap()
+    }
+
+    fn pending_receipt(
+        transition: &PreparedCatalogControlTransitionV1<'_>,
+    ) -> TrustedCatalogPublicationPendingReceiptV1 {
+        TrustedCatalogPublicationPendingReceiptV1 {
+            control_binding: transition
+                .publication
+                .control_guard
+                .high_water
+                .binding
+                .clone(),
+            pending_revision: transition.pending_revision,
+            publishing_head_reservation_fingerprint: transition
+                .publishing_head_reservation_fingerprint,
+            pending_control_record_fingerprint: transition.pending_control_record_fingerprint,
+        }
+    }
+
+    fn bound_pending<'a>(
+        fixture: &'a SemanticRemoteCatalogFixtureV1,
+        observed: &ObservedPublishedCatalogHeadV1,
+    ) -> BoundPendingCatalogControlV1<'a> {
+        let transition = prepared_control_transition(fixture, observed);
+        let receipt = pending_receipt(&transition);
+        match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap()
+    }
+
+    fn committed_successor(
+        pending: BoundPendingCatalogControlV1<'_>,
+    ) -> BoundCommittedCatalogSuccessorV1 {
+        let committed_head_bytes = br#"{"catalog_sequence":2,"fixture":"committed"}"#.to_vec();
+        let head_revision = super::super::catalog_head_revision_v1(&committed_head_bytes);
+        BoundCommittedCatalogSuccessorV1 {
+            control_binding: pending
+                .transition
+                .publication
+                .control_guard
+                .high_water
+                .binding,
+            pending_revision: pending.transition.pending_revision,
+            publishing_head_reservation_fingerprint: pending
+                .pending_receipt
+                .publishing_head_reservation_fingerprint,
+            pending_control_record_fingerprint: pending
+                .pending_receipt
+                .pending_control_record_fingerprint,
+            context: pending.transition.publication.context,
+            sequence: pending.transition.publication.sequence,
+            publication_nonce: pending.transition.publication.publication_nonce,
+            parent_head_revision: pending.transition.publication.parent_head_revision,
+            head_revision,
+            committed_head_bytes,
+        }
+    }
+
+    fn high_water_advance_receipt(
+        committed: &BoundCommittedCatalogSuccessorV1,
+    ) -> TrustedCatalogHighWaterAdvanceReceiptV1 {
+        let ready_revision = CatalogControlAuthorityRevisionV1 {
+            generation: NonZeroU64::new(committed.pending_revision.generation.get() + 1).unwrap(),
+            fingerprint: [0xad; 32],
+        };
+        let ready_bytes = canonical_ready_control_record_bytes_v1(committed, ready_revision);
+        TrustedCatalogHighWaterAdvanceReceiptV1 {
+            control_binding: committed.control_binding.clone(),
+            pending_revision: committed.pending_revision,
+            publishing_head_reservation_fingerprint: committed
+                .publishing_head_reservation_fingerprint,
+            pending_control_record_fingerprint: committed.pending_control_record_fingerprint,
+            successor: CatalogHighWaterPointV1 {
+                sequence: committed.sequence,
+                head_revision: committed.head_revision,
+                publication_nonce: committed.publication_nonce,
+            },
+            ready_revision,
+            ready_control_record_fingerprint: super::super::domain_object_id_v1(
+                CATALOG_CONTROL_RECORD_DOMAIN_V1,
+                &ready_bytes,
+            ),
+        }
     }
 
     fn created_index_mutation(
@@ -2281,20 +3153,47 @@ mod tests {
             )
         );
 
-        let bytes = canonical_publishing_head_bytes_v1(&fence);
-        assert!(is_canonical_publishing_head_v1(&bytes, &test_selected()));
+        let transition = prepare_catalog_control_transition_v1(fence, [0xac; 32]).unwrap();
+        let pending_receipt = TrustedCatalogPublicationPendingReceiptV1 {
+            control_binding: transition
+                .publication
+                .control_guard
+                .high_water
+                .binding
+                .clone(),
+            pending_revision: transition.pending_revision,
+            publishing_head_reservation_fingerprint: transition
+                .publishing_head_reservation_fingerprint,
+            pending_control_record_fingerprint: transition.pending_control_record_fingerprint,
+        };
+        let bound =
+            match_catalog_publication_pending_receipt_v1(transition, pending_receipt).unwrap();
+        let bytes = &bound.transition.canonical_publishing_head_bytes;
+        assert!(is_canonical_publishing_head_v1(bytes, &test_selected()));
         assert!(
-            super::super::canonical_wire_v1::<super::super::RemoteCatalogHeadWireV1>(&bytes)
+            super::super::canonical_wire_v1::<super::super::RemoteCatalogHeadWireV1>(bytes)
                 .is_none()
         );
-        let wire = serde_json::from_slice::<RemoteCatalogPublishingHeadWireV1>(&bytes).unwrap();
+        let wire = serde_json::from_slice::<RemoteCatalogPublishingHeadWireV1>(bytes).unwrap();
         assert_eq!(wire.storage_authority_fingerprint, "99".repeat(32));
         assert_eq!(wire.control_authority_fingerprint, "9a".repeat(32));
-        assert_eq!(wire.writer_epoch, "22".repeat(32));
-        assert_eq!(wire.high_water_authority_revision, "ab".repeat(32));
-        assert_eq!(wire.high_water_lease_nonce, "aa".repeat(32));
-        assert_eq!(wire.writer_fence_authority_revision, "89".repeat(32));
-        assert_eq!(wire.writer_fence_lease_nonce, "88".repeat(32));
+        assert_eq!(wire.writer_epoch, "21".repeat(32));
+        assert_eq!(wire.control_ready_generation, 7);
+        assert_eq!(wire.control_ready_revision_fingerprint, "ab".repeat(32));
+        assert_eq!(wire.control_pending_generation, 8);
+        assert_eq!(wire.control_pending_revision_fingerprint, "ac".repeat(32));
+        assert_eq!(wire.control_lease_public_fingerprint, "aa".repeat(32));
+        assert_eq!(
+            wire.writer_fence_authority_revision_fingerprint,
+            "89".repeat(32)
+        );
+        assert_eq!(wire.writer_fence_lease_public_fingerprint, "88".repeat(32));
+        assert_eq!(
+            wire.predecessor_head_storage_binding_fingerprint,
+            lower_hex(&predecessor_head_storage_binding_fingerprint_v1(
+                "head-etag-a"
+            ))
+        );
         assert_eq!(
             wire.predecessor_head_archive.object_id,
             lower_hex(&super::super::domain_object_id_v1(
@@ -2304,8 +3203,380 @@ mod tests {
         );
         assert_eq!(
             wire.mutation_journal.object_id,
-            lower_hex(&fence.mutation_journal.object_id)
+            lower_hex(&bound.transition.publication.mutation_journal.object_id)
         );
+        assert_eq!(
+            bound.pending_receipt.pending_control_record_fingerprint,
+            bound.transition.pending_control_record_fingerprint
+        );
+        assert!(is_canonical_control_record_v1(
+            &bound.transition.canonical_pending_control_record_bytes,
+            &test_selected()
+        ));
+        let pending_text =
+            std::str::from_utf8(&bound.transition.canonical_pending_control_record_bytes).unwrap();
+        assert!(pending_text.contains("lease_public_fingerprint"));
+        assert!(!pending_text.contains("lease_nonce"));
+        assert!(!pending_text.contains("bearer"));
+    }
+
+    #[tokio::test]
+    async fn pending_control_record_is_canonical_bounded_and_fail_closed() {
+        let (fixture, observed) = observed_head().await;
+        let transition = prepared_control_transition(&fixture, &observed);
+        let canonical = transition.canonical_pending_control_record_bytes.clone();
+        assert!(is_canonical_control_record_v1(&canonical, &test_selected()));
+
+        let mut newline = canonical.clone();
+        newline.push(b'\n');
+        assert!(!is_canonical_control_record_v1(&newline, &test_selected()));
+
+        let mut unknown = serde_json::from_slice::<serde_json::Value>(&canonical).unwrap();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("bearer_token".to_owned(), serde_json::json!("forbidden"));
+        assert!(!is_canonical_control_record_v1(
+            &serde_json::to_vec(&unknown).unwrap(),
+            &test_selected()
+        ));
+
+        let mut wire = serde_json::from_slice::<CatalogControlRecordWireV1>(&canonical).unwrap();
+        wire.writer_epoch = "22".repeat(32);
+        assert!(!is_canonical_control_record_v1(
+            &serde_json::to_vec(&wire).unwrap(),
+            &test_selected()
+        ));
+
+        let mut wire = serde_json::from_slice::<CatalogControlRecordWireV1>(&canonical).unwrap();
+        if let CatalogControlStateWireV1::PublicationPending { pending } = &mut wire.control_state {
+            pending.successor_catalog_sequence += 1;
+        }
+        assert!(!is_canonical_control_record_v1(
+            &serde_json::to_vec(&wire).unwrap(),
+            &test_selected()
+        ));
+    }
+
+    #[tokio::test]
+    async fn exact_pending_receipt_rejects_crossed_acquisitions_and_proposals() {
+        let (fixture, observed) = observed_head().await;
+
+        {
+            let transition = prepared_control_transition(&fixture, &observed);
+            let mut receipt = pending_receipt(&transition);
+            receipt.control_binding.lease_public_fingerprint =
+                NonSecretLeasePublicFingerprintV1([0x45; 32]);
+            assert_eq!(
+                match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::ControlTransitionMismatch
+            );
+        }
+        {
+            let transition = prepared_control_transition(&fixture, &observed);
+            let mut receipt = pending_receipt(&transition);
+            receipt.pending_revision.fingerprint = [0x45; 32];
+            assert_eq!(
+                match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::ControlTransitionMismatch
+            );
+        }
+        {
+            let transition = prepared_control_transition(&fixture, &observed);
+            let mut receipt = pending_receipt(&transition);
+            receipt.publishing_head_reservation_fingerprint = [0x45; 32];
+            assert_eq!(
+                match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::ControlTransitionMismatch
+            );
+        }
+        {
+            let transition = prepared_control_transition(&fixture, &observed);
+            let mut receipt = pending_receipt(&transition);
+            receipt.pending_control_record_fingerprint = [0x45; 32];
+            assert_eq!(
+                match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::ControlTransitionMismatch
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn control_transition_rejects_revision_reuse_overflow_and_byte_tampering() {
+        let (fixture, observed) = observed_head().await;
+        let make_publication = || {
+            let publication_nonce = [0x44; 32];
+            let (archive, journal) = bound_publication_objects(&observed, publication_nonce);
+            prepare_catalog_publication_fence_v1(
+                matched(&fixture, &observed),
+                publication_nonce,
+                archive,
+                journal,
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            prepare_catalog_control_transition_v1(make_publication(), [0; 32])
+                .err()
+                .expect("zero revision must fail"),
+            CatalogPublicationContractErrorV1::ControlTransitionMismatch
+        );
+        assert_eq!(
+            prepare_catalog_control_transition_v1(make_publication(), [0xab; 32])
+                .err()
+                .expect("ready revision reuse must fail"),
+            CatalogPublicationContractErrorV1::ControlTransitionMismatch
+        );
+
+        let mut overflow = make_publication();
+        overflow
+            .control_guard
+            .high_water
+            .binding
+            .ready_revision
+            .generation = NonZeroU64::new(u64::MAX).unwrap();
+        overflow
+            .control_guard
+            .all_writers
+            .control_binding
+            .ready_revision
+            .generation = NonZeroU64::new(u64::MAX).unwrap();
+        assert_eq!(
+            prepare_catalog_control_transition_v1(overflow, [0xac; 32])
+                .err()
+                .expect("control generation overflow must fail"),
+            CatalogPublicationContractErrorV1::SequenceOverflow
+        );
+
+        let mut oversized = make_publication();
+        let maximum_token = "v".repeat(
+            usize::try_from(
+                RegisteredRootPlanContractV1::strict_v1()
+                    .remote_contract()
+                    .max_binding_token_bytes(),
+            )
+            .unwrap(),
+        );
+        oversized.predecessor_archive.binding = RegisteredRootRemoteObjectBindingV1::Version {
+            version: maximum_token.clone(),
+            etag: Some(maximum_token.clone()),
+        };
+        oversized.mutation_journal.binding = RegisteredRootRemoteObjectBindingV1::Version {
+            version: maximum_token.clone(),
+            etag: Some(maximum_token),
+        };
+        assert_eq!(
+            prepare_catalog_control_transition_v1(oversized, [0xac; 32])
+                .err()
+                .expect("an unreadable publishing HEAD must fail before reservation"),
+            CatalogPublicationContractErrorV1::PublishingHeadTooLarge
+        );
+
+        let first = prepare_catalog_control_transition_v1(make_publication(), [0xac; 32]).unwrap();
+        let mut other_baseline = make_publication();
+        other_baseline.expected_parent_head_etag = "head-etag-b".to_owned();
+        let second = prepare_catalog_control_transition_v1(other_baseline, [0xac; 32]).unwrap();
+        assert_ne!(
+            first.publishing_head_reservation_fingerprint,
+            second.publishing_head_reservation_fingerprint,
+            "the durable reservation must bind the exact predecessor storage CAS baseline"
+        );
+        assert_ne!(
+            first.pending_control_record_fingerprint,
+            second.pending_control_record_fingerprint
+        );
+
+        let mut transition = prepared_control_transition(&fixture, &observed);
+        let receipt = pending_receipt(&transition);
+        transition.canonical_publishing_head_bytes.push(b' ');
+        assert_eq!(
+            match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap_err(),
+            CatalogPublicationContractErrorV1::ControlTransitionMismatch
+        );
+
+        let mut transition = prepared_control_transition(&fixture, &observed);
+        let receipt = pending_receipt(&transition);
+        transition.canonical_pending_control_record_bytes.push(b' ');
+        assert_eq!(
+            match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap_err(),
+            CatalogPublicationContractErrorV1::ControlTransitionMismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn high_water_advance_accepts_only_exact_monotonic_successor() {
+        let (fixture, observed) = observed_head().await;
+        let make_committed = || committed_successor(bound_pending(&fixture, &observed));
+
+        let committed = make_committed();
+        let receipt = high_water_advance_receipt(&committed);
+        let ready_bytes =
+            canonical_ready_control_record_bytes_v1(&committed, receipt.ready_revision);
+        assert!(is_canonical_control_record_v1(
+            &ready_bytes,
+            &test_selected()
+        ));
+        let ready_text = std::str::from_utf8(&ready_bytes).unwrap();
+        assert!(ready_text.contains("lease_public_fingerprint"));
+        assert!(!ready_text.contains("lease_nonce"));
+        assert!(!ready_text.contains("bearer"));
+
+        let mut malformed_ready =
+            serde_json::from_slice::<CatalogControlRecordWireV1>(&ready_bytes).unwrap();
+        malformed_ready.bootstrap.writer_epoch = "00".repeat(32);
+        assert!(!is_canonical_control_record_v1(
+            &serde_json::to_vec(&malformed_ready).unwrap(),
+            &test_selected()
+        ));
+
+        let mut wrong_bootstrap =
+            serde_json::from_slice::<CatalogControlRecordWireV1>(&ready_bytes).unwrap();
+        if let CatalogControlStateWireV1::Ready { current } = &mut wrong_bootstrap.control_state {
+            current.catalog_sequence = 1;
+        }
+        assert!(!is_canonical_control_record_v1(
+            &serde_json::to_vec(&wrong_bootstrap).unwrap(),
+            &test_selected()
+        ));
+        let advanced = match_catalog_high_water_advance_v1(committed, receipt).unwrap();
+        assert_eq!(advanced.successor.sequence.get(), 2);
+        assert_eq!(advanced.ready_revision.generation.get(), 9);
+        assert_ne!(advanced.ready_control_record_fingerprint, [0; 32]);
+        assert_eq!(advanced.bootstrap.writer_epoch, [0x21; 32]);
+        assert_eq!(advanced.storage_authority_fingerprint, [0x99; 32]);
+        assert_eq!(advanced.control_authority_fingerprint, [0x9a; 32]);
+        assert_eq!(advanced.context, observed.context);
+
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.successor.sequence = NonZeroU64::new(3).unwrap();
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.ready_revision.generation = NonZeroU64::new(10).unwrap();
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let mut committed = make_committed();
+            committed.pending_revision.generation = NonZeroU64::new(10).unwrap();
+            let receipt = high_water_advance_receipt(&committed);
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.ready_revision.fingerprint = committed.pending_revision.fingerprint;
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.ready_revision.fingerprint =
+                committed.control_binding.ready_revision.fingerprint;
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let mut committed = make_committed();
+            let receipt = high_water_advance_receipt(&committed);
+            committed.committed_head_bytes.push(b' ');
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.ready_control_record_fingerprint = [0x45; 32];
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let mut committed = make_committed();
+            let receipt = high_water_advance_receipt(&committed);
+            committed.parent_head_revision = [0x45; 32];
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.successor.publication_nonce = [0x45; 32];
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.successor.head_revision = [0x45; 32];
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.publishing_head_reservation_fingerprint = [0x45; 32];
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.pending_control_record_fingerprint = [0x45; 32];
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            receipt.control_binding.lease_public_fingerprint =
+                NonSecretLeasePublicFingerprintV1([0x45; 32]);
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch
+            );
+        }
+        {
+            let mut committed = make_committed();
+            let mut receipt = high_water_advance_receipt(&committed);
+            committed.pending_revision.generation = NonZeroU64::new(u64::MAX).unwrap();
+            receipt.pending_revision = committed.pending_revision;
+            assert_eq!(
+                match_catalog_high_water_advance_v1(committed, receipt).unwrap_err(),
+                CatalogPublicationContractErrorV1::SequenceOverflow
+            );
+        }
     }
 
     #[tokio::test]
@@ -2550,14 +3821,13 @@ mod tests {
         let (fixture, observed) = observed_head().await;
         {
             let (mut bootstrap, high_water, writers) = trusted_receipts(&observed);
-            bootstrap.complete_corpus_attestation = [0; 32];
+            bootstrap.bootstrap.complete_corpus_attestation = [0; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::InvalidBootstrapReceipt
@@ -2565,16 +3835,15 @@ mod tests {
         }
         {
             let (mut bootstrap, mut high_water, mut writers) = trusted_receipts(&observed);
-            bootstrap.bootstrap_head_revision = [0x55; 32];
-            high_water.bootstrap_head_revision = [0x55; 32];
-            writers.bootstrap_head_revision = [0x55; 32];
+            bootstrap.bootstrap.head_revision = [0x55; 32];
+            high_water.binding.bootstrap.head_revision = [0x55; 32];
+            writers.control_binding.bootstrap.head_revision = [0x55; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::BootstrapMismatch,
@@ -2583,14 +3852,13 @@ mod tests {
         }
         {
             let (bootstrap, mut high_water, writers) = trusted_receipts(&observed);
-            high_water.current_head_revision = [0x66; 32];
+            high_water.binding.current.head_revision = [0x66; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::HighWaterMismatch
@@ -2598,14 +3866,13 @@ mod tests {
         }
         {
             let (bootstrap, mut high_water, writers) = trusted_receipts(&observed);
-            high_water.current_publication_nonce = [0x66; 32];
+            high_water.binding.current.publication_nonce = [0x66; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::HighWaterMismatch
@@ -2613,14 +3880,14 @@ mod tests {
         }
         {
             let (bootstrap, mut high_water, writers) = trusted_receipts(&observed);
-            high_water.current_sequence = NonZeroU64::new(observed.sequence.get() + 1).unwrap();
+            high_water.binding.current.sequence =
+                NonZeroU64::new(observed.sequence.get() + 1).unwrap();
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::HighWaterMismatch,
@@ -2629,14 +3896,13 @@ mod tests {
         }
         {
             let (bootstrap, mut high_water, writers) = trusted_receipts(&observed);
-            high_water.authority_revision = [0; 32];
+            high_water.binding.ready_revision.fingerprint = [0; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::HighWaterMismatch
@@ -2644,14 +3910,13 @@ mod tests {
         }
         {
             let (bootstrap, high_water, mut writers) = trusted_receipts(&observed);
-            writers.current_writer_epoch = [0x77; 32];
+            writers.control_binding.bootstrap.writer_epoch = [0x77; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::WriterFenceMismatch
@@ -2659,14 +3924,13 @@ mod tests {
         }
         {
             let (bootstrap, high_water, mut writers) = trusted_receipts(&observed);
-            writers.authority_revision = [0; 32];
+            writers.authority_revision_fingerprint = [0; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::WriterFenceMismatch
@@ -2682,14 +3946,13 @@ mod tests {
         observed.head_revision = [0x55; 32];
         observed.publication_nonce = [0x56; 32];
         let (bootstrap, mut high_water, writers) = trusted_receipts(&observed);
-        high_water.current_sequence = NonZeroU64::new(1).unwrap();
+        high_water.binding.current.sequence = NonZeroU64::new(1).unwrap();
         assert_eq!(
             match_catalog_publication_prerequisites_v1(
                 trusted_storage(&fixture),
                 &observed,
                 &bootstrap,
-                high_water,
-                writers,
+                held_control(high_water, writers),
             )
             .unwrap_err(),
             CatalogPublicationContractErrorV1::HighWaterMismatch,
@@ -2709,8 +3972,7 @@ mod tests {
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::StorageAuthorityMismatch
@@ -2718,14 +3980,13 @@ mod tests {
         }
         {
             let (bootstrap, mut high_water, writers) = trusted_receipts(&observed);
-            high_water.storage_authority_fingerprint = [0x98; 32];
+            high_water.binding.storage_authority_fingerprint = [0x98; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::StorageAuthorityMismatch
@@ -2733,14 +3994,13 @@ mod tests {
         }
         {
             let (bootstrap, high_water, mut writers) = trusted_receipts(&observed);
-            writers.storage_authority_fingerprint = [0x98; 32];
+            writers.control_binding.storage_authority_fingerprint = [0x98; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::StorageAuthorityMismatch
@@ -2748,14 +4008,13 @@ mod tests {
         }
         {
             let (bootstrap, mut high_water, writers) = trusted_receipts(&observed);
-            high_water.control_authority_fingerprint = [0x9b; 32];
+            high_water.binding.control_authority_fingerprint = [0x9b; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::ControlAuthorityMismatch
@@ -2763,14 +4022,13 @@ mod tests {
         }
         {
             let (bootstrap, high_water, mut writers) = trusted_receipts(&observed);
-            writers.control_authority_fingerprint = [0x9b; 32];
+            writers.control_binding.control_authority_fingerprint = [0x9b; 32];
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
                     trusted_storage(&fixture),
                     &observed,
                     &bootstrap,
-                    high_water,
-                    writers,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::ControlAuthorityMismatch
@@ -2791,7 +4049,10 @@ mod tests {
             };
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
-                    crossed, &observed, &bootstrap, high_water, writers,
+                    crossed,
+                    &observed,
+                    &bootstrap,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::StorageSemanticsUnverified
@@ -2806,7 +4067,10 @@ mod tests {
             };
             assert_eq!(
                 match_catalog_publication_prerequisites_v1(
-                    crossed, &observed, &bootstrap, high_water, writers,
+                    crossed,
+                    &observed,
+                    &bootstrap,
+                    held_control(high_water, writers),
                 )
                 .unwrap_err(),
                 CatalogPublicationContractErrorV1::StorageSemanticsUnverified
@@ -2838,10 +4102,14 @@ mod tests {
             storage_authority_fingerprint: "99".repeat(32),
             control_authority_fingerprint: "9a".repeat(32),
             writer_epoch: "77".repeat(32),
-            high_water_authority_revision: "ab".repeat(32),
-            high_water_lease_nonce: "aa".repeat(32),
-            writer_fence_authority_revision: "89".repeat(32),
-            writer_fence_lease_nonce: "88".repeat(32),
+            control_ready_generation: 7,
+            control_ready_revision_fingerprint: "ab".repeat(32),
+            control_pending_generation: 8,
+            control_pending_revision_fingerprint: "ac".repeat(32),
+            control_lease_public_fingerprint: "aa".repeat(32),
+            writer_fence_authority_revision_fingerprint: "89".repeat(32),
+            writer_fence_lease_public_fingerprint: "88".repeat(32),
+            predecessor_head_storage_binding_fingerprint: "87".repeat(32),
             predecessor_head_archive: RemoteCatalogPublicationObjectReferenceWireV1 {
                 object_id: "bb".repeat(32),
                 raw_bytes_len: 1,
@@ -2915,16 +4183,19 @@ mod tests {
         wire.control_authority_fingerprint = "00".repeat(32);
         reject(wire);
         let mut wire = fresh_wire();
-        wire.high_water_authority_revision = "00".repeat(32);
+        wire.control_ready_revision_fingerprint = "00".repeat(32);
         reject(wire);
         let mut wire = fresh_wire();
-        wire.high_water_lease_nonce = "00".repeat(32);
+        wire.control_lease_public_fingerprint = "00".repeat(32);
         reject(wire);
         let mut wire = fresh_wire();
-        wire.writer_fence_authority_revision = "00".repeat(32);
+        wire.writer_fence_authority_revision_fingerprint = "00".repeat(32);
         reject(wire);
         let mut wire = fresh_wire();
-        wire.writer_fence_lease_nonce = "00".repeat(32);
+        wire.writer_fence_lease_public_fingerprint = "00".repeat(32);
+        reject(wire);
+        let mut wire = fresh_wire();
+        wire.predecessor_head_storage_binding_fingerprint = "00".repeat(32);
         reject(wire);
         let mut wire = fresh_wire();
         wire.predecessor_head_archive.raw_bytes_len = 0;
