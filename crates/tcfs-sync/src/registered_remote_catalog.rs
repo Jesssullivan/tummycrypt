@@ -793,30 +793,35 @@ fn observed_binding_matches_v1(
     }
 }
 
-fn validate_catalog_entry_route_v1(remote_prefix: &str, entry: &RemoteCatalogEntryWireV1) -> bool {
-    if !validate_storage_key_bound_v1(&entry.object_key) {
+fn validate_catalog_object_route_v1(
+    remote_prefix: &str,
+    kind: RemoteCatalogObjectKindV1,
+    object_key: &str,
+) -> bool {
+    if !validate_storage_key_bound_v1(object_key) {
         return false;
     }
-    match entry.kind {
-        RemoteCatalogObjectKindV1::Index => entry
-            .object_key
+    match kind {
+        RemoteCatalogObjectKindV1::Index => object_key
             .strip_prefix(&namespace_index_prefix(remote_prefix))
             .filter(|relative| !relative.is_empty())
             .and_then(|relative| namespace_logical_entry_from_index_path(relative).ok())
             .is_some_and(|(logical_path, _)| {
                 validate_registered_remote_logical_path_bounds_v1(&logical_path).is_ok()
             }),
-        RemoteCatalogObjectKindV1::Reservation => entry
-            .object_key
+        RemoteCatalogObjectKindV1::Reservation => object_key
             .strip_prefix(&namespace_reservation_prefix(remote_prefix))
             .and_then(parse_lower_hex_32)
             .is_some(),
-        RemoteCatalogObjectKindV1::Manifest => entry
-            .object_key
+        RemoteCatalogObjectKindV1::Manifest => object_key
             .strip_prefix(&format!("{remote_prefix}/manifests/"))
             .and_then(parse_lower_hex_32)
             .is_some(),
     }
+}
+
+fn validate_catalog_entry_route_v1(remote_prefix: &str, entry: &RemoteCatalogEntryWireV1) -> bool {
+    validate_catalog_object_route_v1(remote_prefix, entry.kind, &entry.object_key)
 }
 
 fn validate_entry_size_v1(kind: RemoteCatalogObjectKindV1, raw_bytes_len: u64) -> bool {
