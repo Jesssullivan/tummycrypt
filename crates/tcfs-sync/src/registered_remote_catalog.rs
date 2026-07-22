@@ -505,6 +505,28 @@ impl SemanticallyBoundRemoteCatalogCorpusV1 {
         self.closure.root_id()
     }
 
+    pub(crate) fn root_identity_fingerprint(&self) -> &str {
+        self.closure.root_identity_fingerprint()
+    }
+
+    pub(crate) const fn root_generation(&self) -> NonZeroU64 {
+        self.closure.root_generation()
+    }
+
+    pub(crate) const fn profile(&self) -> RootProfileV1 {
+        self.closure.profile()
+    }
+
+    pub(crate) const fn profile_settings_fingerprint(&self) -> RootProfileSettingsFingerprintV1 {
+        self.closure.profile_settings_fingerprint()
+    }
+
+    pub(crate) const fn plan_contract_fingerprint(
+        &self,
+    ) -> RegisteredRootPlanContractFingerprintV1 {
+        self.closure.plan_contract_fingerprint()
+    }
+
     pub(crate) const fn catalog_sequence(&self) -> NonZeroU64 {
         self.closure.catalog_sequence()
     }
@@ -523,6 +545,32 @@ impl SemanticallyBoundRemoteCatalogCorpusV1 {
 
     pub(crate) fn claim_count(&self) -> usize {
         self.claims.len()
+    }
+
+    /// Iterate the unique retained claims in ascending folded-path order.
+    ///
+    /// The sibling held-window composer consumes this projection directly for
+    /// its bounded three-way namespace merge. Raw catalog entries, object
+    /// bodies, and bindings remain opaque here: this is namespace-safety
+    /// evidence for one internally closed revision, not action authority.
+    pub(crate) fn namespace_safety_claims(
+        &self,
+    ) -> impl ExactSizeIterator<
+        Item = (
+            &str,
+            &str,
+            PortableNamespaceRole,
+            RemoteNamespaceClaimOriginsV1,
+        ),
+    > {
+        self.claims.iter().map(|claim| {
+            (
+                claim.folded_path(),
+                claim.exact_path(),
+                claim.role(),
+                claim.origins(),
+            )
+        })
     }
 }
 
@@ -2064,7 +2112,7 @@ pub(crate) async fn read_semantically_bound_remote_catalog_corpus_v1(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use opendal::raw::{
         oio, Access, AccessorInfo, OpDelete, OpRead, OpStat, OpWrite, RpDelete, RpRead, RpStat,
@@ -2117,6 +2165,8 @@ mod tests {
         replacement: ScriptedObject,
     }
 
+    type FirstCatalogReadWriteV1 = Option<(std::path::PathBuf, Vec<u8>)>;
+
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct ObservedRead {
         path: String,
@@ -2134,6 +2184,7 @@ mod tests {
         head_key: String,
         head_reads: Arc<AtomicUsize>,
         head_mutation: Arc<Mutex<Option<HeadMutation>>>,
+        first_catalog_read_write: Arc<Mutex<FirstCatalogReadWriteV1>>,
         next_read_replacements: Arc<Mutex<BTreeMap<String, ScriptedObject>>>,
         next_etag: Arc<AtomicU64>,
     }
@@ -2170,6 +2221,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(key.into(), replacement);
+        }
+
+        fn write_local_file_on_first_catalog_read(
+            &self,
+            target: std::path::PathBuf,
+            bytes: Vec<u8>,
+        ) {
+            *self.first_catalog_read_write.lock().unwrap() = Some((target, bytes));
         }
 
         fn disable_version_reads(&self) {
@@ -2227,6 +2286,18 @@ mod tests {
         async fn read(&self, path: &str, args: OpRead) -> opendal::Result<(RpRead, Buffer)> {
             let head_read_index =
                 (path == self.head_key).then(|| self.head_reads.fetch_add(1, Ordering::SeqCst));
+            if head_read_index == Some(0) {
+                if let Some((target, bytes)) = self.first_catalog_read_write.lock().unwrap().take()
+                {
+                    std::fs::write(&target, bytes).map_err(|error| {
+                        Error::new(
+                            ErrorKind::Unexpected,
+                            "scripted first catalog read could not mutate local fixture",
+                        )
+                        .set_source(error)
+                    })?;
+                }
+            }
             let mutation = head_read_index.and_then(|_| self.head_mutation.lock().unwrap().clone());
             if let Some(HeadMutation {
                 timing,
@@ -2424,6 +2495,7 @@ mod tests {
             head_key: catalog_head_key_v1(prefix),
             head_reads: Arc::new(AtomicUsize::new(0)),
             head_mutation: Arc::new(Mutex::new(None)),
+            first_catalog_read_write: Arc::new(Mutex::new(None)),
             next_read_replacements: Arc::new(Mutex::new(BTreeMap::new())),
             next_etag: Arc::new(AtomicU64::new(1)),
         };
@@ -2452,22 +2524,16 @@ mod tests {
         }
     }
 
-    fn fixture_context(prefix: &str) -> RemoteCatalogContextWireV1 {
-        let root_id = "fixture-root".to_owned();
-        let root_generation = 1;
-        let profile = RootProfileV1::AgentStaticV1;
-        let spec = RootSpecV1Config {
-            version: RootSpecV1Config::VERSION,
-            remote_prefix: prefix.to_owned(),
-            profile,
-            generation: NonZeroU64::new(root_generation).unwrap(),
-        };
+    fn fixture_context_for_selected(
+        root_id: &str,
+        spec: &RootSpecV1Config,
+    ) -> RemoteCatalogContextWireV1 {
         RemoteCatalogContextWireV1 {
-            root_identity_fingerprint: spec.identity_fingerprint(&root_id),
-            root_id,
-            root_generation,
-            profile,
-            profile_settings_fingerprint: profile.policy().settings_fingerprint().to_string(),
+            root_identity_fingerprint: spec.identity_fingerprint(root_id),
+            root_id: root_id.to_owned(),
+            root_generation: spec.generation.get(),
+            profile: spec.profile,
+            profile_settings_fingerprint: spec.profile.policy().settings_fingerprint().to_string(),
             plan_contract_fingerprint: RegisteredRootPlanContractV1::strict_v1()
                 .fingerprint()
                 .to_string(),
@@ -2706,8 +2772,13 @@ mod tests {
         }
     }
 
-    fn fixture(prefix: &str, pages: Vec<Vec<RemoteCatalogEntryWireV1>>) -> CatalogFixture {
-        let context = fixture_context(prefix);
+    fn fixture_for_selected(
+        root_id: &str,
+        spec: &RootSpecV1Config,
+        pages: Vec<Vec<RemoteCatalogEntryWireV1>>,
+    ) -> CatalogFixture {
+        let prefix = &spec.remote_prefix;
+        let context = fixture_context_for_selected(root_id, spec);
         let publication_nonce = "11".repeat(32);
         let mut objects = Vec::new();
         let mut page_references = Vec::new();
@@ -2725,7 +2796,7 @@ mod tests {
             total_key_bytes += entry_key_bytes;
             let page = RemoteCatalogPageWireV1 {
                 version: CATALOG_SCHEMA_VERSION_V1,
-                context: fixture_context(prefix),
+                context: fixture_context_for_selected(root_id, spec),
                 catalog_sequence: 1,
                 publication_nonce: publication_nonce.clone(),
                 ordinal: u64::try_from(ordinal).unwrap(),
@@ -2761,8 +2832,8 @@ mod tests {
             pages: page_references,
         };
         let root_bytes = serde_json::to_vec(&root).unwrap();
-        let root_id = lower_hex(&catalog_root_object_id_v1(&root_bytes));
-        let root_key = catalog_root_key_v1(prefix, &root_id);
+        let catalog_root_id = lower_hex(&catalog_root_object_id_v1(&root_bytes));
+        let root_key = catalog_root_key_v1(prefix, &catalog_root_id);
         let root_etag = "root-etag";
         objects.push((
             root_key.clone(),
@@ -2770,12 +2841,12 @@ mod tests {
         ));
         let head = RemoteCatalogHeadWireV1 {
             version: CATALOG_SCHEMA_VERSION_V1,
-            context: fixture_context(prefix),
+            context: fixture_context_for_selected(root_id, spec),
             catalog_sequence: 1,
             publication_nonce: "11".repeat(32),
             parent_head_revision: None,
             catalog_root: RemoteCatalogRootReferenceWireV1 {
-                object_id: root_id,
+                object_id: catalog_root_id,
                 raw_bytes_len: u64::try_from(root_bytes.len()).unwrap(),
                 binding: etag_binding(root_etag),
                 page_count: root.page_count,
@@ -2796,13 +2867,7 @@ mod tests {
         }
         let selected = crate::registered_source_composition::
             validated_selected_registered_root_remote_context_for_test_v1(
-                "fixture-root",
-                &RootSpecV1Config {
-                    version: RootSpecV1Config::VERSION,
-                    remote_prefix: prefix.to_owned(),
-                    profile: RootProfileV1::AgentStaticV1,
-                    generation: NonZeroU64::new(1).unwrap(),
-                },
+                root_id, spec,
             )
             .unwrap();
         CatalogFixture {
@@ -2815,6 +2880,197 @@ mod tests {
             page_keys,
             head_bytes,
             root_bytes,
+        }
+    }
+
+    fn fixture(prefix: &str, pages: Vec<Vec<RemoteCatalogEntryWireV1>>) -> CatalogFixture {
+        fixture_for_selected(
+            "fixture-root",
+            &RootSpecV1Config {
+                version: RootSpecV1Config::VERSION,
+                remote_prefix: prefix.to_owned(),
+                profile: RootProfileV1::AgentStaticV1,
+                generation: NonZeroU64::new(1).unwrap(),
+            },
+            pages,
+        )
+    }
+
+    #[derive(Clone, Debug)]
+    pub(crate) enum SemanticRemoteCatalogFixtureRowV1 {
+        CurrentFile(String),
+        DeletedFile(String),
+        CurrentDirectory(String),
+        DeletedDirectory(String),
+        Reservation {
+            exact_path: String,
+            role: PortableNamespaceRole,
+        },
+    }
+
+    /// Opaque test-only catalog backend plus the exact conditional-semantics
+    /// receipt acquired before a held local observation begins.
+    ///
+    /// Callers can exercise the production semantic reader, but cannot obtain
+    /// raw catalog wire constructors or manufacture a verified corpus.
+    pub(crate) struct SemanticRemoteCatalogFixtureV1 {
+        operator: Operator,
+        receipt: ConditionalWriteSemanticsReceipt,
+    }
+
+    impl SemanticRemoteCatalogFixtureV1 {
+        pub(crate) const fn operator(&self) -> &Operator {
+            &self.operator
+        }
+
+        pub(crate) const fn receipt(&self) -> &ConditionalWriteSemanticsReceipt {
+            &self.receipt
+        }
+    }
+
+    /// Build an empty or populated semantic catalog for one exact selected
+    /// root identity. Semantic rows are translated into immutable catalog
+    /// entries and exact named objects behind the opaque scripted operator.
+    pub(crate) async fn semantic_remote_catalog_fixture_for_test_v1(
+        root_id: &str,
+        spec: &RootSpecV1Config,
+        rows: &[SemanticRemoteCatalogFixtureRowV1],
+    ) -> SemanticRemoteCatalogFixtureV1 {
+        semantic_remote_catalog_fixture_with_optional_first_read_write_for_test_v1(
+            root_id, spec, rows, None,
+        )
+        .await
+    }
+
+    /// As above, but mutate one local file when the first catalog HEAD read is
+    /// issued. The receipt is acquired before this hook is armed, so a sibling
+    /// held-window test can pin inventory-C drift without conflating it with
+    /// conditional-semantics probing.
+    pub(crate) async fn semantic_remote_catalog_fixture_with_first_read_write_for_test_v1(
+        root_id: &str,
+        spec: &RootSpecV1Config,
+        rows: &[SemanticRemoteCatalogFixtureRowV1],
+        target: std::path::PathBuf,
+        bytes: Vec<u8>,
+    ) -> SemanticRemoteCatalogFixtureV1 {
+        semantic_remote_catalog_fixture_with_optional_first_read_write_for_test_v1(
+            root_id,
+            spec,
+            rows,
+            Some((target, bytes)),
+        )
+        .await
+    }
+
+    async fn semantic_remote_catalog_fixture_with_optional_first_read_write_for_test_v1(
+        root_id: &str,
+        spec: &RootSpecV1Config,
+        rows: &[SemanticRemoteCatalogFixtureRowV1],
+        first_read_write: FirstCatalogReadWriteV1,
+    ) -> SemanticRemoteCatalogFixtureV1 {
+        let prefix = &spec.remote_prefix;
+        let mut entries = Vec::new();
+        let mut named_objects = Vec::new();
+        for (ordinal, row) in rows.iter().enumerate() {
+            let index_etag = format!("fixture-index-{ordinal}");
+            match row {
+                SemanticRemoteCatalogFixtureRowV1::CurrentFile(rel_path) => {
+                    let manifest_bytes = regular_manifest_json(rel_path);
+                    let manifest_id = crate::index_entry::manifest_object_id(&manifest_bytes);
+                    let index_key = format!("{prefix}/index/{rel_path}");
+                    let index_bytes = committed_index_json(&manifest_id);
+                    entries.push(fixture_entry(
+                        RemoteCatalogObjectKindV1::Index,
+                        &index_key,
+                        &index_bytes,
+                        &index_etag,
+                    ));
+                    named_objects.push((index_key, index_bytes, index_etag));
+
+                    let manifest_key = format!("{prefix}/manifests/{manifest_id}");
+                    let manifest_etag = format!("fixture-manifest-{ordinal}");
+                    entries.push(fixture_entry(
+                        RemoteCatalogObjectKindV1::Manifest,
+                        &manifest_key,
+                        &manifest_bytes,
+                        &manifest_etag,
+                    ));
+                    named_objects.push((manifest_key, manifest_bytes, manifest_etag));
+                }
+                SemanticRemoteCatalogFixtureRowV1::DeletedFile(rel_path) => {
+                    let index_key = format!("{prefix}/index/{rel_path}");
+                    let index_bytes = deleted_index_json();
+                    entries.push(fixture_entry(
+                        RemoteCatalogObjectKindV1::Index,
+                        &index_key,
+                        &index_bytes,
+                        &index_etag,
+                    ));
+                    named_objects.push((index_key, index_bytes, index_etag));
+                }
+                SemanticRemoteCatalogFixtureRowV1::CurrentDirectory(rel_path) => {
+                    let index_key = format!("{prefix}/index/{rel_path}/.tcfs_dir");
+                    let marker_bytes = crate::index_entry::DIRECTORY_MARKER_BYTES.to_vec();
+                    entries.push(fixture_entry(
+                        RemoteCatalogObjectKindV1::Index,
+                        &index_key,
+                        &marker_bytes,
+                        &index_etag,
+                    ));
+                    named_objects.push((index_key, marker_bytes, index_etag));
+                }
+                SemanticRemoteCatalogFixtureRowV1::DeletedDirectory(rel_path) => {
+                    let index_key = format!("{prefix}/index/{rel_path}/.tcfs_dir");
+                    let marker_bytes = deleted_index_json();
+                    entries.push(fixture_entry(
+                        RemoteCatalogObjectKindV1::Index,
+                        &index_key,
+                        &marker_bytes,
+                        &index_etag,
+                    ));
+                    named_objects.push((index_key, marker_bytes, index_etag));
+                }
+                SemanticRemoteCatalogFixtureRowV1::Reservation { exact_path, role } => {
+                    let folded_path = crate::index_entry::portable_casefold_path(exact_path)
+                        .expect("semantic catalog fixture path must be canonical");
+                    let reservation_id =
+                        crate::index_entry::namespace_reservation_object_id(&folded_path);
+                    let reservation_key = format!("{prefix}/.tcfs-namespace/v1/{reservation_id}");
+                    let role = match role {
+                        PortableNamespaceRole::File => "file",
+                        PortableNamespaceRole::Directory => "directory",
+                    };
+                    let reservation_bytes =
+                        canonical_reservation_json(exact_path, &folded_path, role);
+                    let reservation_etag = format!("fixture-reservation-{ordinal}");
+                    entries.push(fixture_entry(
+                        RemoteCatalogObjectKindV1::Reservation,
+                        &reservation_key,
+                        &reservation_bytes,
+                        &reservation_etag,
+                    ));
+                    named_objects.push((reservation_key, reservation_bytes, reservation_etag));
+                }
+            }
+        }
+        let pages = if entries.is_empty() {
+            Vec::new()
+        } else {
+            vec![sorted_entries(entries)]
+        };
+        let fixture = fixture_for_selected(root_id, spec, pages);
+        for (key, bytes, etag) in named_objects {
+            fixture.insert_named(key, bytes, &etag);
+        }
+        let receipt = fixture.receipt(prefix).await;
+        if let Some((target, bytes)) = first_read_write {
+            fixture
+                .backend
+                .write_local_file_on_first_catalog_read(target, bytes);
+        }
+        SemanticRemoteCatalogFixtureV1 {
+            operator: fixture.op,
+            receipt,
         }
     }
 
@@ -2896,11 +3152,32 @@ mod tests {
         };
         assert_eq!(verified.remote_prefix(), "roots");
         assert_eq!(verified.root_id(), "fixture-root");
+        assert_eq!(
+            verified.root_identity_fingerprint(),
+            RootSpecV1Config {
+                version: RootSpecV1Config::VERSION,
+                remote_prefix: "roots".to_owned(),
+                profile: RootProfileV1::AgentStaticV1,
+                generation: NonZeroU64::new(1).unwrap(),
+            }
+            .identity_fingerprint("fixture-root")
+        );
+        assert_eq!(verified.root_generation().get(), 1);
+        assert_eq!(verified.profile(), RootProfileV1::AgentStaticV1);
+        assert_eq!(
+            verified.profile_settings_fingerprint(),
+            RootProfileV1::AgentStaticV1.policy().settings_fingerprint()
+        );
+        assert_eq!(
+            verified.plan_contract_fingerprint(),
+            RegisteredRootPlanContractV1::strict_v1().fingerprint()
+        );
         assert_eq!(verified.catalog_sequence().get(), 1);
         assert_eq!(verified.index_object_count(), 0);
         assert_eq!(verified.reservation_count(), 0);
         assert_eq!(verified.manifest_count(), 0);
         assert_eq!(verified.claim_count(), 0);
+        assert_eq!(verified.namespace_safety_claims().len(), 0);
         assert_eq!(fixture.backend.head_reads.load(Ordering::SeqCst), 3);
         assert_eq!(
             fixture
@@ -2912,6 +3189,115 @@ mod tests {
                 .filter(|read| read.path == fixture.head_key)
                 .count(),
             3
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_fixture_binds_selected_context_orders_claims_and_mutates_on_first_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_file = dir.path().join("local.txt");
+        std::fs::write(&local_file, b"before").unwrap();
+        let spec = RootSpecV1Config {
+            version: RootSpecV1Config::VERSION,
+            remote_prefix: "roots".to_owned(),
+            profile: RootProfileV1::GitRawV1,
+            generation: NonZeroU64::new(7).unwrap(),
+        };
+        let fixture = semantic_remote_catalog_fixture_with_first_read_write_for_test_v1(
+            "work",
+            &spec,
+            &[
+                SemanticRemoteCatalogFixtureRowV1::DeletedFile("z.txt".to_owned()),
+                SemanticRemoteCatalogFixtureRowV1::CurrentFile("a.txt".to_owned()),
+                SemanticRemoteCatalogFixtureRowV1::CurrentDirectory("dir".to_owned()),
+                SemanticRemoteCatalogFixtureRowV1::DeletedDirectory("old-dir".to_owned()),
+                SemanticRemoteCatalogFixtureRowV1::Reservation {
+                    exact_path: "middle".to_owned(),
+                    role: PortableNamespaceRole::Directory,
+                },
+            ],
+            local_file.clone(),
+            b"during-catalog-read".to_vec(),
+        )
+        .await;
+        assert_eq!(std::fs::read(&local_file).unwrap(), b"before");
+        let selected = crate::registered_source_composition::
+            validated_selected_registered_root_remote_context_for_test_v1("work", &spec)
+            .unwrap();
+        let verified = match read_semantically_bound_remote_catalog_corpus_v1(
+            fixture.operator(),
+            &selected,
+            fixture.receipt(),
+        )
+        .await
+        .unwrap()
+        {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(verified) => verified,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+                panic!("expected semantic fixture, got {incomplete:?}")
+            }
+        };
+        assert_eq!(std::fs::read(local_file).unwrap(), b"during-catalog-read");
+        assert_eq!(verified.root_id(), "work");
+        assert_eq!(verified.root_generation().get(), 7);
+        assert_eq!(verified.profile(), RootProfileV1::GitRawV1);
+        let claims = verified
+            .namespace_safety_claims()
+            .map(|(folded, exact, role, origins)| {
+                (
+                    folded.to_owned(),
+                    exact.to_owned(),
+                    role,
+                    origins.current(),
+                    origins.historical(),
+                    origins.reservation(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            claims,
+            vec![
+                (
+                    "a.txt".to_owned(),
+                    "a.txt".to_owned(),
+                    PortableNamespaceRole::File,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    "dir".to_owned(),
+                    "dir".to_owned(),
+                    PortableNamespaceRole::Directory,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    "middle".to_owned(),
+                    "middle".to_owned(),
+                    PortableNamespaceRole::Directory,
+                    false,
+                    false,
+                    true,
+                ),
+                (
+                    "old-dir".to_owned(),
+                    "old-dir".to_owned(),
+                    PortableNamespaceRole::Directory,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "z.txt".to_owned(),
+                    "z.txt".to_owned(),
+                    PortableNamespaceRole::File,
+                    false,
+                    true,
+                    false,
+                ),
+            ]
         );
     }
 

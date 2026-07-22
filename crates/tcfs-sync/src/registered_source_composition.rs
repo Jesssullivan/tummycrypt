@@ -1,9 +1,11 @@
 //! Held-window composition for one selected registered root.
 //!
 //! This module deliberately stops before planning. Matching remote A/B passes
-//! are non-atomic observation evidence, and namespace-safety history is not an
-//! actionable payload projection. The opaque artifact below therefore exposes
-//! no digest, serialization, clone, or action conversion.
+//! remain non-atomic diagnostic evidence. A sibling catalog-bound observation
+//! retains one internally closed immutable catalog revision, but still cannot
+//! prove writer fencing, externally complete bootstrap, or currentness. Neither
+//! artifact is an actionable payload projection; both expose no digest,
+//! serialization, clone, or action conversion.
 
 use anyhow::Result;
 use opendal::Operator;
@@ -16,6 +18,7 @@ use tcfs_core::config::{
     RootBindingV1Config, RootProfilePolicyV1, RootProfileSettingsFingerprintV1, RootProfileV1,
     RootSpecV1Config,
 };
+use tcfs_storage::ConditionalWriteSemanticsReceipt;
 
 use crate::index_entry::PortableNamespaceRole;
 use crate::registered_git_topology::{
@@ -29,6 +32,10 @@ use crate::registered_local_snapshot::{
 use crate::registered_reconcile::{
     read_and_bind_strict_primary_state_for_pending_root_v1, StrictPrimaryStateIncompleteV1,
     StrictPrimaryStateReadV1, StrictPrimaryStateSnapshotV1,
+};
+use crate::registered_remote_catalog::{
+    read_semantically_bound_remote_catalog_corpus_v1, SemanticallyBoundRemoteCatalogCorpusV1,
+    StrictSemanticallyBoundRemoteCatalogIncompleteV1, StrictSemanticallyBoundRemoteCatalogReadV1,
 };
 use crate::registered_remote_observation::{
     read_bound_remote_observation_two_pass_v1, MatchingTwoPassBoundRemoteEvidenceV1,
@@ -127,11 +134,18 @@ pub(crate) enum StrictRegisteredRootSourcesIncompleteV1 {
     NamespaceSafetyResourceLimit,
     RemoteClaimWithoutOrigin,
     GitTopology(StrictGitRawTopologyIncompleteV1),
+    Catalog(StrictSemanticallyBoundRemoteCatalogIncompleteV1),
 }
 
 pub(crate) enum StrictRegisteredRootSourcesReadV1 {
     Observed(Box<AgentStaticNamespaceSafetyObservationV1>),
     GitRawLocalTopologyObserved(Box<GitRawLocalTopologyObservationV1>),
+    Incomplete(StrictRegisteredRootSourcesIncompleteV1),
+}
+
+pub(crate) enum CatalogBoundRegisteredRootSourcesReadV1 {
+    AgentStatic(Box<CatalogBoundAgentStaticSourceObservationV1>),
+    GitRaw(Box<CatalogBoundGitRawSourceObservationV1>),
     Incomplete(StrictRegisteredRootSourcesIncompleteV1),
 }
 
@@ -384,6 +398,195 @@ impl fmt::Debug for GitRawLocalTopologyObservationV1 {
     }
 }
 
+/// Common held inputs for one catalog-bound selected-root observation.
+///
+/// The catalog corpus proves the internal closure of one observed immutable
+/// revision only. It does not prove that every writer used the catalog, that
+/// sequence one was bootstrapped from complete truth, or that the selected
+/// HEAD is the latest non-replayed revision.
+struct CatalogBoundRegisteredRootSourceBaseV1 {
+    root_id: String,
+    spec: RootSpecV1Config,
+    binding: RootBindingV1Config,
+    spec_identity_fingerprint: String,
+    binding_identity_fingerprint: String,
+    profile_policy: RootProfilePolicyV1,
+    plan_contract: RegisteredRootPlanContractV1,
+    canonical_state_path: PathBuf,
+    local: RevalidatedStrictLocalSnapshotV1,
+    state: StrictPrimaryStateSnapshotV1,
+    remote: SemanticallyBoundRemoteCatalogCorpusV1,
+    namespace_safety_summary: NamespaceSafetySummaryV1,
+}
+
+impl CatalogBoundRegisteredRootSourceBaseV1 {
+    fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    fn canonical_local_root(&self) -> &Path {
+        self.local.canonical_local_root()
+    }
+
+    fn canonical_state_path(&self) -> &Path {
+        &self.canonical_state_path
+    }
+
+    fn remote_prefix(&self) -> &str {
+        self.remote.remote_prefix()
+    }
+
+    const fn namespace_safety_claim_count(&self) -> u64 {
+        self.namespace_safety_summary.unique_claims
+    }
+
+    #[cfg(test)]
+    const fn namespace_safety_source_claim_count(
+        &self,
+        source: NamespaceSafetyClaimSourceV1,
+    ) -> u64 {
+        self.namespace_safety_summary.source_claim_count(source)
+    }
+
+    #[cfg(test)]
+    const fn catalog_sequence(&self) -> u64 {
+        self.remote.catalog_sequence().get()
+    }
+}
+
+impl fmt::Debug for CatalogBoundRegisteredRootSourceBaseV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogBoundRegisteredRootSourceBaseV1")
+            .field("root_id", &self.root_id)
+            .field("spec", &self.spec)
+            .field("binding", &self.binding)
+            .field("spec_identity_fingerprint", &self.spec_identity_fingerprint)
+            .field(
+                "binding_identity_fingerprint",
+                &self.binding_identity_fingerprint,
+            )
+            .field("profile_policy", &self.profile_policy)
+            .field("plan_contract", &self.plan_contract)
+            .field("canonical_local_root", &self.local.canonical_local_root())
+            .field("canonical_state_path", &self.canonical_state_path)
+            .field("state_entry_count", &self.state.entries().len())
+            .field("remote", &self.remote)
+            .field(
+                "namespace_safety_claim_count",
+                &self.namespace_safety_summary.unique_claims,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Digestless held-source observation for an AgentStatic root and one
+/// internally closed catalog revision.
+///
+/// This remains non-authoritative until writer fencing, trusted bootstrap, and
+/// monotonic currentness are independently established. It must not gain a
+/// plan digest or action projection.
+pub(crate) struct CatalogBoundAgentStaticSourceObservationV1 {
+    base: CatalogBoundRegisteredRootSourceBaseV1,
+}
+
+impl CatalogBoundAgentStaticSourceObservationV1 {
+    pub(crate) fn root_id(&self) -> &str {
+        self.base.root_id()
+    }
+
+    pub(crate) fn canonical_local_root(&self) -> &Path {
+        self.base.canonical_local_root()
+    }
+
+    pub(crate) fn canonical_state_path(&self) -> &Path {
+        self.base.canonical_state_path()
+    }
+
+    pub(crate) fn remote_prefix(&self) -> &str {
+        self.base.remote_prefix()
+    }
+
+    pub(crate) const fn namespace_safety_claim_count(&self) -> u64 {
+        self.base.namespace_safety_claim_count()
+    }
+
+    #[cfg(test)]
+    const fn namespace_safety_source_claim_count(
+        &self,
+        source: NamespaceSafetyClaimSourceV1,
+    ) -> u64 {
+        self.base.namespace_safety_source_claim_count(source)
+    }
+
+    #[cfg(test)]
+    const fn catalog_sequence(&self) -> u64 {
+        self.base.catalog_sequence()
+    }
+}
+
+impl fmt::Debug for CatalogBoundAgentStaticSourceObservationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogBoundAgentStaticSourceObservationV1")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Digestless held-source observation for a GitRaw root and one internally
+/// closed catalog revision.
+///
+/// The retained Git topology is the checkpoint-14 immutable raw-metadata
+/// shadow. It does not prove object existence/kind, ancestry, fast-forward, or
+/// a continuous native-Git writer fence. This type must not gain a plan digest
+/// or action projection.
+pub(crate) struct CatalogBoundGitRawSourceObservationV1 {
+    base: CatalogBoundRegisteredRootSourceBaseV1,
+    git_topology: HeldStrictGitRawTopologyV1,
+}
+
+impl CatalogBoundGitRawSourceObservationV1 {
+    pub(crate) fn root_id(&self) -> &str {
+        self.base.root_id()
+    }
+
+    pub(crate) fn canonical_local_root(&self) -> &Path {
+        self.base.canonical_local_root()
+    }
+
+    pub(crate) fn canonical_state_path(&self) -> &Path {
+        self.base.canonical_state_path()
+    }
+
+    pub(crate) fn remote_prefix(&self) -> &str {
+        self.base.remote_prefix()
+    }
+
+    pub(crate) const fn namespace_safety_claim_count(&self) -> u64 {
+        self.base.namespace_safety_claim_count()
+    }
+
+    pub(crate) fn git_topology(&self) -> &HeldStrictGitRawTopologyV1 {
+        &self.git_topology
+    }
+
+    #[cfg(test)]
+    const fn catalog_sequence(&self) -> u64 {
+        self.base.catalog_sequence()
+    }
+}
+
+impl fmt::Debug for CatalogBoundGitRawSourceObservationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogBoundGitRawSourceObservationV1")
+            .field("base", &self.base)
+            .field("git_topology", &self.git_topology)
+            .finish_non_exhaustive()
+    }
+}
+
 struct ExpectedRegisteredSourceRouteV1<'a> {
     canonical_local_root: &'a Path,
     canonical_state_path: &'a Path,
@@ -524,14 +727,20 @@ fn checked_summary_increment_v1(
     Ok(())
 }
 
-fn compose_namespace_safety_summary_v1(
+fn compose_namespace_safety_summary_from_remote_claims_v1<'a>(
     local: &RevalidatedStrictLocalSnapshotV1,
     state: &StrictPrimaryStateSnapshotV1,
-    remote: &MatchingTwoPassBoundRemoteEvidenceV1,
+    mut remote_claims: impl Iterator<
+        Item = (
+            &'a str,
+            &'a str,
+            PortableNamespaceRole,
+            RemoteNamespaceClaimOriginsV1,
+        ),
+    >,
 ) -> std::result::Result<NamespaceSafetySummaryV1, ComposeNamespaceSafetyErrorV1> {
     let mut local_claims = local.snapshot().namespace_claims();
     let mut state_claims = state.namespace_claims();
-    let mut remote_claims = remote.namespace_safety_claims();
     let mut local_current = local_claims.next();
     let mut state_current = state_claims.next();
     let mut remote_current = remote_claims.next();
@@ -631,6 +840,30 @@ fn compose_namespace_safety_summary_v1(
         }
     }
     Ok(summary)
+}
+
+fn compose_namespace_safety_summary_v1(
+    local: &RevalidatedStrictLocalSnapshotV1,
+    state: &StrictPrimaryStateSnapshotV1,
+    remote: &MatchingTwoPassBoundRemoteEvidenceV1,
+) -> std::result::Result<NamespaceSafetySummaryV1, ComposeNamespaceSafetyErrorV1> {
+    compose_namespace_safety_summary_from_remote_claims_v1(
+        local,
+        state,
+        remote.namespace_safety_claims(),
+    )
+}
+
+fn compose_catalog_namespace_safety_summary_v1(
+    local: &RevalidatedStrictLocalSnapshotV1,
+    state: &StrictPrimaryStateSnapshotV1,
+    remote: &SemanticallyBoundRemoteCatalogCorpusV1,
+) -> std::result::Result<NamespaceSafetySummaryV1, ComposeNamespaceSafetyErrorV1> {
+    compose_namespace_safety_summary_from_remote_claims_v1(
+        local,
+        state,
+        remote.namespace_safety_claims(),
+    )
 }
 
 #[cfg(test)]
@@ -903,10 +1136,222 @@ async fn observe_validated_registered_root_sources_v1(
     }
 }
 
+#[cfg(test)]
+async fn observe_catalog_bound_selected_registered_root_sources_for_test_v1(
+    root_id: &str,
+    selected: &RegisteredRootV1Config,
+    canonical_local_root: &Path,
+    canonical_state_path: &Path,
+    op: &Operator,
+    receipt: &ConditionalWriteSemanticsReceipt,
+) -> Result<CatalogBoundRegisteredRootSourcesReadV1> {
+    let selected = match validated_selection_for_test_v1(
+        root_id,
+        selected,
+        canonical_local_root,
+        canonical_state_path,
+    ) {
+        Ok(selected) => selected,
+        Err(incomplete) => {
+            return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                incomplete,
+            ));
+        }
+    };
+    observe_catalog_bound_validated_registered_root_sources_v1(selected, op, receipt).await
+}
+
+/// Observe one daemon-validated selected-root route and one internally closed
+/// immutable catalog revision through the same held local acquisition window.
+///
+/// Receipt acquisition is deliberately outside this function. The catalog
+/// reader verifies that the non-Clone receipt belongs to this exact accessor
+/// and prefix. Even a successful result remains digestless because writer
+/// fencing, trusted bootstrap, and monotonic currentness are not established.
+async fn observe_catalog_bound_validated_registered_root_sources_v1(
+    selected_route: ValidatedSelectedRegisteredRootRouteV1,
+    op: &Operator,
+    receipt: &ConditionalWriteSemanticsReceipt,
+) -> Result<CatalogBoundRegisteredRootSourcesReadV1> {
+    let remote_context = selected_route.remote_context();
+    let ValidatedSelectedRegisteredRootRouteV1 {
+        root_id,
+        selected,
+        canonical_local_root,
+        canonical_state_path,
+    } = selected_route;
+    let binding = selected
+        .binding
+        .as_ref()
+        .expect("validated selected-root capability always carries a binding");
+    let profile_policy = selected.spec.profile.policy();
+    let plan_contract = RegisteredRootPlanContractV1::strict_v1();
+    let plan_contract_fingerprint = plan_contract.fingerprint();
+    let spec_identity_fingerprint = selected.spec.identity_fingerprint(&root_id);
+    let binding_identity_fingerprint =
+        match binding.binding_fingerprint(&canonical_local_root, &canonical_state_path) {
+            Ok(fingerprint) => fingerprint,
+            Err(_) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::InvalidSelectedRoot,
+                ));
+            }
+        };
+
+    let mut pending =
+        match begin_strict_local_snapshot_v1(&canonical_local_root, selected.spec.profile)? {
+            StrictLocalSnapshotHoldReadV1::Pending(pending) => pending,
+            StrictLocalSnapshotHoldReadV1::Incomplete(incomplete) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::Local(incomplete),
+                ));
+            }
+        };
+    let pending_git = if selected.spec.profile == RootProfileV1::GitRawV1 {
+        match begin_strict_git_raw_topology_v1(&mut pending) {
+            StrictGitRawTopologyBeginV1::Pending(git) => Some(*git),
+            StrictGitRawTopologyBeginV1::Incomplete(incomplete) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let state = match read_and_bind_strict_primary_state_for_pending_root_v1(
+        &canonical_state_path,
+        &pending,
+        &selected.spec.remote_prefix,
+    )? {
+        StrictPrimaryStateReadV1::Complete(state) => state,
+        StrictPrimaryStateReadV1::Incomplete(incomplete) => {
+            return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::State(incomplete),
+            ));
+        }
+    };
+    let remote =
+        match read_semantically_bound_remote_catalog_corpus_v1(op, &remote_context, receipt).await?
+        {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(remote) => *remote,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::Catalog(incomplete),
+                ));
+            }
+        };
+    let local = match pending.revalidate_inventory_c()? {
+        StrictLocalSnapshotFinishV1::Complete(local) => local,
+        StrictLocalSnapshotFinishV1::Incomplete(incomplete) => {
+            return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::Local(incomplete),
+            ));
+        }
+    };
+    let (git_topology, local) = match pending_git {
+        Some(git) => match git.revalidate_after_external_reads(local) {
+            StrictGitRawTopologyFinishV1::Held { topology, local } => (Some(topology), local),
+            StrictGitRawTopologyFinishV1::Incomplete(incomplete) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+                ));
+            }
+        },
+        None => (None, local),
+    };
+    if let Some(git) = &git_topology {
+        if let Err(incomplete) = git.revalidate_capabilities() {
+            return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+            ));
+        }
+    }
+
+    let expected_route = ExpectedRegisteredSourceRouteV1 {
+        canonical_local_root: &canonical_local_root,
+        canonical_state_path: &canonical_state_path,
+        remote_prefix: &selected.spec.remote_prefix,
+        profile: selected.spec.profile,
+        profile_settings_fingerprint: profile_policy.settings_fingerprint(),
+        plan_contract_fingerprint,
+    };
+    let observed_route = ObservedRegisteredSourceRouteV1 {
+        held_local_root: local.canonical_local_root(),
+        state_path: state.selected_state_path(),
+        state_local_root: state.canonical_local_root(),
+        state_remote_prefix: state.remote_prefix(),
+        remote_prefix: remote.remote_prefix(),
+        profile: local.snapshot().profile(),
+        profile_settings_fingerprint: local.snapshot().profile_settings_fingerprint(),
+        plan_contract_fingerprint: local.snapshot().plan_contract_fingerprint(),
+    };
+    if let Err(mismatch) = validate_observed_source_route_v1(&expected_route, &observed_route) {
+        return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+            StrictRegisteredRootSourcesIncompleteV1::RouteMismatch(mismatch),
+        ));
+    }
+
+    let namespace_safety_summary =
+        match compose_catalog_namespace_safety_summary_v1(&local, &state, &remote) {
+            Ok(summary) => summary,
+            Err(ComposeNamespaceSafetyErrorV1::Conflict(conflict)) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::NamespaceSafetyConflict(conflict),
+                ));
+            }
+            Err(ComposeNamespaceSafetyErrorV1::ResourceLimit) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::NamespaceSafetyResourceLimit,
+                ));
+            }
+            Err(ComposeNamespaceSafetyErrorV1::RemoteClaimWithoutOrigin) => {
+                return Ok(CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::RemoteClaimWithoutOrigin,
+                ));
+            }
+        };
+
+    let base = CatalogBoundRegisteredRootSourceBaseV1 {
+        root_id,
+        spec: selected.spec.clone(),
+        binding: binding.clone(),
+        spec_identity_fingerprint,
+        binding_identity_fingerprint,
+        profile_policy,
+        plan_contract,
+        canonical_state_path,
+        local,
+        state,
+        remote,
+        namespace_safety_summary,
+    };
+    match selected.spec.profile {
+        RootProfileV1::AgentStaticV1 => {
+            debug_assert!(git_topology.is_none());
+            Ok(CatalogBoundRegisteredRootSourcesReadV1::AgentStatic(
+                Box::new(CatalogBoundAgentStaticSourceObservationV1 { base }),
+            ))
+        }
+        RootProfileV1::GitRawV1 => {
+            let git_topology =
+                git_topology.expect("GitRaw acquisition retains exact topology evidence");
+            Ok(CatalogBoundRegisteredRootSourcesReadV1::GitRaw(Box::new(
+                CatalogBoundGitRawSourceObservationV1 { base, git_topology },
+            )))
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::registered_local_snapshot::StrictLocalSnapshotIncompleteKindV1;
+    use crate::registered_remote_catalog::tests::{
+        semantic_remote_catalog_fixture_for_test_v1,
+        semantic_remote_catalog_fixture_with_first_read_write_for_test_v1,
+        SemanticRemoteCatalogFixtureRowV1,
+    };
     use crate::registered_remote_observation::tests::{
         matching_remote_fixture_operator_v1,
         matching_remote_fixture_operator_with_first_list_write_v1,
@@ -932,6 +1377,34 @@ mod tests {
         Into<Vec<crate::reconcile::ReconcileAction>>,
         Into<crate::registered_local_snapshot::StrictLocalSnapshotDigestV1>,
         Into<crate::registered_reconcile::StrictPrimaryStateBytesDigestV1>
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogBoundAgentStaticSourceObservationV1: Clone,
+        serde::Serialize,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>,
+        Into<crate::registered_local_snapshot::StrictLocalSnapshotDigestV1>,
+        Into<crate::registered_reconcile::StrictPrimaryStateBytesDigestV1>
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogBoundGitRawSourceObservationV1: Clone,
+        serde::Serialize,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>,
+        Into<crate::registered_local_snapshot::StrictLocalSnapshotDigestV1>,
+        Into<crate::registered_reconcile::StrictPrimaryStateBytesDigestV1>
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogBoundRegisteredRootSourcesReadV1: Clone,
+        serde::Serialize,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>,
+        Into<crate::registered_local_snapshot::StrictLocalSnapshotDigestV1>,
+        Into<crate::registered_reconcile::StrictPrimaryStateBytesDigestV1>
+    );
+    static_assertions::assert_not_impl_any!(
+        SemanticallyBoundRemoteCatalogCorpusV1: Clone,
+        serde::Serialize
     );
     static_assertions::assert_not_impl_any!(
         MatchingTwoPassBoundRemoteEvidenceV1: Clone,
@@ -1029,6 +1502,65 @@ mod tests {
         .unwrap()
     }
 
+    async fn observe_catalog_fixture(
+        profile: RootProfileV1,
+        local_files: &[&str],
+        state_paths: &[&str],
+        remote_rows: &[SemanticRemoteCatalogFixtureRowV1],
+    ) -> CatalogBoundRegisteredRootSourcesReadV1 {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        if profile == RootProfileV1::GitRawV1 {
+            initialize_isolated_git_repository(&root, dir.path());
+        }
+        for rel_path in local_files {
+            let path = root.join(rel_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"payload").unwrap();
+        }
+        let root = fs::canonicalize(root).unwrap();
+        let state_path = dir.path().join("state.json");
+        write_private(&state_path, &state_json(&root, state_paths));
+        let state_path = fs::canonicalize(state_path).unwrap();
+        let selected = selected_root(&root, &state_path, profile);
+        let remote =
+            semantic_remote_catalog_fixture_for_test_v1("work", &selected.spec, remote_rows).await;
+        observe_catalog_bound_selected_registered_root_sources_for_test_v1(
+            "work",
+            &selected,
+            &root,
+            &state_path,
+            remote.operator(),
+            remote.receipt(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn initialize_isolated_git_repository(root: &Path, sandbox: &Path) {
+        let home = sandbox.join("git-home");
+        let xdg_config_home = sandbox.join("git-xdg-config");
+        let template_dir = sandbox.join("git-empty-template");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&xdg_config_home).unwrap();
+        fs::create_dir(&template_dir).unwrap();
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", xdg_config_home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TEMPLATE_DIR", template_dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     fn observed(
         read: StrictRegisteredRootSourcesReadV1,
     ) -> Box<AgentStaticNamespaceSafetyObservationV1> {
@@ -1056,6 +1588,39 @@ mod tests {
             }
             StrictRegisteredRootSourcesReadV1::Incomplete(other) => {
                 panic!("expected a namespace-safety conflict, got {other:?}")
+            }
+        }
+    }
+
+    fn catalog_agent_observed(
+        read: CatalogBoundRegisteredRootSourcesReadV1,
+    ) -> Box<CatalogBoundAgentStaticSourceObservationV1> {
+        match read {
+            CatalogBoundRegisteredRootSourcesReadV1::AgentStatic(observed) => observed,
+            CatalogBoundRegisteredRootSourcesReadV1::GitRaw(observed) => {
+                panic!("expected catalog-bound AgentStatic sources, got GitRaw: {observed:?}")
+            }
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(incomplete) => {
+                panic!("expected catalog-bound sources, got {incomplete:?}")
+            }
+        }
+    }
+
+    fn catalog_conflict(
+        read: CatalogBoundRegisteredRootSourcesReadV1,
+    ) -> NamespaceSafetyClaimConflictV1 {
+        match read {
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::NamespaceSafetyConflict(conflict),
+            ) => conflict,
+            CatalogBoundRegisteredRootSourcesReadV1::AgentStatic(_) => {
+                panic!("expected a catalog-bound namespace conflict, got AgentStatic sources")
+            }
+            CatalogBoundRegisteredRootSourcesReadV1::GitRaw(_) => {
+                panic!("expected a catalog-bound namespace conflict, got GitRaw sources")
+            }
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(other) => {
+                panic!("expected a catalog-bound namespace conflict, got {other:?}")
             }
         }
     }
@@ -1099,6 +1664,251 @@ mod tests {
                 .namespace_safety_source_claim_count(NamespaceSafetyClaimSourceV1::LocalCurrent),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_bound_agent_static_retains_one_closed_empty_revision_without_plan() {
+        let observed = catalog_agent_observed(
+            observe_catalog_fixture(RootProfileV1::AgentStaticV1, &[], &[], &[]).await,
+        );
+        assert_eq!(observed.root_id(), "work");
+        assert_eq!(observed.remote_prefix(), "roots");
+        assert_eq!(observed.catalog_sequence(), 1);
+        assert_eq!(observed.namespace_safety_claim_count(), 0);
+        assert_eq!(
+            observed
+                .namespace_safety_source_claim_count(NamespaceSafetyClaimSourceV1::RemoteCurrent),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_bound_claims_join_local_state_and_remote_in_one_lattice() {
+        let observed = catalog_agent_observed(
+            observe_catalog_fixture(
+                RootProfileV1::AgentStaticV1,
+                &["same"],
+                &["same"],
+                &[SemanticRemoteCatalogFixtureRowV1::CurrentFile(
+                    "same".to_owned(),
+                )],
+            )
+            .await,
+        );
+        assert_eq!(observed.namespace_safety_claim_count(), 1);
+        for source in [
+            NamespaceSafetyClaimSourceV1::LocalCurrent,
+            NamespaceSafetyClaimSourceV1::StateBaseline,
+            NamespaceSafetyClaimSourceV1::RemoteCurrent,
+        ] {
+            assert_eq!(observed.namespace_safety_source_claim_count(source), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_bound_cross_source_alias_fails_closed() {
+        let conflict = catalog_conflict(
+            observe_catalog_fixture(
+                RootProfileV1::AgentStaticV1,
+                &["Readme"],
+                &[],
+                &[SemanticRemoteCatalogFixtureRowV1::CurrentFile(
+                    "README".to_owned(),
+                )],
+            )
+            .await,
+        );
+        assert_eq!(
+            conflict.kind(),
+            NamespaceSafetyClaimConflictKindV1::FoldedSpellingAlias
+        );
+        assert_eq!(
+            conflict.first_source(),
+            NamespaceSafetyClaimSourceV1::LocalCurrent
+        );
+        assert_eq!(
+            conflict.conflicting_source(),
+            NamespaceSafetyClaimSourceV1::RemoteCurrent
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_reads_remain_inside_local_inventory_a_c_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("guard"), b"before").unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let state_path = dir.path().join("state.json");
+        write_private(&state_path, empty_state_json());
+        let state_path = fs::canonicalize(state_path).unwrap();
+        let selected = selected_root(&root, &state_path, RootProfileV1::AgentStaticV1);
+        let remote = semantic_remote_catalog_fixture_with_first_read_write_for_test_v1(
+            "work",
+            &selected.spec,
+            &[],
+            root.join("guard"),
+            b"after".to_vec(),
+        )
+        .await;
+
+        match observe_catalog_bound_selected_registered_root_sources_for_test_v1(
+            "work",
+            &selected,
+            &root,
+            &state_path,
+            remote.operator(),
+            remote.receipt(),
+        )
+        .await
+        .unwrap()
+        {
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::Local(incomplete),
+            ) if incomplete.kind() == StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead => {}
+            other => {
+                let _ = other;
+                panic!("catalog-window local mutation must fail at inventory C");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_bound_git_raw_retains_the_exact_acquisition_shadow() {
+        let observed = match observe_catalog_fixture(RootProfileV1::GitRawV1, &[], &[], &[]).await {
+            CatalogBoundRegisteredRootSourcesReadV1::GitRaw(observed) => observed,
+            CatalogBoundRegisteredRootSourcesReadV1::AgentStatic(_) => {
+                panic!("expected catalog-bound GitRaw sources")
+            }
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(incomplete) => {
+                panic!("expected catalog-bound GitRaw sources, got {incomplete:?}")
+            }
+        };
+        assert_eq!(observed.root_id(), "work");
+        assert_eq!(observed.remote_prefix(), "roots");
+        assert_eq!(observed.catalog_sequence(), 1);
+        assert_eq!(
+            observed.git_topology().head().symbolic_target(),
+            Some("refs/heads/main")
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_bound_git_raw_rejects_head_change_inside_catalog_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        initialize_isolated_git_repository(&root, dir.path());
+        let root = fs::canonicalize(root).unwrap();
+        let state_path = dir.path().join("state.json");
+        write_private(&state_path, empty_state_json());
+        let state_path = fs::canonicalize(state_path).unwrap();
+        let selected = selected_root(&root, &state_path, RootProfileV1::GitRawV1);
+        let remote = semantic_remote_catalog_fixture_with_first_read_write_for_test_v1(
+            "work",
+            &selected.spec,
+            &[],
+            root.join(".git/HEAD"),
+            b"ref: refs/heads/other\n".to_vec(),
+        )
+        .await;
+
+        match observe_catalog_bound_selected_registered_root_sources_for_test_v1(
+            "work",
+            &selected,
+            &root,
+            &state_path,
+            remote.operator(),
+            remote.receipt(),
+        )
+        .await
+        .unwrap()
+        {
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::Local(incomplete),
+            ) if incomplete.kind() == StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead => {}
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+            ) if incomplete.kind()
+                == crate::registered_git_topology::StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged => {
+            }
+            other => {
+                let _ = other;
+                panic!("Git HEAD mutation during the catalog window must fail closed");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_bound_composition_rejects_a_receipt_for_another_accessor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let state_path = dir.path().join("state.json");
+        write_private(&state_path, empty_state_json());
+        let state_path = fs::canonicalize(state_path).unwrap();
+        let selected = selected_root(&root, &state_path, RootProfileV1::AgentStaticV1);
+        let remote = semantic_remote_catalog_fixture_for_test_v1("work", &selected.spec, &[]).await;
+        let other = semantic_remote_catalog_fixture_for_test_v1("work", &selected.spec, &[]).await;
+
+        assert!(matches!(
+            observe_catalog_bound_selected_registered_root_sources_for_test_v1(
+                "work",
+                &selected,
+                &root,
+                &state_path,
+                remote.operator(),
+                other.receipt(),
+            )
+            .await
+            .unwrap(),
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::Catalog(
+                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::Catalog(
+                        crate::registered_remote_catalog::StrictRemoteCatalogIncompleteV1::StorageSemanticsUnverified
+                    )
+                )
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn catalog_bound_composition_rejects_catalog_route_context_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let state_path = dir.path().join("state.json");
+        write_private(&state_path, empty_state_json());
+        let state_path = fs::canonicalize(state_path).unwrap();
+        let selected = selected_root(&root, &state_path, RootProfileV1::AgentStaticV1);
+        let mut other_spec = selected.spec.clone();
+        other_spec.generation = NonZeroU64::new(2).unwrap();
+        let remote = semantic_remote_catalog_fixture_for_test_v1("work", &other_spec, &[]).await;
+
+        assert!(matches!(
+            observe_catalog_bound_selected_registered_root_sources_for_test_v1(
+                "work",
+                &selected,
+                &root,
+                &state_path,
+                remote.operator(),
+                remote.receipt(),
+            )
+            .await
+            .unwrap(),
+            CatalogBoundRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::Catalog(
+                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::Catalog(
+                        crate::registered_remote_catalog::StrictRemoteCatalogIncompleteV1::Invalid {
+                            kind: crate::registered_remote_catalog::RemoteCatalogClosureObjectKindV1::Head,
+                            reason: crate::registered_remote_catalog::InvalidRemoteCatalogReasonV1::Context,
+                        }
+                    )
+                )
+            )
+        ));
     }
 
     #[tokio::test]
