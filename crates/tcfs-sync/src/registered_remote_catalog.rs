@@ -125,6 +125,11 @@ pub(crate) enum StrictRemoteCatalogIncompleteV1 {
     HeadMissing,
     HeadUnboundCurrentEtag,
     HeadChanged,
+    /// A canonical publishing marker for the exact selected context is visible.
+    /// Readers cannot independently authenticate the external writer lease and
+    /// must not fall back to an older committed revision while mutation may be
+    /// in flight.
+    PublicationInProgress,
     ClosureObjectMissing {
         kind: RemoteCatalogClosureObjectKindV1,
     },
@@ -339,6 +344,11 @@ pub(crate) struct VerifiedRemoteCatalogClosureV1 {
     publication_nonce: [u8; 32],
     parent_head_revision: Option<[u8; 32]>,
     head_revision: [u8; 32],
+    // Retained so a future publication transaction can archive the complete
+    // predecessor HEAD before replacing the mutable key with a visible fence.
+    // A revision hash alone is not recoverable without forbidden LIST-based
+    // discovery.
+    head_raw_bytes: Vec<u8>,
     head_object: BoundRemoteObjectSnapshotV1,
     root_object: BoundRemoteObjectSnapshotV1,
     page_objects: Vec<BoundRemoteObjectSnapshotV1>,
@@ -701,7 +711,13 @@ fn validate_catalog_lineage_v1(
         return None;
     }
     let parent = match parent_head_revision {
-        Some(parent) => Some(parse_lower_hex_32(parent)?),
+        Some(parent) => {
+            let parent = parse_lower_hex_32(parent)?;
+            if parent == [0_u8; 32] {
+                return None;
+            }
+            Some(parent)
+        }
         None => None,
     };
     if (sequence.get() == 1) != parent.is_none() {
@@ -1150,8 +1166,21 @@ fn validate_head_v1(
     selected: &ValidatedSelectedRegisteredRootRemoteContextV1,
 ) -> std::result::Result<ValidatedRemoteCatalogHeadV1, StrictRemoteCatalogIncompleteV1> {
     let kind = RemoteCatalogClosureObjectKindV1::Head;
-    let head = canonical_wire_v1::<RemoteCatalogHeadWireV1>(raw.raw_bytes())
-        .ok_or_else(|| invalid(kind, InvalidRemoteCatalogReasonV1::CanonicalEncoding))?;
+    let head = match canonical_wire_v1::<RemoteCatalogHeadWireV1>(raw.raw_bytes()) {
+        Some(head) => head,
+        None => match publication::classify_publishing_head_v1(raw.raw_bytes(), selected) {
+            Some(Ok(())) => {
+                return Err(StrictRemoteCatalogIncompleteV1::PublicationInProgress);
+            }
+            Some(Err(reason)) => return Err(invalid(kind, reason)),
+            None => {
+                return Err(invalid(
+                    kind,
+                    InvalidRemoteCatalogReasonV1::CanonicalEncoding,
+                ));
+            }
+        },
+    };
     if head.version != CATALOG_SCHEMA_VERSION_V1 {
         return Err(invalid(
             kind,
@@ -1506,6 +1535,7 @@ pub(crate) async fn read_verified_remote_catalog_closure_v1(
     }
 
     let head_revision = catalog_head_revision_v1(head_a_raw.raw_bytes());
+    let head_raw_bytes = head_a_raw.raw_bytes().to_vec();
     let head_object = bind_remote_object_v1(head_a_raw);
     let root_object = bind_remote_object_v1(root_raw);
     Ok(StrictRemoteCatalogClosureReadV1::Verified(Box::new(
@@ -1521,6 +1551,7 @@ pub(crate) async fn read_verified_remote_catalog_closure_v1(
             publication_nonce,
             parent_head_revision,
             head_revision,
+            head_raw_bytes,
             head_object,
             root_object,
             page_objects,
@@ -2110,6 +2141,12 @@ pub(crate) async fn read_semantically_bound_remote_catalog_corpus_v1(
         }),
     ))
 }
+
+// Source-only catalog publication protocol. Production constructors for the
+// external bootstrap/high-water/writer-fence receipts deliberately do not
+// exist yet, so this module cannot authorize a live writer or a plan digest.
+#[allow(dead_code)]
+pub(crate) mod publication;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -3992,6 +4029,108 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn visible_publishing_head_blocks_catalog_readers() {
+        let publishing = fixture("roots", Vec::new());
+        let committed =
+            serde_json::from_slice::<RemoteCatalogHeadWireV1>(&publishing.head_bytes).unwrap();
+        let publishing_bytes =
+            publication::canonical_publishing_head_bytes_for_test_v1(committed.context);
+        publishing.backend.insert(
+            publishing.head_key.clone(),
+            scripted_object(publishing_bytes, "publishing-head-etag"),
+        );
+        let receipt = publishing.receipt("roots").await;
+        assert_eq!(
+            incomplete(publishing.read(&receipt).await.unwrap()),
+            StrictRemoteCatalogIncompleteV1::PublicationInProgress
+        );
+        assert!(publishing.backend.reads.lock().unwrap().iter().all(|read| {
+            read.path == publishing.head_key
+                || read
+                    .path
+                    .contains(".tcfs-capability-probes/conditional-write-")
+        }));
+    }
+
+    #[tokio::test]
+    async fn publishing_head_context_drift_is_not_another_roots_fence() {
+        for case in 0_u8..6 {
+            let publishing = fixture("roots", Vec::new());
+            let committed =
+                serde_json::from_slice::<RemoteCatalogHeadWireV1>(&publishing.head_bytes).unwrap();
+            let mut context = committed.context;
+            match case {
+                0 => {
+                    context.root_id = "other-root".to_owned();
+                    let spec = RootSpecV1Config {
+                        version: RootSpecV1Config::VERSION,
+                        remote_prefix: "roots".to_owned(),
+                        profile: context.profile,
+                        generation: NonZeroU64::new(context.root_generation).unwrap(),
+                    };
+                    context.root_identity_fingerprint = spec.identity_fingerprint(&context.root_id);
+                }
+                1 => {
+                    context.root_identity_fingerprint = format!("b3v1:{}", "0".repeat(64));
+                }
+                2 => {
+                    context.root_generation += 1;
+                    let spec = RootSpecV1Config {
+                        version: RootSpecV1Config::VERSION,
+                        remote_prefix: "roots".to_owned(),
+                        profile: context.profile,
+                        generation: NonZeroU64::new(context.root_generation).unwrap(),
+                    };
+                    context.root_identity_fingerprint = spec.identity_fingerprint(&context.root_id);
+                }
+                3 => {
+                    context.profile = RootProfileV1::GitRawV1;
+                    context.profile_settings_fingerprint =
+                        context.profile.policy().settings_fingerprint().to_string();
+                    let spec = RootSpecV1Config {
+                        version: RootSpecV1Config::VERSION,
+                        remote_prefix: "roots".to_owned(),
+                        profile: context.profile,
+                        generation: NonZeroU64::new(context.root_generation).unwrap(),
+                    };
+                    context.root_identity_fingerprint = spec.identity_fingerprint(&context.root_id);
+                }
+                4 => {
+                    context.profile_settings_fingerprint = RootProfileV1::GitRawV1
+                        .policy()
+                        .settings_fingerprint()
+                        .to_string();
+                }
+                5 => {
+                    context.plan_contract_fingerprint = format!("b3v1:{}", "0".repeat(64));
+                }
+                _ => unreachable!(),
+            }
+            let publishing_bytes =
+                publication::canonical_publishing_head_bytes_for_test_v1(context);
+            publishing.backend.insert(
+                publishing.head_key.clone(),
+                scripted_object(publishing_bytes, "publishing-head-etag"),
+            );
+            let receipt = publishing.receipt("roots").await;
+            assert_eq!(
+                incomplete(publishing.read(&receipt).await.unwrap()),
+                StrictRemoteCatalogIncompleteV1::Invalid {
+                    kind: RemoteCatalogClosureObjectKindV1::Head,
+                    reason: InvalidRemoteCatalogReasonV1::Context,
+                },
+                "publishing context drift case {case}"
+            );
+            assert!(publishing.backend.reads.lock().unwrap().iter().all(|read| {
+                read.path == publishing.head_key
+                    || read
+                        .path
+                        .contains(".tcfs-capability-probes/conditional-write-")
+            }));
+        }
+    }
+
+    #[tokio::test]
     async fn unbound_or_changed_closure_objects_are_typed_without_retry() {
         let head = fixture("roots", Vec::new());
         head.backend.insert(
@@ -4253,6 +4392,36 @@ pub(crate) mod tests {
                 reason: InvalidRemoteCatalogReasonV1::Lineage
             }
         );
+
+        let zero_parent = fixture("roots", Vec::new());
+        let mut head =
+            serde_json::from_slice::<RemoteCatalogHeadWireV1>(&zero_parent.head_bytes).unwrap();
+        head.catalog_sequence = 2;
+        head.parent_head_revision = Some("00".repeat(32));
+        zero_parent.backend.insert(
+            zero_parent.head_key.clone(),
+            scripted_object(serde_json::to_vec(&head).unwrap(), "head-etag-a"),
+        );
+        let receipt = zero_parent.receipt("roots").await;
+        assert_eq!(
+            incomplete(zero_parent.read(&receipt).await.unwrap()),
+            StrictRemoteCatalogIncompleteV1::Invalid {
+                kind: RemoteCatalogClosureObjectKindV1::Head,
+                reason: InvalidRemoteCatalogReasonV1::Lineage
+            }
+        );
+        assert!(zero_parent
+            .backend
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|read| {
+                read.path == zero_parent.head_key
+                    || read
+                        .path
+                        .contains(".tcfs-capability-probes/conditional-write-")
+            }));
 
         let zero_nonce = fixture("roots", Vec::new());
         let mut head =
