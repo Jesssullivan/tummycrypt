@@ -444,6 +444,17 @@ pub(crate) struct PendingStrictLocalSnapshotV1 {
     unsupported: std::convert::Infallible,
 }
 
+struct StrictLocalGitShadowExpectedV1(std::sync::Arc<()>);
+
+/// One-shot, opaque proof that a Git metadata shadow came from the exact local
+/// acquisition later promoted by inventory C.
+///
+/// The witness is intentionally neither clonable nor inspectable. The local
+/// acquisition retains the matching half and consumes it during binding, so a
+/// shadow cannot be paired with a separately acquired snapshot of the same
+/// pathname or inode.
+pub(crate) struct StrictLocalGitShadowWitnessV1(std::sync::Arc<()>);
+
 /// Descriptor-bracketed identity metadata from the provisional inventory.
 ///
 /// This intentionally carries neither file contents nor a snapshot digest. It
@@ -519,6 +530,17 @@ impl PendingStrictLocalSnapshotV1 {
         #[cfg(target_os = "linux")]
         {
             self.inner.try_clone_root_descriptor()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
+    /// Issue the only Git-shadow witness for this provisional acquisition.
+    pub(crate) fn issue_git_shadow_witness(&mut self) -> Option<StrictLocalGitShadowWitnessV1> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.issue_git_shadow_witness()
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -608,6 +630,24 @@ impl RevalidatedStrictLocalSnapshotV1 {
         #[cfg(target_os = "linux")]
         {
             self.inner.snapshot()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
+    /// Consume and bind the one-shot witness issued by this acquisition.
+    pub(crate) fn bind_git_shadow_witness(
+        self,
+        witness: StrictLocalGitShadowWitnessV1,
+    ) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner
+                .bind_git_shadow_witness(witness)
+                .map(|inner| Self {
+                    inner: Box::new(inner),
+                })
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -1024,6 +1064,7 @@ mod supported {
         inventory_a: IdentityInventory,
         namespace_claims: BTreeMap<String, StrictLocalNamespaceClaimV1>,
         entries: BTreeMap<String, StrictLocalEntryV1>,
+        git_shadow_expected: Option<StrictLocalGitShadowExpectedV1>,
     }
 
     impl PendingSupportedSnapshotV1 {
@@ -1037,6 +1078,15 @@ mod supported {
 
         pub(super) fn try_clone_root_descriptor(&self) -> std::io::Result<File> {
             self.root.try_clone()
+        }
+
+        pub(super) fn issue_git_shadow_witness(&mut self) -> Option<StrictLocalGitShadowWitnessV1> {
+            if self.git_shadow_expected.is_some() {
+                return None;
+            }
+            let acquisition = std::sync::Arc::new(());
+            self.git_shadow_expected = Some(StrictLocalGitShadowExpectedV1(acquisition.clone()));
+            Some(StrictLocalGitShadowWitnessV1(acquisition))
         }
 
         pub(super) fn initial_inventory_entries(
@@ -1169,6 +1219,7 @@ mod supported {
         canonical_local_root: PathBuf,
         _root: File,
         snapshot: CompleteStrictLocalSnapshotV1,
+        git_shadow_expected: Option<StrictLocalGitShadowExpectedV1>,
     }
 
     impl RevalidatedSupportedSnapshotV1 {
@@ -1178,6 +1229,14 @@ mod supported {
 
         pub(super) fn snapshot(&self) -> &CompleteStrictLocalSnapshotV1 {
             &self.snapshot
+        }
+
+        pub(super) fn bind_git_shadow_witness(
+            mut self,
+            witness: StrictLocalGitShadowWitnessV1,
+        ) -> Option<Self> {
+            let expected = self.git_shadow_expected.take()?;
+            std::sync::Arc::ptr_eq(&expected.0, &witness.0).then_some(self)
         }
 
         pub(super) fn into_snapshot(self) -> CompleteStrictLocalSnapshotV1 {
@@ -1237,6 +1296,7 @@ mod supported {
             inventory_a,
             namespace_claims,
             entries,
+            git_shadow_expected: None,
         })
     }
 
@@ -1276,6 +1336,7 @@ mod supported {
         Ok(RevalidatedSupportedSnapshotV1 {
             canonical_local_root: held.canonical_local_root,
             _root: held.root,
+            git_shadow_expected: held.git_shadow_expected,
             snapshot: CompleteStrictLocalSnapshotV1 {
                 profile: held.profile,
                 profile_settings_fingerprint,

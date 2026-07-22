@@ -308,10 +308,13 @@ impl fmt::Debug for AgentStaticNamespaceSafetyObservationV1 {
 
 /// Opaque, non-authoritative observation of one GitRaw selected root.
 ///
-/// The local Git topology and sorted refs were descriptor-anchored and equal
-/// across two bounded passes, but remote Git semantics, catalog authority,
-/// bootstrap, high-water, and writer fencing are still absent. This type must
-/// not gain a plan digest or action projection.
+/// The local Git config, HEAD, and sorted refs were captured through the held
+/// root into process-owned bytes and derived identically twice without
+/// reopening live config, HEAD, or ref contents. Inventory C and the held root
+/// and `.git` identities are still revalidated. Object semantics, remote Git
+/// semantics, catalog authority, bootstrap, high-water, and an execution-time
+/// writer fence are absent. This type must not gain a plan digest or action
+/// projection.
 pub(crate) struct GitRawLocalTopologyObservationV1 {
     root_id: String,
     spec: RootSpecV1Config,
@@ -741,7 +744,7 @@ async fn observe_validated_registered_root_sources_v1(
             }
         };
 
-    let pending =
+    let mut pending =
         match begin_strict_local_snapshot_v1(&canonical_local_root, selected.spec.profile)? {
             StrictLocalSnapshotHoldReadV1::Pending(pending) => pending,
             StrictLocalSnapshotHoldReadV1::Incomplete(incomplete) => {
@@ -751,7 +754,7 @@ async fn observe_validated_registered_root_sources_v1(
             }
         };
     let pending_git = if selected.spec.profile == RootProfileV1::GitRawV1 {
-        match begin_strict_git_raw_topology_v1(&pending) {
+        match begin_strict_git_raw_topology_v1(&mut pending) {
             StrictGitRawTopologyBeginV1::Pending(git) => Some(*git),
             StrictGitRawTopologyBeginV1::Incomplete(incomplete) => {
                 return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
@@ -783,17 +786,6 @@ async fn observe_validated_registered_root_sources_v1(
                 ));
             }
         };
-    let git_topology = match pending_git {
-        Some(git) => match git.revalidate_after_external_reads() {
-            StrictGitRawTopologyFinishV1::Held(git) => Some(git),
-            StrictGitRawTopologyFinishV1::Incomplete(incomplete) => {
-                return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
-                    StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
-                ));
-            }
-        },
-        None => None,
-    };
     let local = match pending.revalidate_inventory_c()? {
         StrictLocalSnapshotFinishV1::Complete(local) => local,
         StrictLocalSnapshotFinishV1::Incomplete(incomplete) => {
@@ -801,6 +793,17 @@ async fn observe_validated_registered_root_sources_v1(
                 StrictRegisteredRootSourcesIncompleteV1::Local(incomplete),
             ));
         }
+    };
+    let (git_topology, local) = match pending_git {
+        Some(git) => match git.revalidate_after_external_reads(local) {
+            StrictGitRawTopologyFinishV1::Held { topology, local } => (Some(topology), local),
+            StrictGitRawTopologyFinishV1::Incomplete(incomplete) => {
+                return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+                ));
+            }
+        },
+        None => (None, local),
     };
     if let Some(git) = &git_topology {
         if let Err(incomplete) = git.revalidate_capabilities() {
@@ -1151,7 +1154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_topology_brackets_remote_reads_before_local_inventory_c() {
+    async fn local_inventory_c_brackets_remote_reads_before_git_shadow_promotion() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("root");
         fs::create_dir(&root).unwrap();
@@ -1188,14 +1191,11 @@ mod tests {
         .unwrap()
         {
             StrictRegisteredRootSourcesReadV1::Incomplete(
-                StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
-            ) if incomplete.kind()
-                == crate::registered_git_topology::StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged =>
-            {
-            }
+                StrictRegisteredRootSourcesIncompleteV1::Local(incomplete),
+            ) if incomplete.kind() == StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead => {}
             other => {
                 let _ = other;
-                panic!("remote-window Git mutation must fail at topology B");
+                panic!("remote-window Git mutation must fail at local inventory C");
             }
         }
     }

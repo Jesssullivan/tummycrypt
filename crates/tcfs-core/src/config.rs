@@ -1079,21 +1079,23 @@ impl RootGitPolicyV1 {
         match self {
             Self::ExcludedV1 => RootGitObservationContractV1::ExcludedV1,
             Self::StandaloneRawWithFastForwardProofV1 => {
-                RootGitObservationContractV1::TwoPassRefsAndSymrefsV1
+                RootGitObservationContractV1::TwoPassImmutableRawMetadataV1
             }
         }
     }
 }
 
-/// Closed resource and stability contract for observing Git ref topology.
+/// Closed resource and stability contract for capturing raw Git metadata.
 ///
-/// The operational variant describes one bounded `for-each-ref`-style
-/// observation. Both passes must produce identical canonical ref/symref
-/// records; V1 never retries until a stable result appears. The bounds apply
-/// to inventory-A inputs and retained command output; writer fencing and
-/// same-principal swap/restore during a child process are outside this
-/// source-only contract. OID lengths are the byte lengths of their hexadecimal
-/// command-output representations.
+/// The operational variant retains one bounded, process-owned shadow of the
+/// inventory-A config, HEAD, packed refs, and loose refs. Config syntax is
+/// interpreted only from those captured bytes and ref/HEAD topology is derived
+/// twice without reopening live Git metadata. Both derivations must be exact;
+/// inventory C and the held root/`.git` descriptors still have to revalidate
+/// before the shadow can be promoted.
+/// Object kind, ancestry, fast-forward, and enduring writer exclusion are not
+/// part of this source-only contract. OID lengths are the byte lengths of their
+/// hexadecimal raw-metadata representations.
 ///
 /// `ExcludedV1` is a distinct, fingerprinted policy. Its numeric accessors
 /// return zero to represent non-applicability, not an executable zero-budget
@@ -1101,21 +1103,21 @@ impl RootGitPolicyV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootGitObservationContractV1 {
     ExcludedV1,
-    TwoPassRefsAndSymrefsV1,
+    TwoPassImmutableRawMetadataV1,
 }
 
 impl RootGitObservationContractV1 {
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::ExcludedV1 => "excluded-v1",
-            Self::TwoPassRefsAndSymrefsV1 => "two-pass-refs-and-symrefs-v1",
+            Self::TwoPassImmutableRawMetadataV1 => "two-pass-immutable-raw-metadata-v1",
         }
     }
 
     pub const fn is_applicable(self) -> bool {
         match self {
             Self::ExcludedV1 => false,
-            Self::TwoPassRefsAndSymrefsV1 => true,
+            Self::TwoPassImmutableRawMetadataV1 => true,
         }
     }
 
@@ -1123,7 +1125,7 @@ impl RootGitObservationContractV1 {
     pub const fn max_refs(self) -> u64 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 1_000_000,
+            Self::TwoPassImmutableRawMetadataV1 => 1_000_000,
         }
     }
 
@@ -1131,23 +1133,28 @@ impl RootGitObservationContractV1 {
     pub const fn max_ref_or_symref_bytes(self) -> u64 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 1023,
+            Self::TwoPassImmutableRawMetadataV1 => 1023,
         }
     }
 
-    /// Maximum aggregate bytes retained for canonical ref/symref records.
+    /// Maximum aggregate payload bytes in one effective raw-ref map or one
+    /// derived canonical ref/symref set.
+    ///
+    /// This is not a peak-RSS claim. The immutable raw config, HEAD, and
+    /// packed-ref inputs retain their independently bounded payloads, and
+    /// bounded intermediate maps can coexist during an exact derivation.
     pub const fn max_retained_bytes(self) -> u64 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 256 * 1024 * 1024,
+            Self::TwoPassImmutableRawMetadataV1 => 256 * 1024 * 1024,
         }
     }
 
-    /// Maximum stdout accepted from one Git observation command.
+    /// Maximum captured packed-ref or config-query output bytes.
     pub const fn max_command_stdout_bytes(self) -> u64 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 320 * 1024 * 1024,
+            Self::TwoPassImmutableRawMetadataV1 => 320 * 1024 * 1024,
         }
     }
 
@@ -1155,7 +1162,7 @@ impl RootGitObservationContractV1 {
     pub const fn max_config_file_bytes(self) -> u64 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 1024 * 1024,
+            Self::TwoPassImmutableRawMetadataV1 => 1024 * 1024,
         }
     }
 
@@ -1164,22 +1171,22 @@ impl RootGitObservationContractV1 {
     pub const fn max_head_file_bytes(self) -> u64 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 1029,
+            Self::TwoPassImmutableRawMetadataV1 => 1029,
         }
     }
 
-    /// Exact number of complete observation passes.
+    /// Exact number of canonical derivations from the immutable shadow.
     pub const fn pass_count(self) -> u8 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 2,
+            Self::TwoPassImmutableRawMetadataV1 => 2,
         }
     }
 
-    /// Number of retries allowed after either pass or equality proof fails.
+    /// Number of retries allowed after capture or validation fails.
     pub const fn retry_count(self) -> u8 {
         match self {
-            Self::ExcludedV1 | Self::TwoPassRefsAndSymrefsV1 => 0,
+            Self::ExcludedV1 | Self::TwoPassImmutableRawMetadataV1 => 0,
         }
     }
 
@@ -1187,7 +1194,7 @@ impl RootGitObservationContractV1 {
     pub const fn sha1_oid_hex_bytes(self) -> u8 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 40,
+            Self::TwoPassImmutableRawMetadataV1 => 40,
         }
     }
 
@@ -1195,7 +1202,7 @@ impl RootGitObservationContractV1 {
     pub const fn sha256_oid_hex_bytes(self) -> u8 {
         match self {
             Self::ExcludedV1 => 0,
-            Self::TwoPassRefsAndSymrefsV1 => 64,
+            Self::TwoPassImmutableRawMetadataV1 => 64,
         }
     }
 }
@@ -3628,7 +3635,7 @@ resolution_policy = "inspect-only"
         let git_observation = git.git_observation_contract();
         assert_eq!(
             git_observation,
-            RootGitObservationContractV1::TwoPassRefsAndSymrefsV1
+            RootGitObservationContractV1::TwoPassImmutableRawMetadataV1
         );
         assert_eq!(git.git_policy().observation_contract(), git_observation);
         assert!(git_observation.is_applicable());
@@ -3678,7 +3685,7 @@ resolution_policy = "inspect-only"
         assert_ne!(git_fingerprint, agent_fingerprint);
         assert_eq!(
             git_fingerprint.to_string(),
-            "b3v1:97275abb42108c673d31e1358c55ec7c83ce665fc367c5cf9a3c685c5301e043"
+            "b3v1:99d9d7a2f881738c36b8ad518fe6138c2243b3cc5bcf466029f7db8e25f2f9c4"
         );
         assert_eq!(
             agent_fingerprint.to_string(),
@@ -3697,7 +3704,10 @@ resolution_policy = "inspect-only"
                 ("hidden_path_policy", "include-v1"),
                 ("exclusion_policy", "fixed-ingress-path-components-v1"),
                 ("git_policy", "standalone-raw-with-fast-forward-proof-v1",),
-                ("git_observation_contract", "two-pass-refs-and-symrefs-v1",),
+                (
+                    "git_observation_contract",
+                    "two-pass-immutable-raw-metadata-v1",
+                ),
                 ("symlink_policy", "preserve-exact-target-v1"),
                 ("hardlink_policy", "reject-v1"),
                 ("special_file_policy", "reject-v1"),

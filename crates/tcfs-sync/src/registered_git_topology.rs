@@ -1,24 +1,28 @@
 //! Held, bounded Git topology evidence for one `git-raw-v1` root.
 //!
 //! This module proves only that one already-authorized local root exposed the
-//! same ordinary standalone Git topology and canonical ref set in two bounded
-//! observations around the external state/remote read window. It does not
-//! prove remote Git object semantics, fast-forward ancestry, catalog
-//! completeness/currentness, bootstrap safety, continuous stability, or
-//! writer fencing against same-principal swap/restore. The opaque artifact
-//! therefore has no digest, serialization, clone, plan, or action conversion.
+//! same ordinary standalone raw Git metadata topology derived twice from one
+//! bounded, process-owned inventory-A shadow around the external state/remote
+//! read window. No child reopens live config, HEAD, or refs. It does not prove
+//! object presence/kind, remote Git semantics, fast-forward ancestry, catalog
+//! completeness/currentness, bootstrap safety, continuous stability, or an
+//! enduring writer lease. The opaque artifact therefore has no digest,
+//! serialization, clone, plan, or action conversion.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::process::ExitStatus;
+use std::io::{Read, Write};
+use std::process::{ExitStatus, Stdio};
 
 use tcfs_core::config::{RootGitObservationContractV1, RootGitPolicyV1};
 
-use crate::conflict_git::{GitRepoAnchor, HeldGitReadErrorV1, HeldGitReadQueryV1};
+use crate::conflict_git::GitRepoAnchor;
+use crate::git_safety;
 use crate::index_entry::portable_casefold_path;
 use crate::registered_local_snapshot::{
-    PendingStrictLocalSnapshotV1, StrictInitialLocalEntryKindV1,
-    StrictLocalSnapshotIncompleteKindV1, StrictLocalSnapshotIncompleteV1,
+    PendingStrictLocalSnapshotV1, RevalidatedStrictLocalSnapshotV1, StrictInitialLocalEntryKindV1,
+    StrictLocalGitShadowWitnessV1, StrictLocalSnapshotIncompleteKindV1,
+    StrictLocalSnapshotIncompleteV1,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +35,7 @@ pub(crate) enum StrictGitRawTopologyIncompleteKindV1 {
     ReferenceMalformed,
     ReferenceResourceLimit,
     ReferenceSetChanged,
+    ImmutableDerivationMismatch,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -72,19 +77,10 @@ pub(crate) enum StrictGitObjectFormatV1 {
     Sha256,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StrictGitObjectKindV1 {
-    Commit,
-    Tree,
-    Blob,
-    Tag,
-}
-
 #[derive(PartialEq, Eq)]
 pub(crate) struct StrictGitRefPinV1 {
     ref_name: String,
     object_id: String,
-    object_kind: StrictGitObjectKindV1,
     symref_target: Option<String>,
 }
 
@@ -108,7 +104,6 @@ impl fmt::Debug for StrictGitRefPinV1 {
             .debug_struct("StrictGitRefPinV1")
             .field("ref_name", &self.ref_name)
             .field("object_id", &self.object_id)
-            .field("object_kind", &self.object_kind)
             .field("symref_target", &self.symref_target)
             .finish()
     }
@@ -118,7 +113,7 @@ impl fmt::Debug for StrictGitRefPinV1 {
 pub(crate) enum StrictGitHeadPinV1 {
     Symbolic {
         target: String,
-        resolved_object_id: Option<String>,
+        raw_target_object_id: Option<String>,
     },
     Detached {
         object_id: String,
@@ -133,11 +128,12 @@ impl StrictGitHeadPinV1 {
         }
     }
 
-    pub(crate) fn resolved_object_id(&self) -> Option<&str> {
+    pub(crate) fn raw_target_object_id(&self) -> Option<&str> {
         match self {
             Self::Symbolic {
-                resolved_object_id, ..
-            } => resolved_object_id.as_deref(),
+                raw_target_object_id,
+                ..
+            } => raw_target_object_id.as_deref(),
             Self::Detached { object_id } => Some(object_id),
         }
     }
@@ -148,11 +144,11 @@ impl fmt::Debug for StrictGitHeadPinV1 {
         match self {
             Self::Symbolic {
                 target,
-                resolved_object_id,
+                raw_target_object_id,
             } => formatter
                 .debug_struct("Symbolic")
                 .field("target", target)
-                .field("resolved_object_id", resolved_object_id)
+                .field("raw_target_object_id", raw_target_object_id)
                 .finish(),
             Self::Detached { object_id } => formatter
                 .debug_struct("Detached")
@@ -174,7 +170,8 @@ struct StrictGitRawTopologySnapshotV1 {
 pub(crate) struct PendingStrictGitRawTopologyV1 {
     anchor: GitRepoAnchor,
     contract: RootGitObservationContractV1,
-    metadata: GitMetadataInventoryV1,
+    local_acquisition: StrictLocalGitShadowWitnessV1,
+    shadow: GitMetadataShadowV1,
     first: StrictGitRawTopologySnapshotV1,
 }
 
@@ -241,18 +238,21 @@ pub(crate) enum StrictGitRawTopologyBeginV1 {
 }
 
 pub(crate) enum StrictGitRawTopologyFinishV1 {
-    Held(HeldStrictGitRawTopologyV1),
+    Held {
+        topology: HeldStrictGitRawTopologyV1,
+        local: RevalidatedStrictLocalSnapshotV1,
+    },
     Incomplete(StrictGitRawTopologyIncompleteV1),
 }
 
 pub(crate) fn begin_strict_git_raw_topology_v1(
-    local: &PendingStrictLocalSnapshotV1,
+    local: &mut PendingStrictLocalSnapshotV1,
 ) -> StrictGitRawTopologyBeginV1 {
     let profile = local.profile();
     let policy = profile.policy().settings().git_policy();
     let contract = policy.observation_contract();
     if policy != RootGitPolicyV1::StandaloneRawWithFastForwardProofV1
-        || !contract.is_applicable()
+        || contract != RootGitObservationContractV1::TwoPassImmutableRawMetadataV1
         || contract.pass_count() != 2
         || contract.retry_count() != 0
     {
@@ -261,6 +261,16 @@ pub(crate) fn begin_strict_git_raw_topology_v1(
             "select-git-observation-contract",
         ));
     }
+
+    let local_acquisition = match local.issue_git_shadow_witness() {
+        Some(witness) => witness,
+        None => {
+            return StrictGitRawTopologyBeginV1::Incomplete(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::CapabilityOpenFailed,
+                "issue-one-shot-local-git-shadow-witness",
+            ));
+        }
+    };
 
     let directory = match local.try_clone_root_descriptor() {
         Ok(directory) => directory,
@@ -284,13 +294,13 @@ pub(crate) fn begin_strict_git_raw_topology_v1(
         }
     };
     let limits = GitObservationLimitsV1::from(contract);
-    let metadata = match capture_initial_git_metadata_v1(local, &anchor, limits) {
-        Ok(metadata) => metadata,
+    let shadow = match capture_initial_git_metadata_v1(local, &anchor, limits) {
+        Ok(shadow) => shadow,
         Err(incomplete) => {
             return StrictGitRawTopologyBeginV1::Incomplete(incomplete);
         }
     };
-    let first = match read_topology_snapshot_v1(&anchor, &metadata, contract) {
+    let first = match read_topology_snapshot_v1(&shadow, contract) {
         Ok(snapshot) => snapshot,
         Err(incomplete) => {
             return StrictGitRawTopologyBeginV1::Incomplete(incomplete);
@@ -299,33 +309,60 @@ pub(crate) fn begin_strict_git_raw_topology_v1(
     StrictGitRawTopologyBeginV1::Pending(Box::new(PendingStrictGitRawTopologyV1 {
         anchor,
         contract,
-        metadata,
+        local_acquisition,
+        shadow,
         first,
     }))
 }
 
 impl PendingStrictGitRawTopologyV1 {
-    pub(crate) fn revalidate_after_external_reads(self) -> StrictGitRawTopologyFinishV1 {
-        let second = match read_topology_snapshot_v1(&self.anchor, &self.metadata, self.contract) {
+    /// Derive the exact topology again from the same process-owned bytes.
+    ///
+    /// The caller promotes only after inventory C. This method therefore does
+    /// not reopen live config, HEAD, or refs after the local acquisition
+    /// bracket has closed.
+    pub(crate) fn revalidate_after_external_reads(
+        self,
+        local: RevalidatedStrictLocalSnapshotV1,
+    ) -> StrictGitRawTopologyFinishV1 {
+        let Some(local) = local.bind_git_shadow_witness(self.local_acquisition) else {
+            return StrictGitRawTopologyFinishV1::Incomplete(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged,
+                "bind-shadow-to-inventory-c-acquisition",
+            ));
+        };
+        if local.canonical_local_root() != self.anchor.canonical_root() {
+            return StrictGitRawTopologyFinishV1::Incomplete(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged,
+                "bind-shadow-to-inventory-c-root",
+            ));
+        }
+        if self.anchor.revalidate().is_err() {
+            return StrictGitRawTopologyFinishV1::Incomplete(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged,
+                "revalidate-git-capabilities-before-shadow-promotion",
+            ));
+        }
+        let second = match read_topology_snapshot_v1(&self.shadow, self.contract) {
             Ok(snapshot) => snapshot,
-            Err(_) => {
-                return StrictGitRawTopologyFinishV1::Incomplete(incomplete(
-                    StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged,
-                    "repeat-git-topology-observation",
-                ));
+            Err(incomplete) => {
+                return StrictGitRawTopologyFinishV1::Incomplete(incomplete);
             }
         };
         if self.first != second {
             return StrictGitRawTopologyFinishV1::Incomplete(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged,
-                "compare-git-topology-passes",
+                StrictGitRawTopologyIncompleteKindV1::ImmutableDerivationMismatch,
+                "compare-immutable-git-metadata-derivations",
             ));
         }
-        StrictGitRawTopologyFinishV1::Held(HeldStrictGitRawTopologyV1 {
-            anchor: self.anchor,
-            contract: self.contract,
-            snapshot: second,
-        })
+        StrictGitRawTopologyFinishV1::Held {
+            topology: HeldStrictGitRawTopologyV1 {
+                anchor: self.anchor,
+                contract: self.contract,
+                snapshot: second,
+            },
+            local,
+        }
     }
 }
 
@@ -362,7 +399,8 @@ enum RawLooseRefValueV1 {
     SymbolicTarget(String),
 }
 
-struct GitMetadataInventoryV1 {
+struct GitMetadataShadowV1 {
+    raw_config: Vec<u8>,
     loose_refs: BTreeMap<String, RawLooseRefValueV1>,
     packed_refs: Option<Vec<u8>>,
     raw_head: Vec<u8>,
@@ -409,7 +447,7 @@ fn capture_initial_git_metadata_v1(
     local: &PendingStrictLocalSnapshotV1,
     anchor: &GitRepoAnchor,
     limits: GitObservationLimitsV1,
-) -> Result<GitMetadataInventoryV1, StrictGitRawTopologyIncompleteV1> {
+) -> Result<GitMetadataShadowV1, StrictGitRawTopologyIncompleteV1> {
     anchor.revalidate().map_err(|_| {
         incomplete(
             StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged,
@@ -431,7 +469,7 @@ fn capture_initial_git_metadata_v1(
     let mut retained_bytes = 0_u64;
     let mut packed_refs = None;
     let mut raw_head = None;
-    let mut saw_config = false;
+    let mut raw_config = None;
 
     for entry in local.initial_inventory_entries() {
         let raw_path = entry.rel_path();
@@ -478,7 +516,10 @@ fn capture_initial_git_metadata_v1(
                 saw_objects_directory = entry.kind() == StrictInitialLocalEntryKindV1::Directory;
             }
             ".git/config" => {
-                if entry.kind() != StrictInitialLocalEntryKindV1::Regular || entry.size() < 0 {
+                if entry.kind() != StrictInitialLocalEntryKindV1::Regular
+                    || entry.size() < 0
+                    || raw_config.is_some()
+                {
                     return Err(incomplete(
                         StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
                         "require-regular-git-config",
@@ -496,7 +537,13 @@ fn capture_initial_git_metadata_v1(
                         "maximum-git-config-file-bytes",
                     ));
                 }
-                saw_config = true;
+                raw_config = Some(
+                    local
+                        .read_initial_regular_file_bounded(raw_path, limits.max_config_file_bytes)
+                        .map_err(|failure| {
+                            map_held_local_read_failure_v1(failure, "read-held-git-config")
+                        })?,
+                );
             }
             ".git/HEAD" => {
                 if entry.kind() != StrictInitialLocalEntryKindV1::Regular
@@ -736,7 +783,7 @@ fn capture_initial_git_metadata_v1(
     if !saw_git_directory
         || !saw_refs_directory
         || !saw_objects_directory
-        || !saw_config
+        || raw_config.is_none()
         || raw_head.is_none()
     {
         return Err(incomplete(
@@ -750,7 +797,8 @@ fn capture_initial_git_metadata_v1(
             "revalidate-after-raw-git-inventory",
         )
     })?;
-    Ok(GitMetadataInventoryV1 {
+    Ok(GitMetadataShadowV1 {
+        raw_config: raw_config.expect("validated raw config presence"),
         loose_refs,
         packed_refs,
         raw_head: raw_head.expect("validated raw HEAD presence"),
@@ -762,91 +810,244 @@ struct BoundedCommandOutputV1 {
     stdout: Vec<u8>,
 }
 
-fn run_held_git_query_v1(
-    anchor: &GitRepoAnchor,
-    query: HeldGitReadQueryV1,
-    stdout_limit: u64,
-    operation: &'static str,
-) -> Result<BoundedCommandOutputV1, StrictGitRawTopologyIncompleteV1> {
-    match anchor.run_held_read_query(query, stdout_limit) {
-        Ok(output) => {
-            let (status, stdout) = output.into_parts();
-            Ok(BoundedCommandOutputV1 { status, stdout })
-        }
-        Err(HeldGitReadErrorV1::OutputLimit) => Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
-            operation,
-        )),
-        Err(HeldGitReadErrorV1::Failed) => Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged,
-            operation,
-        )),
-    }
+enum CapturedConfigQueryV1 {
+    List,
+    BooleanValues(&'static str),
 }
 
-fn require_only_false_config_values_v1(
-    output: &BoundedCommandOutputV1,
-    operation: &'static str,
-) -> Result<(), StrictGitRawTopologyIncompleteV1> {
-    match output.status.code() {
-        Some(0) => {
-            let values = output.stdout.strip_suffix(&[0]).ok_or_else(|| {
-                incomplete(
-                    StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                    operation,
-                )
-            })?;
-            if values.is_empty()
-                || values
-                    .split(|byte| *byte == 0)
-                    .any(|value| value != b"false")
-            {
+fn terminate_captured_config_query_v1(
+    child: &mut std::process::Child,
+    input_writer: std::thread::JoinHandle<std::io::Result<()>>,
+    stderr_reader: std::thread::JoinHandle<std::io::Result<bool>>,
+) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = input_writer.join();
+    let _ = stderr_reader.join();
+}
+
+fn run_captured_config_query_v1(
+    raw_config: &[u8],
+    stdout_limit: u64,
+    query: CapturedConfigQueryV1,
+) -> Result<BoundedCommandOutputV1, StrictGitRawTopologyIncompleteV1> {
+    let stdout_limit = usize::try_from(stdout_limit).map_err(|_| {
+        incomplete(
+            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
+            "bound-captured-git-config-output",
+        )
+    })?;
+    let mut command = git_safety::sanitized_git_command();
+    command.args(["config", "--file", "-", "--no-includes", "--null"]);
+    match query {
+        CapturedConfigQueryV1::List => {
+            command.arg("--list");
+        }
+        CapturedConfigQueryV1::BooleanValues(key) => {
+            command.args(["--type=bool", "--get-all", key]);
+        }
+    }
+    #[cfg(unix)]
+    command.current_dir("/");
+    #[cfg(not(unix))]
+    command.current_dir(std::env::temp_dir());
+    #[cfg(windows)]
+    let null_config = "NUL";
+    #[cfg(not(windows))]
+    let null_config = "/dev/null";
+    command
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_SYSTEM", null_config)
+        .env("GIT_CONFIG_GLOBAL", null_config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|_| {
+        incomplete(
+            StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+            "spawn-captured-git-config-query",
+        )
+    })?;
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+                "open-captured-git-config-input",
+            ));
+        }
+    };
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+                "open-captured-git-config-output",
+            ));
+        }
+    };
+    let mut stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+                "open-captured-git-config-errors",
+            ));
+        }
+    };
+    let config = raw_config.to_vec();
+    let input_writer = std::thread::Builder::new()
+        .name("tcfs-shadow-config-input".to_owned())
+        .spawn(move || stdin.write_all(&config))
+        .map_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+            incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+                "start-captured-git-config-input",
+            )
+        })?;
+    let stderr_reader = match std::thread::Builder::new()
+        .name("tcfs-shadow-config-stderr".to_owned())
+        .spawn(move || {
+            let mut saw_bytes = false;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = stderr.read(&mut buffer)?;
+                if read == 0 {
+                    return Ok(saw_bytes);
+                }
+                saw_bytes = true;
+            }
+        }) {
+        Ok(reader) => reader,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = input_writer.join();
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+                "start-captured-git-config-error-reader",
+            ));
+        }
+    };
+
+    let mut retained = Vec::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = match stdout.read(&mut buffer) {
+            Ok(read) => read,
+            Err(_) => {
+                terminate_captured_config_query_v1(&mut child, input_writer, stderr_reader);
                 return Err(incomplete(
-                    StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
-                    operation,
+                    StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+                    "read-captured-git-config-output",
                 ));
             }
-            Ok(())
+        };
+        if read == 0 {
+            break;
         }
-        Some(1) if output.stdout.is_empty() => Ok(()),
-        _ => Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
-            operation,
-        )),
+        let Some(next_len) = retained.len().checked_add(read) else {
+            terminate_captured_config_query_v1(&mut child, input_writer, stderr_reader);
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
+                "bound-captured-git-config-output",
+            ));
+        };
+        if next_len > stdout_limit || retained.try_reserve_exact(read).is_err() {
+            terminate_captured_config_query_v1(&mut child, input_writer, stderr_reader);
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
+                "bound-captured-git-config-output",
+            ));
+        }
+        retained.extend_from_slice(&buffer[..read]);
     }
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = input_writer.join();
+            let _ = stderr_reader.join();
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
+                "wait-captured-git-config-query",
+            ));
+        }
+    };
+    let input_ok = matches!(input_writer.join(), Ok(Ok(())));
+    let stderr_empty = matches!(stderr_reader.join(), Ok(Ok(false)));
+    if !input_ok || !stderr_empty {
+        return Err(incomplete(
+            StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
+            "run-captured-git-config-query",
+        ));
+    }
+    Ok(BoundedCommandOutputV1 {
+        status,
+        stdout: retained,
+    })
+}
+
+fn captured_config_boolean_values_are_false_v1(
+    raw_config: &[u8],
+    key: &'static str,
+    limits: GitObservationLimitsV1,
+) -> Result<bool, StrictGitRawTopologyIncompleteV1> {
+    let output = run_captured_config_query_v1(
+        raw_config,
+        limits.max_config_file_bytes,
+        CapturedConfigQueryV1::BooleanValues(key),
+    )?;
+    if !output.status.success() || output.stdout.is_empty() || !output.stdout.ends_with(&[0]) {
+        return Ok(false);
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+        .all(|value| value == b"false"))
 }
 
 fn validate_bounded_git_routing_v1(
-    anchor: &GitRepoAnchor,
+    raw_config: &[u8],
     limits: GitObservationLimitsV1,
-) -> Result<(), StrictGitRawTopologyIncompleteV1> {
-    let config = run_held_git_query_v1(
-        anchor,
-        HeldGitReadQueryV1::EffectiveConfigNames,
+) -> Result<StrictGitObjectFormatV1, StrictGitRawTopologyIncompleteV1> {
+    let config = run_captured_config_query_v1(
+        raw_config,
         limits.max_command_stdout_bytes,
-        "read-bounded-effective-git-config",
-    )
-    .map_err(|failure| {
-        if failure.kind() == StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit {
-            failure
-        } else {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
-                "read-bounded-effective-git-config",
-            )
-        }
-    })?;
+        CapturedConfigQueryV1::List,
+    )?;
     if !config.status.success() || (!config.stdout.is_empty() && !config.stdout.ends_with(&[0])) {
         return Err(incomplete(
             StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
-            "read-bounded-effective-git-config",
+            "parse-captured-git-config",
         ));
     }
-    for raw_key in config
+    let mut repository_format_version: Option<Vec<u8>> = None;
+    let mut object_format: Option<Vec<u8>> = None;
+    let mut saw_core_bare = false;
+    let mut saw_core_shared_repository = false;
+    for record in config
         .stdout
         .split(|byte| *byte == 0)
-        .filter(|key| !key.is_empty())
+        .filter(|record| !record.is_empty())
     {
+        let (raw_key, value) = match record.iter().position(|byte| *byte == b'\n') {
+            Some(separator) => (&record[..separator], Some(&record[separator + 1..])),
+            None => (record, None),
+        };
         if raw_key.len() > usize::try_from(limits.max_ref_or_symref_bytes).unwrap_or(usize::MAX) {
             return Err(incomplete(
                 StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
@@ -863,9 +1064,7 @@ fn validate_bounded_git_routing_v1(
             .to_ascii_lowercase();
         let remote_promisor = key.starts_with("remote.")
             && (key.ends_with(".promisor") || key.ends_with(".partialclonefilter"));
-        if key == "extensions.partialclone"
-            || key == "extensions.refstorage"
-            || key == "extensions.worktreeconfig"
+        if (key.starts_with("extensions.") && key != "extensions.objectformat")
             || remote_promisor
             || key == "protocol.ext.allow"
             || key == "core.alternaterefscommand"
@@ -879,57 +1078,69 @@ fn validate_bounded_git_routing_v1(
                 "reject-effective-git-config-key",
             ));
         }
+        if key == "core.bare" {
+            saw_core_bare = true;
+        }
+        if key == "core.sharedrepository" {
+            saw_core_shared_repository = true;
+        }
+        if key == "core.repositoryformatversion" {
+            if repository_format_version.is_some() || value.is_none() {
+                return Err(incomplete(
+                    StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
+                    "require-one-repository-format-version",
+                ));
+            }
+            repository_format_version = value.map(|value| value.to_vec());
+        }
+        if key == "extensions.objectformat" {
+            if object_format.is_some() || value.is_none() {
+                return Err(incomplete(
+                    StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
+                    "require-one-git-object-format",
+                ));
+            }
+            object_format = value.map(|value| value.to_vec());
+        }
+    }
+    if (saw_core_bare
+        && !captured_config_boolean_values_are_false_v1(raw_config, "core.bare", limits)?)
+        || (saw_core_shared_repository
+            && !captured_config_boolean_values_are_false_v1(
+                raw_config,
+                "core.sharedRepository",
+                limits,
+            )?)
+    {
+        return Err(incomplete(
+            StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
+            "reject-shared-or-bare-repository-config",
+        ));
     }
 
-    let shared = run_held_git_query_v1(
-        anchor,
-        HeldGitReadQueryV1::SharedRepositoryValues,
-        1024,
-        "read-bounded-shared-repository-config",
-    )
-    .map_err(|failure| {
-        if failure.kind() == StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit {
-            failure
-        } else {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
-                "read-bounded-shared-repository-config",
-            )
+    match (
+        repository_format_version.as_deref(),
+        object_format.as_deref(),
+    ) {
+        (Some(b"0"), None) => Ok(StrictGitObjectFormatV1::Sha1),
+        (Some(b"1"), Some(format)) if format.eq_ignore_ascii_case(b"sha256") => {
+            Ok(StrictGitObjectFormatV1::Sha256)
         }
-    })?;
-    require_only_false_config_values_v1(&shared, "reject-shared-repository-config")?;
-
-    let bare = run_held_git_query_v1(
-        anchor,
-        HeldGitReadQueryV1::BareRepositoryValues,
-        1024,
-        "read-bounded-bare-repository-config",
-    )
-    .map_err(|failure| {
-        if failure.kind() == StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit {
-            failure
-        } else {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
-                "read-bounded-bare-repository-config",
-            )
-        }
-    })?;
-    require_only_false_config_values_v1(&bare, "reject-bare-repository-config")?;
-
-    Ok(())
+        _ => Err(incomplete(
+            StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
+            "validate-captured-git-object-format",
+        )),
+    }
 }
 
 fn read_topology_snapshot_v1(
-    anchor: &GitRepoAnchor,
-    metadata: &GitMetadataInventoryV1,
+    shadow: &GitMetadataShadowV1,
     contract: RootGitObservationContractV1,
 ) -> Result<StrictGitRawTopologySnapshotV1, StrictGitRawTopologyIncompleteV1> {
     let limits = GitObservationLimitsV1::from(contract);
-    validate_bounded_git_routing_v1(anchor, limits)?;
-    let object_format = read_object_format_v1(anchor, limits)?;
-    let refs = read_refs_v1(anchor, metadata, object_format, limits)?;
-    let head = read_head_v1(anchor, metadata, object_format, &refs, limits)?;
+    let object_format = validate_bounded_git_routing_v1(&shadow.raw_config, limits)?;
+    let refs = read_refs_v1(shadow, object_format, limits)?;
+    let head = read_head_v1(shadow, object_format, &refs, limits)?;
     Ok(StrictGitRawTopologySnapshotV1 {
         object_format,
         head,
@@ -943,32 +1154,6 @@ fn exact_single_line_v1(bytes: &[u8]) -> Option<&[u8]> {
         None
     } else {
         Some(line)
-    }
-}
-
-fn read_object_format_v1(
-    anchor: &GitRepoAnchor,
-    limits: GitObservationLimitsV1,
-) -> Result<StrictGitObjectFormatV1, StrictGitRawTopologyIncompleteV1> {
-    let output = run_held_git_query_v1(
-        anchor,
-        HeldGitReadQueryV1::ObjectFormat,
-        limits.max_command_stdout_bytes.min(32),
-        "read-git-object-format",
-    )?;
-    if !output.status.success() {
-        return Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
-            "read-git-object-format",
-        ));
-    }
-    match exact_single_line_v1(&output.stdout) {
-        Some(b"sha1") => Ok(StrictGitObjectFormatV1::Sha1),
-        Some(b"sha256") => Ok(StrictGitObjectFormatV1::Sha256),
-        _ => Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-            "parse-git-object-format",
-        )),
     }
 }
 
@@ -989,16 +1174,6 @@ fn parse_object_id_v1(
             .iter()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
     .then(|| String::from_utf8(bytes.to_vec()).expect("validated ASCII object ID"))
-}
-
-fn parse_object_kind_v1(bytes: &[u8]) -> Option<StrictGitObjectKindV1> {
-    match bytes {
-        b"commit" => Some(StrictGitObjectKindV1::Commit),
-        b"tree" => Some(StrictGitObjectKindV1::Tree),
-        b"blob" => Some(StrictGitObjectKindV1::Blob),
-        b"tag" => Some(StrictGitObjectKindV1::Tag),
-        _ => None,
-    }
 }
 
 fn validate_ref_name_v1(value: &str, limits: GitObservationLimitsV1) -> Option<String> {
@@ -1053,162 +1228,6 @@ fn checked_retain_v1(
     Ok(())
 }
 
-#[derive(Debug)]
-struct ObservedGitRefV1 {
-    ref_name: String,
-    object_id: String,
-    object_kind: StrictGitObjectKindV1,
-    reported_symref_target: Option<String>,
-}
-
-fn parse_ref_output_v1(
-    bytes: &[u8],
-    format: StrictGitObjectFormatV1,
-    limits: GitObservationLimitsV1,
-) -> Result<Vec<ObservedGitRefV1>, StrictGitRawTopologyIncompleteV1> {
-    let mut refs = Vec::new();
-    let mut previous_ref: Option<String> = None;
-    let mut folded_refs = BTreeSet::new();
-    let mut retained_bytes = 0_u64;
-    let mut lines = bytes.split(|byte| *byte == b'\n').peekable();
-    while let Some(line) = lines.next() {
-        if line.is_empty() && lines.peek().is_none() {
-            break;
-        }
-        if line.is_empty() || line.contains(&b'\r') {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-reference-record",
-            ));
-        }
-        let mut fields = line.splitn(5, |byte| *byte == 0);
-        let Some(ref_name_bytes) = fields.next() else {
-            unreachable!("splitn always yields one field");
-        };
-        let Some(object_id_bytes) = fields.next() else {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-reference-fields",
-            ));
-        };
-        let Some(object_kind_bytes) = fields.next() else {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-reference-fields",
-            ));
-        };
-        let Some(symref_target_bytes) = fields.next() else {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-reference-fields",
-            ));
-        };
-        if fields.next().is_some() {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-reference-fields",
-            ));
-        }
-        if u64::try_from(refs.len()).unwrap_or(u64::MAX) >= limits.max_refs {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
-                "maximum-git-reference-count",
-            ));
-        }
-        if ref_name_bytes.len()
-            > usize::try_from(limits.max_ref_or_symref_bytes).unwrap_or(usize::MAX)
-            || symref_target_bytes.len()
-                > usize::try_from(limits.max_ref_or_symref_bytes).unwrap_or(usize::MAX)
-            || object_id_bytes.len() > usize::from(limits.sha256_oid_hex_bytes)
-            || object_kind_bytes.len() > 6
-        {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
-                "maximum-git-reference-field-bytes",
-            ));
-        }
-        let ref_name_borrowed = std::str::from_utf8(ref_name_bytes).map_err(|_| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "decode-git-reference-name",
-            )
-        })?;
-        let folded_ref = validate_ref_name_v1(ref_name_borrowed, limits).ok_or_else(|| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "validate-git-reference-name",
-            )
-        })?;
-        let ref_name = ref_name_borrowed.to_owned();
-        if previous_ref
-            .as_ref()
-            .is_some_and(|previous| previous >= &ref_name)
-            || !folded_refs.insert(folded_ref.clone())
-        {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "require-sorted-unique-git-references",
-            ));
-        }
-        let object_id = parse_object_id_v1(object_id_bytes, format, limits).ok_or_else(|| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-reference-object-id",
-            )
-        })?;
-        let object_kind = parse_object_kind_v1(object_kind_bytes).ok_or_else(|| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-reference-object-kind",
-            )
-        })?;
-        if ref_name.starts_with("refs/heads/") && object_kind != StrictGitObjectKindV1::Commit {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "require-branch-reference-commit",
-            ));
-        }
-        let reported_symref_target = if symref_target_bytes.is_empty() {
-            None
-        } else {
-            let target = std::str::from_utf8(symref_target_bytes).map_err(|_| {
-                incomplete(
-                    StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                    "decode-git-symref-target",
-                )
-            })?;
-            validate_ref_name_v1(target, limits).ok_or_else(|| {
-                incomplete(
-                    StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                    "validate-git-symref-target",
-                )
-            })?;
-            Some(target.to_owned())
-        };
-        checked_retain_v1(&mut retained_bytes, ref_name.len(), limits)?;
-        checked_retain_v1(&mut retained_bytes, folded_ref.len(), limits)?;
-        checked_retain_v1(&mut retained_bytes, object_id.len(), limits)?;
-        checked_retain_v1(&mut retained_bytes, object_kind_bytes.len(), limits)?;
-        if let Some(target) = &reported_symref_target {
-            checked_retain_v1(&mut retained_bytes, target.len(), limits)?;
-        }
-        previous_ref = Some(ref_name.clone());
-        refs.try_reserve(1).map_err(|_| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
-                "allocate-git-reference-record",
-            )
-        })?;
-        refs.push(ObservedGitRefV1 {
-            ref_name,
-            object_id,
-            object_kind,
-            reported_symref_target,
-        });
-    }
-    Ok(refs)
-}
-
 fn parse_packed_refs_v1(
     bytes: &[u8],
     format: StrictGitObjectFormatV1,
@@ -1227,9 +1246,19 @@ fn parse_packed_refs_v1(
     let mut retained_bytes = 0_u64;
     let mut previous_was_ref = false;
     let mut previous_was_peeled = false;
-    for line in bytes.split(|byte| *byte == b'\n') {
+    let records = &bytes[..bytes.len() - 1];
+    if records.is_empty() {
+        return Err(incomplete(
+            StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+            "reject-empty-packed-reference-record",
+        ));
+    }
+    for (index, line) in records.split(|byte| *byte == b'\n').enumerate() {
         if line.is_empty() {
-            continue;
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                "reject-empty-packed-reference-record",
+            ));
         }
         if line.contains(&b'\r') || line.contains(&0) {
             return Err(incomplete(
@@ -1237,10 +1266,40 @@ fn parse_packed_refs_v1(
                 "parse-packed-reference-line",
             ));
         }
-        if line.starts_with(b"#") {
+        if let Some(traits) = line.strip_prefix(b"# pack-refs with: ") {
+            let Some(traits) = traits.strip_suffix(b" ") else {
+                return Err(incomplete(
+                    StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                    "validate-packed-reference-header-termination",
+                ));
+            };
+            if index != 0 || traits.is_empty() {
+                return Err(incomplete(
+                    StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                    "validate-packed-reference-header-position",
+                ));
+            }
+            let mut seen_traits = BTreeSet::new();
+            for feature in traits.split(|byte| *byte == b' ') {
+                if feature.is_empty()
+                    || !matches!(feature, b"peeled" | b"fully-peeled" | b"sorted")
+                    || !seen_traits.insert(feature)
+                {
+                    return Err(incomplete(
+                        StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                        "validate-packed-reference-header-features",
+                    ));
+                }
+            }
             previous_was_ref = false;
             previous_was_peeled = false;
             continue;
+        }
+        if line.starts_with(b"#") {
+            return Err(incomplete(
+                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                "reject-packed-reference-comment",
+            ));
         }
         if let Some(peeled) = line.strip_prefix(b"^") {
             if !previous_was_ref
@@ -1324,7 +1383,7 @@ enum EffectiveRawRefValueV1 {
 }
 
 fn effective_raw_refs_v1(
-    metadata: &GitMetadataInventoryV1,
+    metadata: &GitMetadataShadowV1,
     format: StrictGitObjectFormatV1,
     limits: GitObservationLimitsV1,
 ) -> Result<BTreeMap<String, EffectiveRawRefValueV1>, StrictGitRawTopologyIncompleteV1> {
@@ -1358,6 +1417,18 @@ fn effective_raw_refs_v1(
             }
         };
         refs.insert(name.clone(), value);
+    }
+    let mut effective_payload_bytes = 0_u64;
+    for (name, value) in &refs {
+        checked_retain_v1(&mut effective_payload_bytes, name.len(), limits)?;
+        match value {
+            EffectiveRawRefValueV1::DirectObjectId(object_id) => {
+                checked_retain_v1(&mut effective_payload_bytes, object_id.len(), limits)?;
+            }
+            EffectiveRawRefValueV1::SymbolicTarget(target) => {
+                checked_retain_v1(&mut effective_payload_bytes, target.len(), limits)?;
+            }
+        }
     }
     let mut folded = BTreeSet::new();
     for (name, value) in &refs {
@@ -1490,22 +1561,16 @@ fn resolve_symbolic_ref_terminals_v1(
     Ok(terminals)
 }
 
-fn reconcile_raw_and_observed_refs_v1(
+fn pin_immutable_raw_refs_v1(
     raw: BTreeMap<String, EffectiveRawRefValueV1>,
     terminals: Vec<usize>,
-    observed: Vec<ObservedGitRefV1>,
+    limits: GitObservationLimitsV1,
 ) -> Result<Vec<StrictGitRefPinV1>, StrictGitRawTopologyIncompleteV1> {
-    if raw.len() != observed.len() {
-        return Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-            "reconcile-raw-and-git-reference-counts",
-        ));
-    }
     let mut raw_names = Vec::new();
     raw_names.try_reserve_exact(raw.len()).map_err(|_| {
         incomplete(
             StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
-            "allocate-reconciled-reference-name-index",
+            "allocate-shadow-reference-name-index",
         )
     })?;
     raw_names.extend(raw.keys().map(String::as_str));
@@ -1513,87 +1578,47 @@ fn reconcile_raw_and_observed_refs_v1(
     pins.try_reserve_exact(raw.len()).map_err(|_| {
         incomplete(
             StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
-            "allocate-reconciled-git-reference-pins",
+            "allocate-shadow-git-reference-pins",
         )
     })?;
-    for (index, ((raw_name, raw_value), observed)) in raw.iter().zip(observed).enumerate() {
-        if raw_name != &observed.ref_name {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "reconcile-raw-and-git-reference-names",
-            ));
-        }
-        let symref_target = match raw_value {
-            EffectiveRawRefValueV1::DirectObjectId(raw_object_id) => {
-                if raw_object_id != &observed.object_id || observed.reported_symref_target.is_some()
-                {
-                    return Err(incomplete(
-                        StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                        "reconcile-direct-reference-value",
-                    ));
-                }
-                None
-            }
-            EffectiveRawRefValueV1::SymbolicTarget(target) => {
-                let terminal_name = raw_names[terminals[index]];
-                let terminal_object_id = match raw.get(terminal_name) {
-                    Some(EffectiveRawRefValueV1::DirectObjectId(object_id)) => object_id,
-                    _ => {
-                        return Err(incomplete(
-                            StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                            "resolve-symbolic-reference-terminal-object",
-                        ));
-                    }
-                };
-                if observed.reported_symref_target.as_deref() != Some(terminal_name)
-                    || &observed.object_id != terminal_object_id
-                {
-                    return Err(incomplete(
-                        StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                        "reconcile-symbolic-reference-value",
-                    ));
-                }
-                Some(target.clone())
+    let mut retained_payload_bytes = 0_u64;
+    for (index, (raw_name, raw_value)) in raw.iter().enumerate() {
+        let terminal_name = raw_names[terminals[index]];
+        let object_id = match raw.get(terminal_name) {
+            Some(EffectiveRawRefValueV1::DirectObjectId(object_id)) => object_id,
+            _ => {
+                return Err(incomplete(
+                    StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                    "resolve-shadow-reference-terminal-object",
+                ));
             }
         };
+        let symref_target = match raw_value {
+            EffectiveRawRefValueV1::DirectObjectId(_) => None,
+            EffectiveRawRefValueV1::SymbolicTarget(target) => Some(target),
+        };
+        checked_retain_v1(&mut retained_payload_bytes, raw_name.len(), limits)?;
+        checked_retain_v1(&mut retained_payload_bytes, object_id.len(), limits)?;
+        if let Some(target) = &symref_target {
+            checked_retain_v1(&mut retained_payload_bytes, target.len(), limits)?;
+        }
         pins.push(StrictGitRefPinV1 {
-            ref_name: observed.ref_name,
-            object_id: observed.object_id,
-            object_kind: observed.object_kind,
-            symref_target,
+            ref_name: raw_name.clone(),
+            object_id: object_id.clone(),
+            symref_target: symref_target.cloned(),
         });
     }
     Ok(pins)
 }
 
 fn read_refs_v1(
-    anchor: &GitRepoAnchor,
-    metadata: &GitMetadataInventoryV1,
+    metadata: &GitMetadataShadowV1,
     format: StrictGitObjectFormatV1,
     limits: GitObservationLimitsV1,
 ) -> Result<Vec<StrictGitRefPinV1>, StrictGitRawTopologyIncompleteV1> {
     let raw = effective_raw_refs_v1(metadata, format, limits)?;
     let terminals = resolve_symbolic_ref_terminals_v1(&raw)?;
-    let count = limits.max_refs.checked_add(1).ok_or_else(|| {
-        incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit,
-            "bound-git-reference-command-count",
-        )
-    })?;
-    let output = run_held_git_query_v1(
-        anchor,
-        HeldGitReadQueryV1::ForEachRef { count },
-        limits.max_command_stdout_bytes,
-        "read-bounded-git-references",
-    )?;
-    if !output.status.success() {
-        return Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
-            "read-bounded-git-references",
-        ));
-    }
-    let observed = parse_ref_output_v1(&output.stdout, format, limits)?;
-    reconcile_raw_and_observed_refs_v1(raw, terminals, observed)
+    pin_immutable_raw_refs_v1(raw, terminals, limits)
 }
 
 enum ParsedRawHeadV1 {
@@ -1645,132 +1670,54 @@ fn parse_raw_head_v1(
 }
 
 fn read_head_v1(
-    anchor: &GitRepoAnchor,
-    metadata: &GitMetadataInventoryV1,
+    metadata: &GitMetadataShadowV1,
     format: StrictGitObjectFormatV1,
     refs: &[StrictGitRefPinV1],
     limits: GitObservationLimitsV1,
 ) -> Result<StrictGitHeadPinV1, StrictGitRawTopologyIncompleteV1> {
     let raw_head = parse_raw_head_v1(&metadata.raw_head, format, limits)?;
-    let symbolic = run_held_git_query_v1(
-        anchor,
-        HeldGitReadQueryV1::SymbolicHeadNoRecurse,
-        limits.max_ref_or_symref_bytes.saturating_add(2),
-        "read-git-symbolic-head",
-    )?;
-    let resolved = run_held_git_query_v1(
-        anchor,
-        HeldGitReadQueryV1::ResolvedHeadCommit,
-        u64::from(limits.sha256_oid_hex_bytes).saturating_add(2),
-        "read-git-resolved-head",
-    )?;
-    let resolved_object_id = if resolved.status.success() {
-        let line = exact_single_line_v1(&resolved.stdout).ok_or_else(|| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-resolved-head",
-            )
-        })?;
-        Some(parse_object_id_v1(line, format, limits).ok_or_else(|| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "parse-git-resolved-head",
-            )
-        })?)
-    } else if resolved.status.code() == Some(1) && resolved.stdout.is_empty() {
-        None
-    } else {
-        return Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
-            "read-git-resolved-head",
-        ));
-    };
-
-    if symbolic.status.success() {
-        let target = exact_single_line_v1(&symbolic.stdout)
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .map(str::to_owned)
-            .ok_or_else(|| {
+    match raw_head {
+        ParsedRawHeadV1::Symbolic(target) => {
+            let folded_target = validate_ref_name_v1(&target, limits).ok_or_else(|| {
                 incomplete(
                     StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                    "parse-git-symbolic-head",
+                    "validate-shadow-symbolic-head",
                 )
             })?;
-        let folded_target = validate_ref_name_v1(&target, limits).ok_or_else(|| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "validate-git-symbolic-head",
-            )
-        })?;
-        if !target.starts_with("refs/heads/") {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "require-symbolic-head-branch-target",
-            ));
-        }
-        if !matches!(&raw_head, ParsedRawHeadV1::Symbolic(raw_target) if raw_target == &target) {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "reconcile-raw-and-git-symbolic-head",
-            ));
-        }
-        if let Some(oid) = &resolved_object_id {
-            if !refs
+            let raw_target_object_id = refs
                 .iter()
-                .any(|pin| pin.ref_name == target && pin.object_id == *oid)
-            {
-                return Err(incomplete(
-                    StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                    "bind-symbolic-head-to-reference",
-                ));
-            }
-        } else {
-            for pin in refs {
-                let folded_pin = validate_ref_name_v1(&pin.ref_name, limits).ok_or_else(|| {
-                    incomplete(
-                        StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                        "revalidate-git-reference-for-unborn-head",
-                    )
-                })?;
-                if folded_pin == folded_target
-                    || folded_pin
-                        .strip_prefix(&folded_target)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-                    || folded_target
-                        .strip_prefix(&folded_pin)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-                {
-                    return Err(incomplete(
-                        StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                        "reject-unborn-head-portable-alias",
-                    ));
+                .find(|pin| pin.ref_name == target)
+                .map(|pin| pin.object_id.clone());
+            if raw_target_object_id.is_none() {
+                for pin in refs {
+                    let folded_pin =
+                        validate_ref_name_v1(&pin.ref_name, limits).ok_or_else(|| {
+                            incomplete(
+                                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                                "revalidate-shadow-reference-for-unborn-head",
+                            )
+                        })?;
+                    if folded_pin == folded_target
+                        || folded_pin
+                            .strip_prefix(&folded_target)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                        || folded_target
+                            .strip_prefix(&folded_pin)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                    {
+                        return Err(incomplete(
+                            StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
+                            "reject-unborn-head-portable-alias",
+                        ));
+                    }
                 }
             }
+            Ok(StrictGitHeadPinV1::Symbolic {
+                target,
+                raw_target_object_id,
+            })
         }
-        Ok(StrictGitHeadPinV1::Symbolic {
-            target,
-            resolved_object_id,
-        })
-    } else if symbolic.status.code() == Some(1) && symbolic.stdout.is_empty() {
-        let object_id = resolved_object_id.ok_or_else(|| {
-            incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "require-detached-head-object",
-            )
-        })?;
-        if !matches!(&raw_head, ParsedRawHeadV1::Detached(raw_object_id) if raw_object_id == &object_id)
-        {
-            return Err(incomplete(
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed,
-                "reconcile-raw-and-git-detached-head",
-            ));
-        }
-        Ok(StrictGitHeadPinV1::Detached { object_id })
-    } else {
-        Err(incomplete(
-            StrictGitRawTopologyIncompleteKindV1::ReferenceReadFailed,
-            "read-git-symbolic-head",
-        ))
+        ParsedRawHeadV1::Detached(object_id) => Ok(StrictGitHeadPinV1::Detached { object_id }),
     }
 }
 
@@ -1794,6 +1741,11 @@ mod tests {
     );
     static_assertions::assert_not_impl_any!(
         StrictGitRefPinV1: Clone,
+        serde::Serialize
+    );
+    static_assertions::assert_not_impl_any!(
+        StrictLocalGitShadowWitnessV1: Clone,
+        Copy,
         serde::Serialize
     );
 
@@ -1873,7 +1825,7 @@ mod tests {
         }
     }
 
-    fn begin_topology(pending: &PendingStrictLocalSnapshotV1) -> PendingStrictGitRawTopologyV1 {
+    fn begin_topology(pending: &mut PendingStrictLocalSnapshotV1) -> PendingStrictGitRawTopologyV1 {
         match begin_strict_git_raw_topology_v1(pending) {
             StrictGitRawTopologyBeginV1::Pending(topology) => *topology,
             StrictGitRawTopologyBeginV1::Incomplete(incomplete) => {
@@ -1882,19 +1834,32 @@ mod tests {
         }
     }
 
-    fn finish_topology(pending: PendingStrictGitRawTopologyV1) -> HeldStrictGitRawTopologyV1 {
-        match pending.revalidate_after_external_reads() {
-            StrictGitRawTopologyFinishV1::Held(topology) => topology,
+    fn finish_topology(
+        local: PendingStrictLocalSnapshotV1,
+        pending: PendingStrictGitRawTopologyV1,
+    ) -> (HeldStrictGitRawTopologyV1, RevalidatedStrictLocalSnapshotV1) {
+        let local = finish_local(local);
+        match pending.revalidate_after_external_reads(local) {
+            StrictGitRawTopologyFinishV1::Held { topology, local } => (topology, local),
             StrictGitRawTopologyFinishV1::Incomplete(incomplete) => {
                 panic!("expected held GitRaw topology: {incomplete:?}")
             }
         }
     }
 
+    fn finish_local(local: PendingStrictLocalSnapshotV1) -> RevalidatedStrictLocalSnapshotV1 {
+        match local.revalidate_inventory_c().unwrap() {
+            StrictLocalSnapshotFinishV1::Complete(local) => local,
+            StrictLocalSnapshotFinishV1::Incomplete(incomplete) => {
+                panic!("local inventory C must remain stable: {incomplete:?}")
+            }
+        }
+    }
+
     fn begin_incomplete(
-        pending: &PendingStrictLocalSnapshotV1,
+        mut pending: PendingStrictLocalSnapshotV1,
     ) -> StrictGitRawTopologyIncompleteV1 {
-        match begin_strict_git_raw_topology_v1(pending) {
+        match begin_strict_git_raw_topology_v1(&mut pending) {
             StrictGitRawTopologyBeginV1::Incomplete(incomplete) => incomplete,
             StrictGitRawTopologyBeginV1::Pending(_) => {
                 panic!("expected GitRaw topology to fail closed")
@@ -1908,12 +1873,13 @@ mod tests {
         run_git(&root, &["branch", "z-last"]);
         run_git(&root, &["branch", "a-first"]);
         std::fs::write(root.join(".git/tcfs.lock"), b"").unwrap();
-        let pending = pending_local(&root);
-        let topology = finish_topology(begin_topology(&pending));
+        let mut pending = pending_local(&root);
+        let pending_topology = begin_topology(&mut pending);
+        let (topology, _local) = finish_topology(pending, pending_topology);
 
         assert_eq!(topology.object_format(), StrictGitObjectFormatV1::Sha1);
         assert_eq!(topology.head().symbolic_target(), Some("refs/heads/main"));
-        assert!(topology.head().resolved_object_id().is_some());
+        assert!(topology.head().raw_target_object_id().is_some());
         let refs = topology
             .refs()
             .map(|pin| pin.ref_name().to_owned())
@@ -1924,17 +1890,11 @@ mod tests {
         );
         assert_eq!(topology.contract().pass_count(), 2);
 
-        match pending.revalidate_inventory_c().unwrap() {
-            StrictLocalSnapshotFinishV1::Complete(_) => {}
-            StrictLocalSnapshotFinishV1::Incomplete(incomplete) => {
-                panic!("local inventory C must remain stable: {incomplete:?}")
-            }
-        }
         topology.revalidate_capabilities().unwrap();
     }
 
     #[test]
-    fn sha1_and_sha256_packed_tags_and_symbolic_chains_are_exact() {
+    fn sha1_and_sha256_packed_refs_and_symbolic_chains_are_exact() {
         for (format, expected_format, object_id_len) in [
             ("sha1", StrictGitObjectFormatV1::Sha1, 40),
             ("sha256", StrictGitObjectFormatV1::Sha256, 64),
@@ -1966,24 +1926,21 @@ mod tests {
                 &["symbolic-ref", "refs/heads/alias", "refs/heads/middle"],
             );
 
-            let pending = pending_local(&root);
-            let topology = finish_topology(begin_topology(&pending));
+            let mut pending = pending_local(&root);
+            let pending_topology = begin_topology(&mut pending);
+            let (topology, _local) = finish_topology(pending, pending_topology);
             assert_eq!(topology.object_format(), expected_format);
             assert!(root.join(".git/packed-refs").is_file());
             assert!(topology
                 .refs()
                 .all(|pin| pin.object_id().len() == object_id_len));
 
-            let annotated = topology
+            assert!(topology
                 .refs()
-                .find(|pin| pin.ref_name() == "refs/tags/annotated")
-                .unwrap();
-            assert_eq!(annotated.object_kind, StrictGitObjectKindV1::Tag);
-            let lightweight = topology
+                .any(|pin| pin.ref_name() == "refs/tags/annotated"));
+            assert!(topology
                 .refs()
-                .find(|pin| pin.ref_name() == "refs/tags/lightweight")
-                .unwrap();
-            assert_eq!(lightweight.object_kind, StrictGitObjectKindV1::Commit);
+                .any(|pin| pin.ref_name() == "refs/tags/lightweight"));
             let main = topology
                 .refs()
                 .find(|pin| pin.ref_name() == "refs/heads/main")
@@ -2000,18 +1957,20 @@ mod tests {
     #[test]
     fn unborn_and_detached_head_states_are_explicit() {
         let (_unborn_temporary, unborn) = canonical_unborn_repo();
-        let pending = pending_local(&unborn);
-        let topology = finish_topology(begin_topology(&pending));
+        let mut pending = pending_local(&unborn);
+        let pending_topology = begin_topology(&mut pending);
+        let (topology, _local) = finish_topology(pending, pending_topology);
         assert_eq!(topology.head().symbolic_target(), Some("refs/heads/main"));
-        assert_eq!(topology.head().resolved_object_id(), None);
+        assert_eq!(topology.head().raw_target_object_id(), None);
         assert_eq!(topology.refs().len(), 0);
 
         let (_detached_temporary, detached) = canonical_committed_repo();
         run_git(&detached, &["checkout", "--quiet", "--detach"]);
-        let pending = pending_local(&detached);
-        let topology = finish_topology(begin_topology(&pending));
+        let mut pending = pending_local(&detached);
+        let pending_topology = begin_topology(&mut pending);
+        let (topology, _local) = finish_topology(pending, pending_topology);
         assert_eq!(topology.head().symbolic_target(), None);
-        assert!(topology.head().resolved_object_id().is_some());
+        assert!(topology.head().raw_target_object_id().is_some());
     }
 
     #[test]
@@ -2023,7 +1982,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            begin_incomplete(&pending_local(&dangling)).kind(),
+            begin_incomplete(pending_local(&dangling)).kind(),
             StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed
         );
 
@@ -2039,7 +1998,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            begin_incomplete(&pending_local(&cycle)).kind(),
+            begin_incomplete(pending_local(&cycle)).kind(),
             StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed
         );
 
@@ -2047,7 +2006,7 @@ mod tests {
         run_git(&alias, &["branch", "foo"]);
         std::fs::write(alias.join(".git/HEAD"), b"ref: refs/heads/Foo\n").unwrap();
         assert_eq!(
-            begin_incomplete(&pending_local(&alias)).kind(),
+            begin_incomplete(pending_local(&alias)).kind(),
             StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed
         );
 
@@ -2059,13 +2018,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            begin_incomplete(&pending_local(&df_conflict)).kind(),
+            begin_incomplete(pending_local(&df_conflict)).kind(),
             StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed
         );
     }
 
     #[test]
-    fn detached_head_must_name_a_commit_object_directly() {
+    fn detached_head_retains_an_opaque_raw_object_id_without_kind_claims() {
         let (_temporary, root) = canonical_committed_repo();
         run_git(
             &root,
@@ -2084,53 +2043,89 @@ mod tests {
         );
         let tag_object = git_stdout(&root, &["rev-parse", "refs/tags/annotated"]);
         std::fs::write(root.join(".git/HEAD"), format!("{tag_object}\n")).unwrap();
+        let mut pending = pending_local(&root);
+        let pending_topology = begin_topology(&mut pending);
+        let (topology, _local) = finish_topology(pending, pending_topology);
         assert_eq!(
-            begin_incomplete(&pending_local(&root)).kind(),
-            StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed
+            topology.head().raw_target_object_id(),
+            Some(tag_object.as_str())
         );
     }
 
     #[test]
-    fn reference_mutation_between_passes_is_typed_incomplete() {
+    fn immutable_shadow_never_reinterprets_live_config_head_or_refs() {
         let (_temporary, root) = canonical_committed_repo();
-        let pending = pending_local(&root);
-        let topology = begin_topology(&pending);
-        run_git(&root, &["branch", "appeared-between-passes"]);
+        let original_oid = git_stdout(&root, &["rev-parse", "refs/heads/main"]);
+        let mut pending = pending_local(&root);
+        let topology = begin_topology(&mut pending);
+        std::fs::write(
+            root.join(".git/config"),
+            b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".git/HEAD"), format!("{}\n", "b".repeat(40))).unwrap();
+        std::fs::write(
+            root.join(".git/refs/heads/main"),
+            format!("{}\n", "c".repeat(40)),
+        )
+        .unwrap();
+
+        let repeated = read_topology_snapshot_v1(&topology.shadow, topology.contract).unwrap();
+        assert!(repeated == topology.first);
+        assert_eq!(repeated.head.symbolic_target(), Some("refs/heads/main"));
+        assert_eq!(
+            repeated.head.raw_target_object_id(),
+            Some(original_oid.as_str())
+        );
         assert!(matches!(
-            topology.revalidate_after_external_reads(),
-            StrictGitRawTopologyFinishV1::Incomplete(incomplete)
-                if incomplete.kind()
-                    == StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged
+            pending.revalidate_inventory_c().unwrap(),
+            StrictLocalSnapshotFinishV1::Incomplete(_)
         ));
     }
 
     #[test]
-    fn root_and_git_directory_replacement_between_passes_are_typed_changed() {
+    fn git_shadow_witness_is_one_shot_and_bound_to_one_local_acquisition() {
+        let (_temporary, root) = canonical_committed_repo();
+        let mut pending_a = pending_local(&root);
+        let topology_a = begin_topology(&mut pending_a);
+        assert!(matches!(
+            begin_strict_git_raw_topology_v1(&mut pending_a),
+            StrictGitRawTopologyBeginV1::Incomplete(ref incomplete)
+                if incomplete.kind()
+                    == StrictGitRawTopologyIncompleteKindV1::CapabilityOpenFailed
+                    && incomplete.operation() == "issue-one-shot-local-git-shadow-witness"
+        ));
+
+        let mut pending_b = pending_local(&root);
+        let topology_b = begin_topology(&mut pending_b);
+        drop(topology_b);
+        let local_b = finish_local(pending_b);
+        assert!(matches!(
+            topology_a.revalidate_after_external_reads(local_b),
+            StrictGitRawTopologyFinishV1::Incomplete(ref incomplete)
+                if incomplete.kind()
+                    == StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged
+                    && incomplete.operation() == "bind-shadow-to-inventory-c-acquisition"
+        ));
+    }
+
+    #[test]
+    fn root_and_git_directory_replacement_are_rejected_by_the_held_anchor() {
         let (_root_temporary, root) = canonical_committed_repo();
-        let pending = pending_local(&root);
-        let topology = begin_topology(&pending);
+        let mut pending = pending_local(&root);
+        let topology = begin_topology(&mut pending);
         let original_root = root.with_extension("original");
         std::fs::rename(&root, &original_root).unwrap();
         std::fs::create_dir(&root).unwrap();
-        assert!(matches!(
-            topology.revalidate_after_external_reads(),
-            StrictGitRawTopologyFinishV1::Incomplete(incomplete)
-                if incomplete.kind()
-                    == StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged
-        ));
+        assert!(topology.anchor.revalidate().is_err());
 
         let (_git_temporary, git_root) = canonical_committed_repo();
-        let pending = pending_local(&git_root);
-        let topology = begin_topology(&pending);
+        let mut pending = pending_local(&git_root);
+        let topology = begin_topology(&mut pending);
         let original_git = git_root.join(".git-original");
         std::fs::rename(git_root.join(".git"), &original_git).unwrap();
         std::fs::create_dir(git_root.join(".git")).unwrap();
-        assert!(matches!(
-            topology.revalidate_after_external_reads(),
-            StrictGitRawTopologyFinishV1::Incomplete(incomplete)
-                if incomplete.kind()
-                    == StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged
-        ));
+        assert!(topology.anchor.revalidate().is_err());
     }
 
     #[test]
@@ -2212,7 +2207,7 @@ mod tests {
                 std::fs::write(&path, bytes).unwrap();
             }
             assert_eq!(
-                begin_incomplete(&pending_local(&root)).kind(),
+                begin_incomplete(pending_local(&root)).kind(),
                 expected,
                 "{relative}"
             );
@@ -2234,7 +2229,7 @@ mod tests {
             let (_temporary, root) = canonical_committed_repo();
             run_git(&root, &["config", key, value]);
             assert_eq!(
-                begin_incomplete(&pending_local(&root)).kind(),
+                begin_incomplete(pending_local(&root)).kind(),
                 StrictGitRawTopologyIncompleteKindV1::TopologyRejected,
                 "{key}"
             );
@@ -2243,16 +2238,36 @@ mod tests {
         let (_config_temporary, config_root) = canonical_committed_repo();
         std::fs::write(config_root.join(".git/config"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
         assert_eq!(
-            begin_incomplete(&pending_local(&config_root)).kind(),
+            begin_incomplete(pending_local(&config_root)).kind(),
             StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
         );
 
         let (_head_temporary, head_root) = canonical_committed_repo();
         std::fs::write(head_root.join(".git/HEAD"), vec![b'x'; 1030]).unwrap();
         assert_eq!(
-            begin_incomplete(&pending_local(&head_root)).kind(),
+            begin_incomplete(pending_local(&head_root)).kind(),
             StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
         );
+
+        let (_malformed_temporary, malformed_root) = canonical_committed_repo();
+        std::fs::write(
+            malformed_root.join(".git/config"),
+            b"[core\n\tbare = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            begin_incomplete(pending_local(&malformed_root)).kind(),
+            StrictGitRawTopologyIncompleteKindV1::TopologyRejected
+        );
+
+        for false_value in ["false", "no", "off", "0", "+0", "-0", "00", "0x0"] {
+            let (_temporary, root) = canonical_committed_repo();
+            run_git(&root, &["config", "core.bare", false_value]);
+            run_git(&root, &["config", "core.sharedRepository", false_value]);
+            let mut pending = pending_local(&root);
+            let topology = begin_topology(&mut pending);
+            let (_topology, _local) = finish_topology(pending, topology);
+        }
     }
 
     fn fixture_limits(max_refs: u64, max_name: u64, max_retained: u64) -> GitObservationLimitsV1 {
@@ -2268,104 +2283,18 @@ mod tests {
         }
     }
 
-    fn record(name: &str, oid: &str, kind: &str, symref: &str) -> Vec<u8> {
-        format!("{name}\0{oid}\0{kind}\0{symref}\n").into_bytes()
-    }
-
     #[test]
-    fn parser_enforces_exact_count_name_and_retained_byte_limits() {
+    fn packed_ref_parser_rejects_malformed_records() {
         let oid = "a".repeat(40);
-        let one = record("refs/heads/a", &oid, "commit", "");
-        let two = record("refs/heads/b", &oid, "commit", "");
-        let exact = [one.clone(), two.clone()].concat();
-        assert_eq!(
-            parse_ref_output_v1(
-                &exact,
-                StrictGitObjectFormatV1::Sha1,
-                fixture_limits(2, 64, 1024)
-            )
-            .unwrap()
-            .len(),
-            2
-        );
-        let error = parse_ref_output_v1(
-            &exact,
-            StrictGitObjectFormatV1::Sha1,
-            fixture_limits(1, 64, 1024),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
-        );
-        let error = parse_ref_output_v1(
-            &one,
-            StrictGitObjectFormatV1::Sha1,
-            fixture_limits(1, 11, 1024),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
-        );
-        let error = parse_ref_output_v1(
-            &one,
-            StrictGitObjectFormatV1::Sha1,
-            fixture_limits(1, 64, 1),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
-        );
-    }
-
-    #[test]
-    fn parser_rejects_unsorted_duplicate_alias_and_malformed_records() {
-        let oid = "a".repeat(40);
-        let unsorted = [
-            record("refs/heads/b", &oid, "commit", ""),
-            record("refs/heads/a", &oid, "commit", ""),
-        ]
-        .concat();
-        let alias = [
-            record("refs/heads/Foo", &oid, "commit", ""),
-            record("refs/heads/foo", &oid, "commit", ""),
-        ]
-        .concat();
-        for bytes in [
-            unsorted,
-            alias,
-            record("refs/heads/a", &"A".repeat(40), "commit", ""),
-            record("refs/heads/a", &oid, "blob", ""),
-            record("refs/heads/a\tb", &oid, "commit", ""),
-            record("refs/heads/a\u{7f}b", &oid, "commit", ""),
-            b"refs/heads/a\0missing-fields\n".to_vec(),
-            format!("refs/heads/a\0{oid}\0commit\0\0extra\n").into_bytes(),
-            [
-                b"refs/heads/".as_slice(),
-                &[0xff],
-                format!("\0{oid}\0commit\0\n").as_bytes(),
-            ]
-            .concat(),
-        ] {
-            assert_eq!(
-                parse_ref_output_v1(
-                    &bytes,
-                    StrictGitObjectFormatV1::Sha1,
-                    fixture_limits(8, 128, 4096),
-                )
-                .unwrap_err()
-                .kind(),
-                StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed
-            );
-        }
-
         for bytes in [
             format!("{oid} refs/heads/a extra\n").into_bytes(),
             format!("^{oid}\n").into_bytes(),
             format!("# pack-refs\n{oid} refs/tags/a\n^{oid}\n^{oid}\n").into_bytes(),
             format!("{oid} refs/heads/a\0bad\n").into_bytes(),
+            format!("{oid} refs/heads/a\n\n").into_bytes(),
+            format!("{oid} refs/heads/a\n# pack-refs with: sorted\n").into_bytes(),
+            format!("# arbitrary comment\n{oid} refs/heads/a\n").into_bytes(),
+            format!("{oid} refs/tags/a\n\n^{oid}\n").into_bytes(),
         ] {
             assert_eq!(
                 parse_packed_refs_v1(
@@ -2378,5 +2307,119 @@ mod tests {
                 StrictGitRawTopologyIncompleteKindV1::ReferenceMalformed
             );
         }
+    }
+
+    #[test]
+    fn captured_config_query_enforces_exact_output_limit_and_reaps_failures() {
+        let raw_config = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n";
+        let observed =
+            run_captured_config_query_v1(raw_config, 1024, CapturedConfigQueryV1::List).unwrap();
+        assert!(observed.status.success());
+        let exact = u64::try_from(observed.stdout.len()).unwrap();
+        assert!(
+            run_captured_config_query_v1(raw_config, exact, CapturedConfigQueryV1::List,).is_ok()
+        );
+        let limited = match run_captured_config_query_v1(
+            raw_config,
+            exact.saturating_sub(1),
+            CapturedConfigQueryV1::List,
+        ) {
+            Err(incomplete) => incomplete,
+            Ok(_) => panic!("one byte below the captured config output must fail"),
+        };
+        assert_eq!(
+            limited.kind(),
+            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
+        );
+        let malformed =
+            match run_captured_config_query_v1(b"[core\n", 1024, CapturedConfigQueryV1::List) {
+                Err(incomplete) => incomplete,
+                Ok(_) => panic!("malformed captured config must fail"),
+            };
+        assert_eq!(
+            malformed.kind(),
+            StrictGitRawTopologyIncompleteKindV1::TopologyRejected
+        );
+    }
+
+    #[test]
+    fn effective_and_canonical_ref_payloads_have_aggregate_exact_limits() {
+        let oid_a = "a".repeat(40);
+        let oid_b = vec![b'b'; 40];
+        let packed_name = "refs/heads/a";
+        let loose_name = "refs/heads/b";
+        let mut loose_refs = BTreeMap::new();
+        loose_refs.insert(
+            loose_name.to_owned(),
+            RawLooseRefValueV1::DirectObjectId(oid_b),
+        );
+        let shadow = GitMetadataShadowV1 {
+            raw_config: Vec::new(),
+            loose_refs,
+            packed_refs: Some(format!("{oid_a} {packed_name}\n").into_bytes()),
+            raw_head: Vec::new(),
+        };
+        let exact_effective = u64::try_from(packed_name.len() + loose_name.len() + 80).unwrap();
+        assert!(effective_raw_refs_v1(
+            &shadow,
+            StrictGitObjectFormatV1::Sha1,
+            fixture_limits(8, 128, exact_effective),
+        )
+        .is_ok());
+        let limited = match effective_raw_refs_v1(
+            &shadow,
+            StrictGitObjectFormatV1::Sha1,
+            fixture_limits(8, 128, exact_effective - 1),
+        ) {
+            Err(incomplete) => incomplete,
+            Ok(_) => panic!("one byte below the effective ref payload must fail"),
+        };
+        assert_eq!(
+            limited.kind(),
+            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
+        );
+
+        let direct_name = "refs/heads/main";
+        let alias_name = "refs/heads/alias";
+        let mut symbolic = BTreeMap::new();
+        symbolic.insert(
+            direct_name.to_owned(),
+            EffectiveRawRefValueV1::DirectObjectId(oid_a),
+        );
+        symbolic.insert(
+            alias_name.to_owned(),
+            EffectiveRawRefValueV1::SymbolicTarget(direct_name.to_owned()),
+        );
+        let terminals = resolve_symbolic_ref_terminals_v1(&symbolic).unwrap();
+        let exact_canonical =
+            u64::try_from(direct_name.len() + 40 + alias_name.len() + 40 + direct_name.len())
+                .unwrap();
+        assert!(pin_immutable_raw_refs_v1(
+            symbolic,
+            terminals,
+            fixture_limits(8, 128, exact_canonical),
+        )
+        .is_ok());
+
+        let mut symbolic = BTreeMap::new();
+        symbolic.insert(
+            direct_name.to_owned(),
+            EffectiveRawRefValueV1::DirectObjectId("a".repeat(40)),
+        );
+        symbolic.insert(
+            alias_name.to_owned(),
+            EffectiveRawRefValueV1::SymbolicTarget(direct_name.to_owned()),
+        );
+        let terminals = resolve_symbolic_ref_terminals_v1(&symbolic).unwrap();
+        assert_eq!(
+            pin_immutable_raw_refs_v1(
+                symbolic,
+                terminals,
+                fixture_limits(8, 128, exact_canonical - 1),
+            )
+            .unwrap_err()
+            .kind(),
+            StrictGitRawTopologyIncompleteKindV1::ReferenceResourceLimit
+        );
     }
 }
