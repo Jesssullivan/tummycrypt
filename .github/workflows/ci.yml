@@ -45,7 +45,7 @@ jobs:
         run: command -v nix
 
       - name: Attach GloriousFlywheel public-read-only cache runtime
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@TIN_3127_SIGNED_MERGE_REVISION_PENDING
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@693574567f9b879486782f1fb7f432c54a2fe294
         env:
           GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ATTIC_TOKEN: ""
@@ -122,7 +122,7 @@ jobs:
         run: command -v nix
 
       - name: Attach GloriousFlywheel public-read-only cache runtime
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@TIN_3127_SIGNED_MERGE_REVISION_PENDING
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@693574567f9b879486782f1fb7f432c54a2fe294
         env:
           GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ATTIC_TOKEN: ""

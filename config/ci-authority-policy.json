@@ -1,13 +1,8 @@
 {
   "version": 1,
   "issue": "TIN-2538",
-  "gloriousflywheel_revision": "TIN_3127_SIGNED_MERGE_REVISION_PENDING",
+  "gloriousflywheel_revision": "693574567f9b879486782f1fb7f432c54a2fe294",
   "checkout_revision": "3d3c42e5aac5ba805825da76410c181273ba90b1",
-  "promotion_hold": {
-    "issue": "TIN-3127",
-    "required_revision": "signed merge revision containing the reviewed public-read-only Attic nix-job contract",
-    "reason": "origin/main at eb50ca7da6cce315867de963bef2184cfd924b26 does not contain the required action inputs or credential stripping"
-  },
   "live_proof_hold": {
     "issue": "TIN-3120",
     "reason": "the Jess personal-owner listener and multi-capability binding are absent; GitHub-hosted capacity is never a fallback"
@@ -128,7 +123,6 @@
     }
   ],
   "blocked_prerequisites": {
-    "public_read_only_attic_action": "TIN-3127",
     "multi_capability_personal_owner_binding": "TIN-3120",
     "native_darwin_worker": "TIN-2998",
     "native_windows_runtime_and_installer": "TIN-1569"
