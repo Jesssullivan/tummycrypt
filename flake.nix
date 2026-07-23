@@ -62,7 +62,7 @@
           filter = path: type:
             (protoFilter path type) || (craneLib.filterCargoSources path type);
         in pkgs.lib.cleanSourceWith {
-          src = craneLib.path ./.;
+          src = ./.;
           inherit filter;
         };
 
