@@ -561,7 +561,7 @@ impl PendingStrictLocalSnapshotV1 {
         }
 
         #[cfg(not(target_os = "linux"))]
-        match self.unsupported {}
+        std::iter::empty::<StrictInitialLocalInventoryEntryV1<'_>>()
     }
 
     /// Re-read one inventory-A regular file through the held root descriptor.
