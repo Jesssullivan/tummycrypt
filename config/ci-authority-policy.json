@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "issue": "TIN-2538",
+  "gloriousflywheel_revision": "693574567f9b879486782f1fb7f432c54a2fe294",
+  "checkout_revision": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+  "live_proof_hold": {
+    "issue": "TIN-3120",
+    "reason": "the Jess personal-owner listener and multi-capability binding are absent; GitHub-hosted capacity is never a fallback"
+  },
+  "credential_boundary": {
+    "attic": "public-read-only; ATTIC_TOKEN empty; inherited netrc disabled",
+    "github": "repository-scoped contents:read token may remain available to Nix source fetches",
+    "claim": "not globally credential-free"
+  },
+  "protected_proof": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "jobs": {
+        "linux-source": "tinyland-nix",
+        "windows-cross": "tinyland-nix",
+        "darwin-authority-held": "tinyland-nix"
+      },
+      "held_jobs": {
+        "darwin-authority-held": "TIN-2998"
+      },
+      "front_door": "nix-job",
+      "topology_sha256": "b3ac6ee0b7d459b845f15425cd2dcbdc93ed56b55d5528e7abd6060629553d1a"
+    },
+    {
+      "path": ".github/workflows/ci-live-storage.yml",
+      "jobs": {
+        "fleet-live": "tinyland-dind"
+      },
+      "held_jobs": {},
+      "front_door": "nix-job",
+      "topology_sha256": "074e1789a31482a3a4abad5f06daf1919200be8be1712ba5898405cae0bf685a"
+    },
+    {
+      "path": ".github/workflows/nix-ci.yml",
+      "jobs": {
+        "nix-linux": "tinyland-nix",
+        "nix-darwin-authority-held": "tinyland-nix"
+      },
+      "held_jobs": {
+        "nix-darwin-authority-held": "TIN-2998"
+      },
+      "front_door": "nix-job",
+      "topology_sha256": "7d0ff6c0cf8b5b2579982fc33083b9bc24b1c31f83db0dc1a8c747e3b165beba"
+    }
+  ],
+  "disabled_legacy_workflows": [
+    {
+      "path": ".github/workflows/container-runtime-smoke.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "6553b96d17d0d0fe1398755915321a0dec6c6a819fda7345069b0844a88304a0"
+    },
+    {
+      "path": ".github/workflows/docs.yml",
+      "owner": "TIN-2538",
+      "triggers": ["push", "pull_request", "workflow_dispatch"],
+      "topology_sha256": "d6d955a2af4e130c5e275738169c7b64a571501cb013e239c4545fc5cc71106e"
+    },
+    {
+      "path": ".github/workflows/homebrew-install-smoke.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "ad242cd50c5404859d90e743cf1050d202c68bd9077f00f60e3faae07cec4bf6"
+    },
+    {
+      "path": ".github/workflows/linux-package-container-smoke.yml",
+      "owner": "TIN-2538",
+      "triggers": ["pull_request", "workflow_dispatch"],
+      "topology_sha256": "6fe6fc413c9e4e35e39de26c62d06bce965a0bf7d6ca30c5a1c4bf8f426289d5"
+    },
+    {
+      "path": ".github/workflows/linux-postinstall-smoke.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "686e918b85b24af7f26970378b1379dc6ded8f7f1e13c7fbde89969614a3e156"
+    },
+    {
+      "path": ".github/workflows/macos-fileprovider-pkg-notarization-proof.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "06e45748ac285d6d16d9011f10085609850e9d3cb4b5780625c5eb6f7fbceec3"
+    },
+    {
+      "path": ".github/workflows/macos-fileprovider-testing-mode-pkg.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "b57dbf2e61e2a320ec9209a90d47dabf1f3db12f46a9dbabbf5be472a2a3f901"
+    },
+    {
+      "path": ".github/workflows/macos-postinstall-smoke.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "ddce25f9c5f5b6265a7122b3ad38a04be29207073ce9d17711b9247d3102d947"
+    },
+    {
+      "path": ".github/workflows/nix-profile-install-smoke.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "a8cfae7d6a7f488cfd0b3aa81d55c5f4e3ca824d9dfdeb07a278ea8df3572d77"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "owner": "TIN-2538",
+      "triggers": ["push", "workflow_dispatch"],
+      "topology_sha256": "3fbf7f2e159f084591e8841b0056a5ac2aef13a9f99fedf9ecce19c9b277acad"
+    },
+    {
+      "path": ".github/workflows/storage-large-restore-canary.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "05be76ed05cd025a1adaad7e94809905e8b9e2af52a08b854101585d17fe1326"
+    },
+    {
+      "path": ".github/workflows/storage-posture-canary.yml",
+      "owner": "TIN-2538",
+      "triggers": ["workflow_dispatch"],
+      "topology_sha256": "7e5bf0304a248e5783371a5607cc4c44f09bf749c2c797489b8ab87b319e92a1"
+    }
+  ],
+  "blocked_prerequisites": {
+    "multi_capability_personal_owner_binding": "TIN-3120",
+    "native_darwin_worker": "TIN-2998",
+    "native_windows_runtime_and_installer": "TIN-1569"
+  }
+}
