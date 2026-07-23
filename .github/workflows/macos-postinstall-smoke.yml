@@ -105,7 +105,7 @@ permissions:
 jobs:
   pkg-postinstall:
     name: macOS .pkg post-install smoke
-    if: github.repository == 'Jesssullivan/tummycrypt'
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 40
     environment: ${{ github.event.inputs.smoke_environment }}
