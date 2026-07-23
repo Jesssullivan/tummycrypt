@@ -11,24 +11,22 @@
 //! completeness, exact-current high-water, and the all-writer credential epoch
 //! are opaque external receipts with no production constructors. One external
 //! control acquisition binds those receipts and must move monotonically from
-//! exact-current `Ready` to one exact `PublicationPending` successor before a
-//! future visible `HEAD` CAS. A terminal matcher also specifies the required
-//! `PublicationPending` to exact-current `Ready(n+1)` advance, but cannot mint a
-//! fresh guard. The module can publish the exact immutable predecessor-HEAD
-//! archive. Fact-bound preparation derives predecessors from the semantic
-//! corpus, proves create-key absence through the held accessor, reconstructs
-//! successor semantics, and publishes exact immutable payloads plus an
-//! authoritative journal. A separately namespaced diagnostic draft remains
-//! non-authoritative and cannot convert into that journal. The namespace
-//! mutation gateway accepts only the complete authoritative journal after an
-//! exact visible publishing-HEAD receipt and rechecks a retained backend lease
-//! before and after each conditional write. That receipt and lease still have
-//! no production constructors, so this module cannot mint production
-//! authority, write a live `HEAD`, reach a live namespace mutation, produce a
-//! plan digest, or authorize an action.
+//! exact-current `Ready` to one exact `PublicationPending` successor. The
+//! retained acquisition then derives and installs the visible publishing HEAD,
+//! executes only the complete fact-bound journal, publishes a complete
+//! immutable successor catalog, finalizes committed HEAD, reconstructs exact
+//! recovery states, and advances the external high-water to `Ready(n+1)`.
+//! Every conditional write is bracketed by the retained live backend lease.
+//! A separately namespaced diagnostic draft remains non-authoritative and
+//! cannot convert into the authoritative journal. The lease and authenticated
+//! control receipts still have no production constructors or implementation,
+//! so this source path remains unreachable by deployed writers and cannot mint
+//! production authority, produce a plan digest, or authorize an action.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::num::NonZeroU64;
+use std::pin::Pin;
 
 use anyhow::{Context, Result as AnyhowResult};
 use opendal::Operator;
@@ -41,7 +39,9 @@ use tcfs_core::config::{
 use super::{
     lower_hex, validate_catalog_context_v1, validate_catalog_object_route_v1,
     validate_entry_size_v1, InvalidRemoteCatalogReasonV1, RemoteCatalogContextWireV1,
-    RemoteCatalogObjectBindingWireV1, RemoteCatalogObjectKindV1,
+    RemoteCatalogEntryWireV1, RemoteCatalogHeadWireV1, RemoteCatalogObjectBindingWireV1,
+    RemoteCatalogObjectKindV1, RemoteCatalogPageReferenceWireV1, RemoteCatalogPageWireV1,
+    RemoteCatalogRootReferenceWireV1, RemoteCatalogRootWireV1,
     SemanticallyBoundRemoteCatalogCorpusV1, CATALOG_SCHEMA_VERSION_V1,
 };
 use crate::blacklist::Blacklist;
@@ -299,6 +299,14 @@ struct NonSecretLeasePublicFingerprintV1([u8; 32]);
 /// There is deliberately no production constructor in this checkpoint.
 trait CatalogControlLeaseLivenessV1: Send + Sync {
     fn is_live_v1(&self) -> bool;
+
+    /// Atomically replace the exact pending control revision with the exact
+    /// ready record. Implementations must resolve ambiguous backend outcomes
+    /// by an exact authenticated reread and return the same receipt on replay.
+    fn compare_and_swap_ready_v1<'a>(
+        &'a self,
+        request: CatalogControlReadyAdvanceRequestV1,
+    ) -> CatalogControlReadyAdvanceFutureV1<'a>;
 }
 
 struct RetainedCatalogControlLeaseV1 {
@@ -1623,6 +1631,17 @@ struct BoundCatalogSuccessorPayloadV1 {
     binding: RegisteredRootRemoteObjectBindingV1,
 }
 
+/// Exact predecessor catalog entry retained so committed finalization can
+/// rebuild the complete successor inventory without LIST or caller-supplied
+/// unchanged entries.
+struct RetainedCatalogPredecessorEntryV1 {
+    kind: RemoteCatalogObjectKindV1,
+    object_key: String,
+    raw_bytes_len: u64,
+    raw_blake3: [u8; 32],
+    binding: RegisteredRootRemoteObjectBindingV1,
+}
+
 /// Complete canonical authoritative journal with every successor bound to an
 /// immutable absent-only payload object. Publishing the journal remains a
 /// separate exact-reread step; this type cannot enter a visible fence.
@@ -1636,6 +1655,7 @@ pub(crate) struct PreparedAuthoritativeCatalogMutationJournalV1 {
     raw_bytes: Vec<u8>,
     raw_bytes_len: NonZeroU64,
     successor_payloads: Vec<BoundCatalogSuccessorPayloadV1>,
+    predecessor_entries: Vec<RetainedCatalogPredecessorEntryV1>,
 }
 
 impl std::fmt::Debug for PreparedAuthoritativeCatalogMutationJournalV1 {
@@ -1806,6 +1826,7 @@ pub(crate) struct BoundCatalogMutationJournalV1 {
     raw_bytes_len: NonZeroU64,
     binding: RegisteredRootRemoteObjectBindingV1,
     successor_payloads: Vec<BoundCatalogSuccessorPayloadV1>,
+    predecessor_entries: Vec<RetainedCatalogPredecessorEntryV1>,
 }
 
 fn publication_object_key_v1(
@@ -2077,6 +2098,67 @@ pub(crate) async fn prepare_authoritative_catalog_mutation_journal_v1<'attempt, 
     validate_complete_successor_semantic_closure_v1(corpus, &mutations)
         .map_err(|error| anyhow::anyhow!("successor semantic closure is invalid: {error:?}"))?;
 
+    let retain_entry =
+        |kind,
+         object_key: String,
+         object: &crate::registered_reconcile::BoundRemoteObjectSnapshotV1| {
+            RetainedCatalogPredecessorEntryV1 {
+                kind,
+                object_key,
+                raw_bytes_len: object.raw_bytes_len(),
+                raw_blake3: *object.raw_blake3(),
+                binding: object.binding().clone(),
+            }
+        };
+    let mut predecessor_entries = Vec::new();
+    predecessor_entries
+        .try_reserve(
+            corpus
+                .index_objects
+                .len()
+                .checked_add(corpus.reservations.len())
+                .and_then(|count| count.checked_add(corpus.manifests.len()))
+                .context("semantic predecessor entry count overflow")?,
+        )
+        .context("reserving semantic predecessor catalog entries")?;
+    predecessor_entries.extend(corpus.index_objects.iter().map(|index| {
+        retain_entry(
+            RemoteCatalogObjectKindV1::Index,
+            index.physical_key().to_owned(),
+            index.object(),
+        )
+    }));
+    predecessor_entries.extend(corpus.reservations.iter().map(|reservation| {
+        retain_entry(
+            RemoteCatalogObjectKindV1::Reservation,
+            reservation.object_key().to_owned(),
+            reservation.object(),
+        )
+    }));
+    for manifest in &corpus.manifests {
+        let source = corpus
+            .index_objects
+            .get(manifest.source_index_ordinal)
+            .and_then(|index| index.committed())
+            .context("semantic predecessor manifest lost its committed source index")?;
+        predecessor_entries.push(retain_entry(
+            RemoteCatalogObjectKindV1::Manifest,
+            format!(
+                "{}/manifests/{}",
+                corpus.remote_prefix(),
+                source.current().manifest_hash()
+            ),
+            manifest.manifest.object(),
+        ));
+    }
+    predecessor_entries.sort_unstable_by(|left, right| left.object_key.cmp(&right.object_key));
+    anyhow::ensure!(
+        predecessor_entries
+            .windows(2)
+            .all(|entries| entries[0].object_key < entries[1].object_key),
+        "semantic predecessor catalog entries are not strictly ordered"
+    );
+
     let mut successor_payloads = Vec::new();
     successor_payloads
         .try_reserve(mutations.len())
@@ -2178,6 +2260,7 @@ pub(crate) async fn prepare_authoritative_catalog_mutation_journal_v1<'attempt, 
         raw_bytes,
         raw_bytes_len,
         successor_payloads,
+        predecessor_entries,
     })
 }
 
@@ -2260,6 +2343,7 @@ pub(crate) async fn publish_authoritative_catalog_mutation_journal_v1(
         raw_bytes_len,
         binding,
         successor_payloads: prepared.successor_payloads,
+        predecessor_entries: prepared.predecessor_entries,
     })
 }
 
@@ -2478,8 +2562,8 @@ fn validate_catalog_successor_claim_v1<'a>(
     })
 }
 
-/// Prepare one exact successor. The future storage CAS is the cross-process
-/// winner election; callers must never mutate the namespace before it wins.
+/// Prepare one exact successor. The visible storage CAS is the cross-process
+/// winner election; callers cannot mutate the namespace before it wins.
 pub(crate) fn prepare_catalog_publication_fence_v1<'a>(
     prerequisites: MatchedCatalogPublicationPrerequisitesV1<'a>,
     publication_nonce: [u8; 32],
@@ -2523,8 +2607,8 @@ pub(crate) struct TrustedCatalogPublicationPendingReceiptV1 {
     pending_control_record_fingerprint: [u8; 32],
 }
 
-/// The only future input permitted to arm a visible publishing-HEAD CAS. This
-/// checkpoint cannot construct one in production and cannot write `HEAD`.
+/// The only input permitted to arm the visible publishing-HEAD CAS. Production
+/// still cannot construct this value without an authenticated control backend.
 pub(crate) struct BoundPendingCatalogControlV1<'a> {
     transition: PreparedCatalogControlTransitionV1<'a>,
     pending_receipt: TrustedCatalogPublicationPendingReceiptV1,
@@ -2545,16 +2629,6 @@ impl std::fmt::Debug for BoundPendingCatalogControlV1<'_> {
             )
             .finish_non_exhaustive()
     }
-}
-
-/// Opaque backend receipt for the future committed-HEAD -> publishing-HEAD
-/// compare-and-swap. The receipt is not the writer capability: it must be
-/// rebound to the exact visible bytes through the held accessor while the
-/// retained control lease is still live.
-///
-/// There is deliberately no production constructor in this checkpoint.
-pub(crate) struct TrustedCatalogPublishingHeadInstalledReceiptV1 {
-    publishing_head_binding: RegisteredRootRemoteObjectBindingV1,
 }
 
 /// Non-forgeable permission to apply exactly the authoritative journal and no
@@ -2581,24 +2655,25 @@ impl std::fmt::Debug for CatalogNamespaceMutationCapabilityV1<'_> {
     }
 }
 
-/// Failed capability binding that keeps the exact pending transition and its
-/// retained lease owned for recovery instead of dropping authority on error.
-pub(crate) struct CatalogNamespaceMutationCapabilityBindFailureV1<'a> {
+/// Failed visible publishing-HEAD installation that keeps the exact pending
+/// transition and retained lease owned for recovery instead of dropping
+/// authority on an ambiguous or rejected compare-and-swap.
+pub(crate) struct CatalogPublishingHeadInstallFailureV1<'a> {
     pending: BoundPendingCatalogControlV1<'a>,
     error: anyhow::Error,
 }
 
-impl std::fmt::Debug for CatalogNamespaceMutationCapabilityBindFailureV1<'_> {
+impl std::fmt::Debug for CatalogPublishingHeadInstallFailureV1<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("CatalogNamespaceMutationCapabilityBindFailureV1")
+            .debug_struct("CatalogPublishingHeadInstallFailureV1")
             .field("sequence", &self.pending.transition.publication.sequence)
             .field("error", &self.error)
             .finish_non_exhaustive()
     }
 }
 
-impl std::fmt::Display for CatalogNamespaceMutationCapabilityBindFailureV1<'_> {
+impl std::fmt::Display for CatalogPublishingHeadInstallFailureV1<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if formatter.alternate() {
             write!(formatter, "{:#}", self.error)
@@ -2608,7 +2683,7 @@ impl std::fmt::Display for CatalogNamespaceMutationCapabilityBindFailureV1<'_> {
     }
 }
 
-impl std::error::Error for CatalogNamespaceMutationCapabilityBindFailureV1<'_> {
+impl std::error::Error for CatalogPublishingHeadInstallFailureV1<'_> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.error.as_ref())
     }
@@ -2728,43 +2803,97 @@ async fn require_namespace_mutation_capability_live_v1(
     Ok(())
 }
 
-/// Rebind the future HEAD-CAS receipt through the same accessor and retain the
-/// live lease. This is the only constructor for the namespace mutation
-/// capability, and this checkpoint cannot produce its trusted receipt in
-/// production.
-pub(crate) async fn bind_catalog_namespace_mutation_capability_v1<'a>(
+/// Atomically replace the exact committed predecessor HEAD with the canonical
+/// publishing fence, then rebind the exact visible bytes through the same
+/// accessor while retaining the live lease.
+///
+/// This is the only constructor for the namespace mutation capability.
+/// Conditional-write failure is treated as an ambiguous outcome until the
+/// bounded reread proves either the exact publishing bytes or a different
+/// state. Callers cannot provide HEAD bytes, keys, or predecessor bindings.
+pub(crate) async fn install_catalog_publishing_head_v1<'a>(
     pending: BoundPendingCatalogControlV1<'a>,
-    receipt: TrustedCatalogPublishingHeadInstalledReceiptV1,
-) -> Result<
-    CatalogNamespaceMutationCapabilityV1<'a>,
-    CatalogNamespaceMutationCapabilityBindFailureV1<'a>,
-> {
-    let capability = CatalogNamespaceMutationCapabilityV1 {
-        pending,
-        publishing_head_binding: receipt.publishing_head_binding,
-    };
-    let result = async {
+) -> Result<CatalogNamespaceMutationCapabilityV1<'a>, CatalogPublishingHeadInstallFailureV1<'a>> {
+    let result: AnyhowResult<RegisteredRootRemoteObjectBindingV1> = async {
+        let transition = &pending.transition;
+        let publication = &transition.publication;
+        require_held_control_lease_live_v1(&publication.control_guard)
+            .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
         anyhow::ensure!(
-            super::validate_binding_wire_v1(&binding_wire_v1(&capability.publishing_head_binding))
-                .is_some()
-                && mutable_head_etag_v1(&capability.publishing_head_binding).is_some(),
-            "publishing HEAD receipt has no usable exact mutable-object binding"
+            publication
+                .storage_authority
+                .conditional_write_receipt
+                .authorizes(
+                    publication.storage_authority.operator,
+                    &publication.context.remote_prefix,
+                )?,
+            "publishing HEAD install lost its exact accessor/prefix conditional-semantics authority"
         );
-        require_namespace_mutation_capability_live_v1(&capability)
+        let expected_bytes =
+            canonical_publishing_head_bytes_v1(publication, transition.pending_revision);
+        let expected_reservation = super::domain_object_id_v1(
+            PUBLISHING_HEAD_RESERVATION_DOMAIN_V1,
+            &expected_bytes,
+        );
+        anyhow::ensure!(
+            transition.canonical_publishing_head_bytes == expected_bytes
+                && transition.publishing_head_reservation_fingerprint == expected_reservation
+                && !publication.expected_parent_head_etag.is_empty(),
+            "publishing HEAD proposal no longer matches its exact pending transition"
+        );
+        let head_key = super::catalog_head_key_v1(&publication.context.remote_prefix);
+        let write_result = publication
+            .storage_authority
+            .operator
+            .write_with(&head_key, expected_bytes.clone())
+            .if_match(&publication.expected_parent_head_etag)
             .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "publishing HEAD receipt does not authorize namespace mutation: {error}"
-                )
-            })
+            .with_context(|| format!("conditionally installing catalog publishing HEAD: {head_key}"));
+        let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_catalog_head_object_bytes();
+        let observed = read_raw_object_snapshot_v1(
+            publication.storage_authority.operator,
+            &head_key,
+            max_bytes,
+        )
+        .await
+        .with_context(|| format!("revalidating installed catalog publishing HEAD: {head_key}"))?;
+        let exact_binding = match observed {
+            Some(RawObjectReadV1::Bound(snapshot)) => {
+                let (raw_bytes, _, binding) = snapshot.into_parts();
+                (raw_bytes == expected_bytes).then(|| registered_binding_from_raw_v1(binding))
+            }
+            None | Some(RawObjectReadV1::Unbound) => None,
+        };
+        let Some(binding) = exact_binding else {
+            return match write_result {
+                Ok(_) => anyhow::bail!(
+                    "catalog publishing HEAD changed after its successful compare-and-swap: {head_key}"
+                ),
+                Err(write_error) => Err(write_error).with_context(|| {
+                    format!(
+                        "catalog publishing HEAD compare-and-swap did not install the exact proposal: {head_key}"
+                    )
+                }),
+            };
+        };
+        anyhow::ensure!(
+            super::validate_binding_wire_v1(&binding_wire_v1(&binding)).is_some()
+                && mutable_head_etag_v1(&binding).is_some(),
+            "installed publishing HEAD has no usable exact mutable-object binding"
+        );
+        require_held_control_lease_live_v1(&publication.control_guard)
+            .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+        Ok(binding)
     }
     .await;
     match result {
-        Ok(()) => Ok(capability),
-        Err(error) => {
-            let CatalogNamespaceMutationCapabilityV1 { pending, .. } = capability;
-            Err(CatalogNamespaceMutationCapabilityBindFailureV1 { pending, error })
-        }
+        Ok(publishing_head_binding) => Ok(CatalogNamespaceMutationCapabilityV1 {
+            pending,
+            publishing_head_binding,
+        }),
+        Err(error) => Err(CatalogPublishingHeadInstallFailureV1 { pending, error }),
     }
 }
 
@@ -3010,20 +3139,801 @@ pub(crate) async fn apply_authoritative_catalog_namespace_mutations_v1<'a>(
     })
 }
 
-/// Opaque future proof that the exact reserved successor became the canonical
-/// committed `HEAD`. No production constructor exists until visible fencing,
-/// fact-bound mutation, and committed-HEAD finalization are implemented.
+/// Retry a failed authoritative namespace batch from ordinal zero.
+///
+/// The capability is retained by the failure value, and every successful
+/// predecessor write is exact-reread before being accepted as an idempotent
+/// replay. A missing predecessor, different collision, changed publishing
+/// HEAD, or lost lease remains a terminal fail-closed result.
+pub(crate) async fn recover_failed_catalog_namespace_mutations_v1<'a>(
+    failure: FailedCatalogNamespaceMutationsV1<'a>,
+) -> Result<AppliedCatalogNamespaceMutationsV1<'a>, FailedCatalogNamespaceMutationsV1<'a>> {
+    let FailedCatalogNamespaceMutationsV1 {
+        capability,
+        applied: _,
+        error: _,
+    } = failure;
+    apply_authoritative_catalog_namespace_mutations_v1(capability).await
+}
+
+/// Failed committed-catalog finalization retaining the complete applied
+/// mutation evidence and live capability for exact replay or recovery.
+pub(crate) struct FailedCatalogCommittedFinalizationV1<'a> {
+    applied: AppliedCatalogNamespaceMutationsV1<'a>,
+    error: anyhow::Error,
+}
+
+impl std::fmt::Debug for FailedCatalogCommittedFinalizationV1<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FailedCatalogCommittedFinalizationV1")
+            .field(
+                "sequence",
+                &self
+                    .applied
+                    .capability
+                    .pending
+                    .transition
+                    .publication
+                    .sequence,
+            )
+            .field("applied_count", &self.applied.applied.len())
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for FailedCatalogCommittedFinalizationV1<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if formatter.alternate() {
+            write!(formatter, "{:#}", self.error)
+        } else {
+            std::fmt::Display::fmt(&self.error, formatter)
+        }
+    }
+}
+
+impl std::error::Error for FailedCatalogCommittedFinalizationV1<'_> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+struct PublishedCatalogSuccessorClosureV1 {
+    committed_head_bytes: Vec<u8>,
+    head_revision: [u8; 32],
+    committed_head_binding: RegisteredRootRemoteObjectBindingV1,
+}
+
+fn complete_successor_catalog_entries_v1(
+    applied: &AppliedCatalogNamespaceMutationsV1<'_>,
+) -> AnyhowResult<Vec<RemoteCatalogEntryWireV1>> {
+    let publication = &applied.capability.pending.transition.publication;
+    let journal = &publication.mutation_journal;
+    let wire = validate_authoritative_catalog_mutation_journal_bytes_v1(
+        &journal.raw_bytes,
+        &publication.context,
+        publication.sequence,
+        publication.publication_nonce,
+        publication.parent_head_revision,
+    )
+    .map_err(|error| anyhow::anyhow!("authoritative mutation journal is invalid: {error:?}"))?;
+    anyhow::ensure!(
+        wire.mutations.len() == journal.successor_payloads.len()
+            && wire.mutations.len() == applied.applied.len(),
+        "applied catalog evidence does not cover the complete authoritative journal"
+    );
+
+    let mut entries = BTreeMap::<String, RemoteCatalogEntryWireV1>::new();
+    for predecessor in &journal.predecessor_entries {
+        anyhow::ensure!(
+            validate_catalog_object_route_v1(
+                &publication.context.remote_prefix,
+                predecessor.kind,
+                &predecessor.object_key,
+            ) && validate_entry_size_v1(predecessor.kind, predecessor.raw_bytes_len)
+                && super::validate_binding_wire_v1(&binding_wire_v1(&predecessor.binding))
+                    .is_some(),
+            "retained predecessor catalog entry is invalid"
+        );
+        let previous = entries.insert(
+            predecessor.object_key.clone(),
+            RemoteCatalogEntryWireV1 {
+                kind: predecessor.kind,
+                object_key: predecessor.object_key.clone(),
+                raw_bytes_len: predecessor.raw_bytes_len,
+                raw_blake3: lower_hex(&predecessor.raw_blake3),
+                binding: binding_wire_v1(&predecessor.binding),
+            },
+        );
+        anyhow::ensure!(
+            previous.is_none(),
+            "retained predecessor catalog entries contain a duplicate key"
+        );
+    }
+
+    for ((mutation, payload), evidence) in wire
+        .mutations
+        .iter()
+        .zip(&journal.successor_payloads)
+        .zip(&applied.applied)
+    {
+        anyhow::ensure!(
+            mutation.kind == payload.kind
+                && mutation.kind == evidence.kind
+                && mutation.object_key == payload.object_key
+                && mutation.object_key == evidence.object_key
+                && payload.raw_bytes_len.get() == mutation.successor_payload.raw_bytes_len
+                && payload.raw_blake3 == evidence.raw_blake3
+                && lower_hex(&payload.raw_blake3) == mutation.successor_payload.raw_blake3
+                && super::validate_binding_wire_v1(&binding_wire_v1(&evidence.binding)).is_some()
+                && (evidence.kind != RemoteCatalogObjectKindV1::Index
+                    || mutable_head_etag_v1(&evidence.binding).is_some()),
+            "applied catalog evidence does not match its authoritative successor"
+        );
+        match (&mutation.operation, &mutation.predecessor) {
+            (
+                RemoteCatalogMutationOperationDraftWireV1::CreateIfAbsent,
+                RemoteCatalogMutationPredecessorDraftWireV1::Absent,
+            ) => anyhow::ensure!(
+                !entries.contains_key(&mutation.object_key),
+                "authoritative create is not absent from the retained predecessor catalog"
+            ),
+            (
+                RemoteCatalogMutationOperationDraftWireV1::ReplaceIfMatch,
+                RemoteCatalogMutationPredecessorDraftWireV1::Present {
+                    raw_bytes_len,
+                    raw_blake3,
+                    binding,
+                },
+            ) => {
+                let predecessor = entries
+                    .get(&mutation.object_key)
+                    .context("authoritative replacement predecessor is missing")?;
+                anyhow::ensure!(
+                    predecessor.kind == mutation.kind
+                        && predecessor.raw_bytes_len == *raw_bytes_len
+                        && predecessor.raw_blake3 == *raw_blake3
+                        && predecessor.binding == *binding,
+                    "authoritative replacement predecessor changed before finalization"
+                );
+            }
+            _ => anyhow::bail!("authoritative catalog mutation operation is invalid"),
+        }
+        entries.insert(
+            mutation.object_key.clone(),
+            RemoteCatalogEntryWireV1 {
+                kind: evidence.kind,
+                object_key: evidence.object_key.clone(),
+                raw_bytes_len: payload.raw_bytes_len.get(),
+                raw_blake3: lower_hex(&payload.raw_blake3),
+                binding: binding_wire_v1(&evidence.binding),
+            },
+        );
+    }
+
+    let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+    let entry_count =
+        u64::try_from(entries.len()).context("successor catalog entry count does not fit u64")?;
+    anyhow::ensure!(
+        entry_count <= remote.max_catalog_entries(),
+        "successor catalog entry count exceeds the bound"
+    );
+    let entry_key_bytes = entries.keys().try_fold(0_u64, |total, key| {
+        total
+            .checked_add(
+                u64::try_from(key.len())
+                    .context("successor catalog entry key length does not fit u64")?,
+            )
+            .context("successor catalog entry-key total overflow")
+    })?;
+    anyhow::ensure!(
+        entry_key_bytes <= remote.max_catalog_entry_key_bytes(),
+        "successor catalog entry-key total exceeds the bound"
+    );
+    Ok(entries.into_values().collect())
+}
+
+async fn publish_catalog_successor_immutable_v1(
+    capability: &CatalogNamespaceMutationCapabilityV1<'_>,
+    object_key: &str,
+    expected_bytes: &[u8],
+    expected_object_id: [u8; 32],
+    object_id: fn(&[u8]) -> [u8; 32],
+    max_bytes: u64,
+) -> AnyhowResult<RegisteredRootRemoteObjectBindingV1> {
+    require_namespace_mutation_capability_live_v1(capability).await?;
+    anyhow::ensure!(
+        !expected_bytes.is_empty()
+            && u64::try_from(expected_bytes.len())
+                .ok()
+                .is_some_and(|len| len <= max_bytes)
+            && object_id(expected_bytes) == expected_object_id,
+        "successor catalog immutable artifact is empty, oversized, or misaddressed"
+    );
+    let operator = capability
+        .pending
+        .transition
+        .publication
+        .storage_authority
+        .operator;
+    let write_result = operator
+        .write_with(object_key, expected_bytes.to_vec())
+        .if_not_exists(true)
+        .await;
+    let observed = read_raw_object_snapshot_v1(operator, object_key, max_bytes)
+        .await
+        .with_context(|| format!("revalidating successor catalog artifact: {object_key}"))?;
+    let exact_binding = match observed {
+        Some(RawObjectReadV1::Bound(snapshot)) => {
+            let (raw_bytes, raw_blake3, binding) = snapshot.into_parts();
+            (raw_bytes == expected_bytes
+                && raw_blake3 == blake3::hash(expected_bytes)
+                && object_id(&raw_bytes) == expected_object_id)
+                .then(|| registered_binding_from_raw_v1(binding))
+        }
+        None | Some(RawObjectReadV1::Unbound) => None,
+    };
+    let Some(binding) = exact_binding else {
+        return match write_result {
+            Ok(_) => anyhow::bail!(
+                "successor catalog artifact changed after absent-only publication: {object_key}"
+            ),
+            Err(write_error) => Err(write_error).with_context(|| {
+                format!(
+                    "successor catalog artifact collision differs from exact bytes: {object_key}"
+                )
+            }),
+        };
+    };
+    anyhow::ensure!(
+        super::validate_binding_wire_v1(&binding_wire_v1(&binding)).is_some(),
+        "successor catalog artifact has no usable exact binding"
+    );
+    require_namespace_mutation_capability_live_v1(capability).await?;
+    Ok(binding)
+}
+
+async fn publish_catalog_successor_closure_v1(
+    applied: &AppliedCatalogNamespaceMutationsV1<'_>,
+) -> AnyhowResult<PublishedCatalogSuccessorClosureV1> {
+    let capability = &applied.capability;
+    require_namespace_mutation_capability_live_v1(capability).await?;
+    let publication = &capability.pending.transition.publication;
+    let entries = complete_successor_catalog_entries_v1(applied)?;
+    let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+    let max_entries_per_page = usize::try_from(remote.max_catalog_entries_per_page())
+        .context("catalog entries-per-page bound does not fit usize")?;
+    anyhow::ensure!(
+        max_entries_per_page > 0,
+        "catalog entries-per-page bound cannot be zero"
+    );
+    let mut page_references = Vec::new();
+    for (ordinal, page_entries) in entries.chunks(max_entries_per_page).enumerate() {
+        let entry_count = u64::try_from(page_entries.len())
+            .context("catalog page entry count does not fit u64")?;
+        let entry_key_bytes = page_entries.iter().try_fold(0_u64, |total, entry| {
+            total
+                .checked_add(
+                    u64::try_from(entry.object_key.len())
+                        .context("catalog page key length does not fit u64")?,
+                )
+                .context("catalog page key-byte total overflow")
+        })?;
+        let ordinal = u64::try_from(ordinal).context("catalog page ordinal does not fit u64")?;
+        let page = RemoteCatalogPageWireV1 {
+            version: CATALOG_SCHEMA_VERSION_V1,
+            context: publication.context.to_wire(),
+            catalog_sequence: publication.sequence.get(),
+            publication_nonce: lower_hex(&publication.publication_nonce),
+            ordinal,
+            entry_count,
+            entry_key_bytes,
+            entries: page_entries.to_vec(),
+        };
+        let page_bytes = serde_json::to_vec(&page).context("serializing successor catalog page")?;
+        anyhow::ensure!(
+            u64::try_from(page_bytes.len())
+                .ok()
+                .is_some_and(|len| len <= remote.max_catalog_page_object_bytes()),
+            "successor catalog page exceeds the object bound"
+        );
+        let page_object_id = super::catalog_page_object_id_v1(&page_bytes);
+        let page_key = super::catalog_page_key_v1(
+            &publication.context.remote_prefix,
+            &lower_hex(&page_object_id),
+        );
+        let binding = publish_catalog_successor_immutable_v1(
+            capability,
+            &page_key,
+            &page_bytes,
+            page_object_id,
+            super::catalog_page_object_id_v1,
+            remote.max_catalog_page_object_bytes(),
+        )
+        .await?;
+        page_references.push(RemoteCatalogPageReferenceWireV1 {
+            ordinal,
+            object_id: lower_hex(&page_object_id),
+            raw_bytes_len: u64::try_from(page_bytes.len())
+                .context("successor catalog page length does not fit u64")?,
+            binding: binding_wire_v1(&binding),
+            entry_count,
+            entry_key_bytes,
+        });
+    }
+    anyhow::ensure!(
+        u64::try_from(page_references.len()).ok() <= Some(remote.max_catalog_pages()),
+        "successor catalog page count exceeds the bound"
+    );
+    let entry_count =
+        u64::try_from(entries.len()).context("successor catalog entry count does not fit u64")?;
+    let entry_key_bytes = entries.iter().try_fold(0_u64, |total, entry| {
+        total
+            .checked_add(
+                u64::try_from(entry.object_key.len())
+                    .context("successor catalog entry key length does not fit u64")?,
+            )
+            .context("successor catalog entry-key total overflow")
+    })?;
+    let root = RemoteCatalogRootWireV1 {
+        version: CATALOG_SCHEMA_VERSION_V1,
+        context: publication.context.to_wire(),
+        catalog_sequence: publication.sequence.get(),
+        publication_nonce: lower_hex(&publication.publication_nonce),
+        parent_head_revision: Some(lower_hex(&publication.parent_head_revision)),
+        page_count: u64::try_from(page_references.len())
+            .context("successor catalog page count does not fit u64")?,
+        entry_count,
+        entry_key_bytes,
+        pages: page_references,
+    };
+    let root_bytes = serde_json::to_vec(&root).context("serializing successor catalog root")?;
+    anyhow::ensure!(
+        u64::try_from(root_bytes.len())
+            .ok()
+            .is_some_and(|len| len <= remote.max_catalog_root_object_bytes()),
+        "successor catalog root exceeds the object bound"
+    );
+    let root_object_id = super::catalog_root_object_id_v1(&root_bytes);
+    let root_key = super::catalog_root_key_v1(
+        &publication.context.remote_prefix,
+        &lower_hex(&root_object_id),
+    );
+    let root_binding = publish_catalog_successor_immutable_v1(
+        capability,
+        &root_key,
+        &root_bytes,
+        root_object_id,
+        super::catalog_root_object_id_v1,
+        remote.max_catalog_root_object_bytes(),
+    )
+    .await?;
+    require_namespace_mutation_capability_live_v1(capability).await?;
+
+    let committed_head = RemoteCatalogHeadWireV1 {
+        version: CATALOG_SCHEMA_VERSION_V1,
+        context: publication.context.to_wire(),
+        catalog_sequence: publication.sequence.get(),
+        publication_nonce: lower_hex(&publication.publication_nonce),
+        parent_head_revision: Some(lower_hex(&publication.parent_head_revision)),
+        catalog_root: RemoteCatalogRootReferenceWireV1 {
+            object_id: lower_hex(&root_object_id),
+            raw_bytes_len: u64::try_from(root_bytes.len())
+                .context("successor catalog root length does not fit u64")?,
+            binding: binding_wire_v1(&root_binding),
+            page_count: root.page_count,
+            entry_count,
+            entry_key_bytes,
+        },
+    };
+    let committed_head_bytes =
+        serde_json::to_vec(&committed_head).context("serializing committed catalog HEAD")?;
+    anyhow::ensure!(
+        u64::try_from(committed_head_bytes.len())
+            .ok()
+            .is_some_and(|len| len <= remote.max_catalog_head_object_bytes()),
+        "committed catalog HEAD exceeds the object bound"
+    );
+    let publishing_etag = mutable_head_etag_v1(&capability.publishing_head_binding)
+        .context("visible publishing HEAD has no usable ETag")?;
+    let head_key = super::catalog_head_key_v1(&publication.context.remote_prefix);
+    let write_result = publication
+        .storage_authority
+        .operator
+        .write_with(&head_key, committed_head_bytes.clone())
+        .if_match(&publishing_etag)
+        .await;
+    let observed = read_raw_object_snapshot_v1(
+        publication.storage_authority.operator,
+        &head_key,
+        remote.max_catalog_head_object_bytes(),
+    )
+    .await
+    .with_context(|| format!("revalidating committed catalog HEAD: {head_key}"))?;
+    let exact_binding = match observed {
+        Some(RawObjectReadV1::Bound(snapshot)) => {
+            let (raw_bytes, _, binding) = snapshot.into_parts();
+            (raw_bytes == committed_head_bytes).then(|| registered_binding_from_raw_v1(binding))
+        }
+        None | Some(RawObjectReadV1::Unbound) => None,
+    };
+    let Some(committed_head_binding) = exact_binding else {
+        return match write_result {
+            Ok(_) => anyhow::bail!(
+                "committed catalog HEAD changed after successful finalization: {head_key}"
+            ),
+            Err(write_error) => Err(write_error).with_context(|| {
+                format!(
+                    "committed catalog HEAD compare-and-swap did not install exact bytes: {head_key}"
+                )
+            }),
+        };
+    };
+    anyhow::ensure!(
+        mutable_head_etag_v1(&committed_head_binding).is_some(),
+        "committed catalog HEAD has no usable exact ETag"
+    );
+    require_held_control_lease_live_v1(&publication.control_guard)
+        .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+    let head_revision = super::catalog_head_revision_v1(&committed_head_bytes);
+    Ok(PublishedCatalogSuccessorClosureV1 {
+        committed_head_bytes,
+        head_revision,
+        committed_head_binding,
+    })
+}
+
+/// Publish the complete immutable successor catalog and atomically replace the
+/// exact visible publishing fence with its canonical committed HEAD.
+///
+/// Every unchanged entry comes from the retained semantic predecessor; every
+/// changed entry comes from terminal applied evidence. Immutable page/root
+/// collisions and ambiguous HEAD writes are accepted only after exact bounded
+/// rereads. Failure retains the complete capability and applied prefix.
+pub(crate) async fn finalize_catalog_committed_head_v1<'a>(
+    applied: AppliedCatalogNamespaceMutationsV1<'a>,
+) -> Result<BoundCommittedCatalogSuccessorV1, FailedCatalogCommittedFinalizationV1<'a>> {
+    let published = match publish_catalog_successor_closure_v1(&applied).await {
+        Ok(published) => published,
+        Err(error) => return Err(FailedCatalogCommittedFinalizationV1 { applied, error }),
+    };
+    Ok(bind_committed_catalog_successor_v1(applied, published))
+}
+
+fn bind_committed_catalog_successor_v1(
+    applied: AppliedCatalogNamespaceMutationsV1<'_>,
+    published: PublishedCatalogSuccessorClosureV1,
+) -> BoundCommittedCatalogSuccessorV1 {
+    let AppliedCatalogNamespaceMutationsV1 {
+        capability,
+        applied: _,
+    } = applied;
+    let CatalogNamespaceMutationCapabilityV1 {
+        pending,
+        publishing_head_binding: _,
+    } = capability;
+    let BoundPendingCatalogControlV1 {
+        transition,
+        pending_receipt,
+    } = pending;
+    let PreparedCatalogControlTransitionV1 {
+        publication,
+        pending_revision,
+        publishing_head_reservation_fingerprint,
+        canonical_pending_control_record_bytes,
+        pending_control_record_fingerprint,
+        ..
+    } = transition;
+    debug_assert_eq!(
+        pending_receipt.publishing_head_reservation_fingerprint,
+        publishing_head_reservation_fingerprint
+    );
+    debug_assert_eq!(
+        pending_receipt.pending_control_record_fingerprint,
+        pending_control_record_fingerprint
+    );
+    BoundCommittedCatalogSuccessorV1 {
+        control_guard: publication.control_guard,
+        pending_revision,
+        publishing_head_reservation_fingerprint,
+        pending_control_record_fingerprint,
+        canonical_pending_control_record_bytes,
+        context: publication.context,
+        sequence: publication.sequence,
+        publication_nonce: publication.publication_nonce,
+        parent_head_revision: publication.parent_head_revision,
+        head_revision: published.head_revision,
+        committed_head_bytes: published.committed_head_bytes,
+        committed_head_binding: published.committed_head_binding,
+    }
+}
+
+enum CatalogCommittedRecoveryStateV1 {
+    Publishing,
+    Committed(PublishedCatalogSuccessorClosureV1),
+}
+
+async fn classify_catalog_committed_recovery_state_v1(
+    applied: &AppliedCatalogNamespaceMutationsV1<'_>,
+) -> AnyhowResult<CatalogCommittedRecoveryStateV1> {
+    let capability = &applied.capability;
+    let publication = &capability.pending.transition.publication;
+    require_held_control_lease_live_v1(&publication.control_guard)
+        .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+    anyhow::ensure!(
+        publication
+            .storage_authority
+            .conditional_write_receipt
+            .authorizes(
+                publication.storage_authority.operator,
+                &publication.context.remote_prefix,
+            )?,
+        "catalog committed recovery lost its exact accessor/prefix conditional-semantics authority"
+    );
+    let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+    let head_key = super::catalog_head_key_v1(&publication.context.remote_prefix);
+    let observed = read_raw_object_snapshot_v1(
+        publication.storage_authority.operator,
+        &head_key,
+        remote.max_catalog_head_object_bytes(),
+    )
+    .await
+    .with_context(|| format!("reading catalog HEAD for committed recovery: {head_key}"))?;
+    let Some(RawObjectReadV1::Bound(head_snapshot)) = observed else {
+        anyhow::bail!("catalog HEAD is missing or unbound during committed recovery: {head_key}");
+    };
+    let (head_bytes, _, head_binding) = head_snapshot.into_parts();
+    let head_binding = registered_binding_from_raw_v1(head_binding);
+    if head_bytes
+        == capability
+            .pending
+            .transition
+            .canonical_publishing_head_bytes
+        && head_binding == capability.publishing_head_binding
+    {
+        return Ok(CatalogCommittedRecoveryStateV1::Publishing);
+    }
+
+    let head = serde_json::from_slice::<RemoteCatalogHeadWireV1>(&head_bytes)
+        .context("visible catalog recovery state is neither publishing nor a committed HEAD")?;
+    anyhow::ensure!(
+        serde_json::to_vec(&head).ok().as_deref() == Some(head_bytes.as_slice())
+            && head.version == CATALOG_SCHEMA_VERSION_V1
+            && head.context == publication.context.to_wire()
+            && head.catalog_sequence == publication.sequence.get()
+            && super::parse_lower_hex_32(&head.publication_nonce)
+                == Some(publication.publication_nonce)
+            && head
+                .parent_head_revision
+                .as_deref()
+                .and_then(super::parse_lower_hex_32)
+                == Some(publication.parent_head_revision)
+            && mutable_head_etag_v1(&head_binding).is_some(),
+        "visible committed catalog HEAD does not match the exact pending successor"
+    );
+    let expected_entries = complete_successor_catalog_entries_v1(applied)?;
+    let root_object_id = super::parse_lower_hex_32(&head.catalog_root.object_id)
+        .context("committed catalog root object ID is invalid")?;
+    anyhow::ensure!(
+        head.catalog_root.raw_bytes_len > 0
+            && head.catalog_root.raw_bytes_len <= remote.max_catalog_root_object_bytes()
+            && super::validate_binding_wire_v1(&head.catalog_root.binding).is_some(),
+        "committed catalog root reference is invalid"
+    );
+    let root_key = super::catalog_root_key_v1(
+        &publication.context.remote_prefix,
+        &head.catalog_root.object_id,
+    );
+    let root_snapshot = read_raw_object_snapshot_v1(
+        publication.storage_authority.operator,
+        &root_key,
+        remote.max_catalog_root_object_bytes(),
+    )
+    .await
+    .with_context(|| format!("reading committed catalog root during recovery: {root_key}"))?;
+    let Some(RawObjectReadV1::Bound(root_snapshot)) = root_snapshot else {
+        anyhow::bail!("committed catalog root is missing or unbound: {root_key}");
+    };
+    let (root_bytes, root_blake3, root_binding) = root_snapshot.into_parts();
+    let root_binding = registered_binding_from_raw_v1(root_binding);
+    anyhow::ensure!(
+        u64::try_from(root_bytes.len()).ok() == Some(head.catalog_root.raw_bytes_len)
+            && root_blake3 == blake3::hash(&root_bytes)
+            && super::catalog_root_object_id_v1(&root_bytes) == root_object_id
+            && binding_wire_v1(&root_binding) == head.catalog_root.binding,
+        "committed catalog root does not match its exact HEAD reference"
+    );
+    let root = serde_json::from_slice::<RemoteCatalogRootWireV1>(&root_bytes)
+        .context("committed catalog root is invalid")?;
+    anyhow::ensure!(
+        serde_json::to_vec(&root).ok().as_deref() == Some(root_bytes.as_slice())
+            && root.version == CATALOG_SCHEMA_VERSION_V1
+            && root.context == publication.context.to_wire()
+            && root.catalog_sequence == publication.sequence.get()
+            && super::parse_lower_hex_32(&root.publication_nonce)
+                == Some(publication.publication_nonce)
+            && root
+                .parent_head_revision
+                .as_deref()
+                .and_then(super::parse_lower_hex_32)
+                == Some(publication.parent_head_revision)
+            && root.page_count == u64::try_from(root.pages.len()).unwrap_or(u64::MAX)
+            && root.page_count == head.catalog_root.page_count
+            && root.page_count <= remote.max_catalog_pages()
+            && root.entry_count == head.catalog_root.entry_count
+            && root.entry_key_bytes == head.catalog_root.entry_key_bytes,
+        "committed catalog root lineage or totals are invalid"
+    );
+
+    let mut observed_entries = Vec::new();
+    let expected_capacity =
+        usize::try_from(root.entry_count).context("committed entry count does not fit usize")?;
+    observed_entries
+        .try_reserve(expected_capacity)
+        .context("reserving committed recovery entries")?;
+    let mut total_entry_count = 0_u64;
+    let mut total_entry_key_bytes = 0_u64;
+    for (ordinal, reference) in root.pages.iter().enumerate() {
+        let ordinal = u64::try_from(ordinal).context("catalog page ordinal does not fit u64")?;
+        let page_object_id = super::parse_lower_hex_32(&reference.object_id)
+            .context("committed catalog page object ID is invalid")?;
+        anyhow::ensure!(
+            reference.ordinal == ordinal
+                && reference.raw_bytes_len > 0
+                && reference.raw_bytes_len <= remote.max_catalog_page_object_bytes()
+                && reference.entry_count <= remote.max_catalog_entries_per_page()
+                && super::validate_binding_wire_v1(&reference.binding).is_some(),
+            "committed catalog page reference is invalid"
+        );
+        let page_key =
+            super::catalog_page_key_v1(&publication.context.remote_prefix, &reference.object_id);
+        let page_snapshot = read_raw_object_snapshot_v1(
+            publication.storage_authority.operator,
+            &page_key,
+            remote.max_catalog_page_object_bytes(),
+        )
+        .await
+        .with_context(|| format!("reading committed catalog page during recovery: {page_key}"))?;
+        let Some(RawObjectReadV1::Bound(page_snapshot)) = page_snapshot else {
+            anyhow::bail!("committed catalog page is missing or unbound: {page_key}");
+        };
+        let (page_bytes, page_blake3, page_binding) = page_snapshot.into_parts();
+        let page_binding = registered_binding_from_raw_v1(page_binding);
+        anyhow::ensure!(
+            u64::try_from(page_bytes.len()).ok() == Some(reference.raw_bytes_len)
+                && page_blake3 == blake3::hash(&page_bytes)
+                && super::catalog_page_object_id_v1(&page_bytes) == page_object_id
+                && binding_wire_v1(&page_binding) == reference.binding,
+            "committed catalog page does not match its exact root reference"
+        );
+        let page = serde_json::from_slice::<RemoteCatalogPageWireV1>(&page_bytes)
+            .context("committed catalog page is invalid")?;
+        let page_key_bytes = page.entries.iter().try_fold(0_u64, |total, entry| {
+            total
+                .checked_add(
+                    u64::try_from(entry.object_key.len())
+                        .context("catalog recovery entry key length does not fit u64")?,
+                )
+                .context("catalog recovery page key-byte total overflow")
+        })?;
+        anyhow::ensure!(
+            serde_json::to_vec(&page).ok().as_deref() == Some(page_bytes.as_slice())
+                && page.version == CATALOG_SCHEMA_VERSION_V1
+                && page.context == publication.context.to_wire()
+                && page.catalog_sequence == publication.sequence.get()
+                && super::parse_lower_hex_32(&page.publication_nonce)
+                    == Some(publication.publication_nonce)
+                && page.ordinal == ordinal
+                && page.entry_count == u64::try_from(page.entries.len()).unwrap_or(u64::MAX)
+                && page.entry_count == reference.entry_count
+                && page.entry_key_bytes == page_key_bytes
+                && page.entry_key_bytes == reference.entry_key_bytes
+                && page
+                    .entries
+                    .windows(2)
+                    .all(|entries| { entries[0].object_key < entries[1].object_key })
+                && page.entries.iter().all(|entry| {
+                    validate_catalog_object_route_v1(
+                        &publication.context.remote_prefix,
+                        entry.kind,
+                        &entry.object_key,
+                    ) && validate_entry_size_v1(entry.kind, entry.raw_bytes_len)
+                        && super::parse_lower_hex_32(&entry.raw_blake3).is_some()
+                        && super::validate_binding_wire_v1(&entry.binding).is_some()
+                }),
+            "committed catalog page lineage, order, or totals are invalid"
+        );
+        total_entry_count = total_entry_count
+            .checked_add(page.entry_count)
+            .context("committed catalog entry count overflow")?;
+        total_entry_key_bytes = total_entry_key_bytes
+            .checked_add(page.entry_key_bytes)
+            .context("committed catalog entry-key total overflow")?;
+        observed_entries.extend(page.entries);
+    }
+    anyhow::ensure!(
+        total_entry_count == root.entry_count
+            && total_entry_key_bytes == root.entry_key_bytes
+            && observed_entries == expected_entries,
+        "committed catalog closure does not equal the complete applied successor inventory"
+    );
+
+    for entry in &expected_entries {
+        let snapshot = read_raw_object_snapshot_v1(
+            publication.storage_authority.operator,
+            &entry.object_key,
+            catalog_named_object_max_bytes_v1(entry.kind),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "revalidating committed catalog named object: {}",
+                entry.object_key
+            )
+        })?;
+        let Some(RawObjectReadV1::Bound(snapshot)) = snapshot else {
+            anyhow::bail!(
+                "committed catalog named object is missing or unbound: {}",
+                entry.object_key
+            );
+        };
+        let (raw_bytes, raw_blake3, binding) = snapshot.into_parts();
+        anyhow::ensure!(
+            u64::try_from(raw_bytes.len()).ok() == Some(entry.raw_bytes_len)
+                && lower_hex(raw_blake3.as_bytes()) == entry.raw_blake3
+                && binding_wire_v1(&registered_binding_from_raw_v1(binding)) == entry.binding,
+            "committed catalog named object changed during recovery: {}",
+            entry.object_key
+        );
+    }
+    require_held_control_lease_live_v1(&publication.control_guard)
+        .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+    Ok(CatalogCommittedRecoveryStateV1::Committed(
+        PublishedCatalogSuccessorClosureV1 {
+            head_revision: super::catalog_head_revision_v1(&head_bytes),
+            committed_head_bytes: head_bytes,
+            committed_head_binding: head_binding,
+        },
+    ))
+}
+
+/// Recover a failed finalization without LIST or best-effort guessing.
+///
+/// An exact still-publishing HEAD resumes idempotent page/root publication and
+/// CAS. An exact committed successor is reconstructed through every immutable
+/// root/page reference and every named-object binding before being accepted.
+/// Any third state retains the complete applied evidence and fails closed.
+pub(crate) async fn recover_failed_catalog_committed_finalization_v1<'a>(
+    failure: FailedCatalogCommittedFinalizationV1<'a>,
+) -> Result<BoundCommittedCatalogSuccessorV1, FailedCatalogCommittedFinalizationV1<'a>> {
+    let FailedCatalogCommittedFinalizationV1 { applied, error: _ } = failure;
+    match classify_catalog_committed_recovery_state_v1(&applied).await {
+        Ok(CatalogCommittedRecoveryStateV1::Publishing) => {
+            finalize_catalog_committed_head_v1(applied).await
+        }
+        Ok(CatalogCommittedRecoveryStateV1::Committed(published)) => {
+            Ok(bind_committed_catalog_successor_v1(applied, published))
+        }
+        Err(error) => Err(FailedCatalogCommittedFinalizationV1 { applied, error }),
+    }
+}
+
+/// Opaque proof that the exact reserved successor became the canonical
+/// committed `HEAD` while retaining the live control acquisition.
 pub(crate) struct BoundCommittedCatalogSuccessorV1 {
     control_guard: HeldReadyCatalogControlGuardV1,
     pending_revision: CatalogControlAuthorityRevisionV1,
     publishing_head_reservation_fingerprint: [u8; 32],
     pending_control_record_fingerprint: [u8; 32],
+    canonical_pending_control_record_bytes: Vec<u8>,
     context: CatalogAuthorityContextV1,
     sequence: NonZeroU64,
     publication_nonce: [u8; 32],
     parent_head_revision: [u8; 32],
     head_revision: [u8; 32],
     committed_head_bytes: Vec<u8>,
+    committed_head_binding: RegisteredRootRemoteObjectBindingV1,
 }
 
 /// Opaque receipt for the external `PublicationPending -> Ready(n+1)` CAS.
@@ -3037,6 +3947,56 @@ pub(crate) struct TrustedCatalogHighWaterAdvanceReceiptV1 {
     successor: CatalogHighWaterPointV1,
     ready_revision: CatalogControlAuthorityRevisionV1,
     ready_control_record_fingerprint: [u8; 32],
+}
+
+struct CatalogControlReadyAdvanceRequestV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    publishing_head_reservation_fingerprint: [u8; 32],
+    pending_control_record_fingerprint: [u8; 32],
+    canonical_pending_control_record_bytes: Vec<u8>,
+    successor: CatalogHighWaterPointV1,
+    ready_revision: CatalogControlAuthorityRevisionV1,
+    canonical_ready_control_record_bytes: Vec<u8>,
+    ready_control_record_fingerprint: [u8; 32],
+}
+
+type CatalogControlReadyAdvanceFutureV1<'a> = Pin<
+    Box<dyn Future<Output = AnyhowResult<TrustedCatalogHighWaterAdvanceReceiptV1>> + Send + 'a>,
+>;
+
+/// Failed external high-water advance retaining the exact committed successor
+/// and live lease for an authenticated retry.
+pub(crate) struct FailedCatalogHighWaterAdvanceV1 {
+    committed: BoundCommittedCatalogSuccessorV1,
+    ready_revision_fingerprint: [u8; 32],
+    error: anyhow::Error,
+}
+
+impl std::fmt::Debug for FailedCatalogHighWaterAdvanceV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FailedCatalogHighWaterAdvanceV1")
+            .field("sequence", &self.committed.sequence)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for FailedCatalogHighWaterAdvanceV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if formatter.alternate() {
+            write!(formatter, "{:#}", self.error)
+        } else {
+            std::fmt::Display::fmt(&self.error, formatter)
+        }
+    }
+}
+
+impl std::error::Error for FailedCatalogHighWaterAdvanceV1 {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 /// Terminal proof that one exact successor advanced the monotonic high-water.
@@ -3534,15 +4494,12 @@ pub(crate) fn match_catalog_publication_pending_receipt_v1<'a>(
     })
 }
 
-/// Bind an exact committed successor to the external monotonic
-/// `PublicationPending -> Ready(n+1)` advance. This returns terminal evidence,
-/// never a reusable exact-current guard or action capability.
-pub(crate) fn match_catalog_high_water_advance_v1(
-    committed: BoundCommittedCatalogSuccessorV1,
-    receipt: TrustedCatalogHighWaterAdvanceReceiptV1,
-) -> Result<AdvancedCatalogHighWaterV1, CatalogPublicationContractErrorV1> {
+fn validate_catalog_high_water_advance_receipt_v1(
+    committed: &BoundCommittedCatalogSuccessorV1,
+    receipt: &TrustedCatalogHighWaterAdvanceReceiptV1,
+) -> Result<(), CatalogPublicationContractErrorV1> {
     require_held_control_lease_live_v1(&committed.control_guard)?;
-    let control_binding = committed.control_guard.high_water.binding.clone();
+    let control_binding = &committed.control_guard.high_water.binding;
     let expected_pending_generation = committed
         .control_guard
         .high_water
@@ -3576,7 +4533,7 @@ pub(crate) fn match_catalog_high_water_advance_v1(
         publication_nonce: committed.publication_nonce,
     };
     let committed_revision = super::catalog_head_revision_v1(&committed.committed_head_bytes);
-    let ready_bytes = canonical_ready_control_record_bytes_v1(&committed, receipt.ready_revision);
+    let ready_bytes = canonical_ready_control_record_bytes_v1(committed, receipt.ready_revision);
     let ready_record_fingerprint =
         super::domain_object_id_v1(CATALOG_CONTROL_RECORD_DOMAIN_V1, &ready_bytes);
     if committed.context != control_binding.context
@@ -3585,6 +4542,10 @@ pub(crate) fn match_catalog_high_water_advance_v1(
         || committed.pending_revision.fingerprint == control_binding.ready_revision.fingerprint
         || committed.publishing_head_reservation_fingerprint == [0; 32]
         || committed.pending_control_record_fingerprint == [0; 32]
+        || super::domain_object_id_v1(
+            CATALOG_CONTROL_RECORD_DOMAIN_V1,
+            &committed.canonical_pending_control_record_bytes,
+        ) != committed.pending_control_record_fingerprint
         || committed.sequence != expected_successor_sequence
         || committed.parent_head_revision != control_binding.current.head_revision
         || committed.publication_nonce == [0; 32]
@@ -3592,7 +4553,8 @@ pub(crate) fn match_catalog_high_water_advance_v1(
         || committed.head_revision == [0; 32]
         || committed.head_revision == control_binding.current.head_revision
         || committed_revision != committed.head_revision
-        || receipt.control_binding != control_binding
+        || mutable_head_etag_v1(&committed.committed_head_binding).is_none()
+        || receipt.control_binding != *control_binding
         || receipt.pending_revision != committed.pending_revision
         || receipt.publishing_head_reservation_fingerprint
             != committed.publishing_head_reservation_fingerprint
@@ -3609,7 +4571,23 @@ pub(crate) fn match_catalog_high_water_advance_v1(
     {
         return Err(CatalogPublicationContractErrorV1::HighWaterAdvanceMismatch);
     }
-    Ok(AdvancedCatalogHighWaterV1 {
+    Ok(())
+}
+
+fn finish_catalog_high_water_advance_v1(
+    committed: BoundCommittedCatalogSuccessorV1,
+    receipt: TrustedCatalogHighWaterAdvanceReceiptV1,
+) -> AdvancedCatalogHighWaterV1 {
+    let control_binding = committed.control_guard.high_water.binding.clone();
+    let exact_successor = CatalogHighWaterPointV1 {
+        sequence: committed.sequence,
+        head_revision: committed.head_revision,
+        publication_nonce: committed.publication_nonce,
+    };
+    let ready_bytes = canonical_ready_control_record_bytes_v1(&committed, receipt.ready_revision);
+    let ready_record_fingerprint =
+        super::domain_object_id_v1(CATALOG_CONTROL_RECORD_DOMAIN_V1, &ready_bytes);
+    AdvancedCatalogHighWaterV1 {
         context: control_binding.context,
         bootstrap: control_binding.bootstrap,
         successor: exact_successor,
@@ -3618,7 +4596,118 @@ pub(crate) fn match_catalog_high_water_advance_v1(
         ready_revision: receipt.ready_revision,
         ready_control_record_fingerprint: ready_record_fingerprint,
         retained_control_lease: committed.control_guard.all_writers.retained_control_lease,
-    })
+    }
+}
+
+/// Bind an exact committed successor to an authenticated external monotonic
+/// `PublicationPending -> Ready(n+1)` receipt. This returns terminal evidence,
+/// never a reusable exact-current guard or action capability.
+pub(crate) fn match_catalog_high_water_advance_v1(
+    committed: BoundCommittedCatalogSuccessorV1,
+    receipt: TrustedCatalogHighWaterAdvanceReceiptV1,
+) -> Result<AdvancedCatalogHighWaterV1, CatalogPublicationContractErrorV1> {
+    validate_catalog_high_water_advance_receipt_v1(&committed, &receipt)?;
+    Ok(finish_catalog_high_water_advance_v1(committed, receipt))
+}
+
+/// Ask the retained authenticated control backend to atomically replace the
+/// exact pending record with canonical `Ready(n+1)` bytes.
+///
+/// The request is derived entirely from the committed successor and retained
+/// control acquisition. The backend receipt is revalidated before the
+/// committed capability is consumed. Failure retains that capability for an
+/// authenticated retry; success is terminal and cannot mint a fresh guard.
+pub(crate) async fn advance_catalog_high_water_v1(
+    committed: BoundCommittedCatalogSuccessorV1,
+    ready_revision_fingerprint: [u8; 32],
+) -> Result<AdvancedCatalogHighWaterV1, FailedCatalogHighWaterAdvanceV1> {
+    let result = async {
+        require_held_control_lease_live_v1(&committed.control_guard)
+            .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+        let ready_generation = committed
+            .pending_revision
+            .generation
+            .get()
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .context("catalog control generation overflow")?;
+        let ready_revision = CatalogControlAuthorityRevisionV1 {
+            generation: ready_generation,
+            fingerprint: ready_revision_fingerprint,
+        };
+        let successor = CatalogHighWaterPointV1 {
+            sequence: committed.sequence,
+            head_revision: committed.head_revision,
+            publication_nonce: committed.publication_nonce,
+        };
+        let canonical_ready_control_record_bytes =
+            canonical_ready_control_record_bytes_v1(&committed, ready_revision);
+        let ready_control_record_fingerprint = super::domain_object_id_v1(
+            CATALOG_CONTROL_RECORD_DOMAIN_V1,
+            &canonical_ready_control_record_bytes,
+        );
+        let preview = TrustedCatalogHighWaterAdvanceReceiptV1 {
+            control_binding: committed.control_guard.high_water.binding.clone(),
+            pending_revision: committed.pending_revision,
+            publishing_head_reservation_fingerprint: committed
+                .publishing_head_reservation_fingerprint,
+            pending_control_record_fingerprint: committed.pending_control_record_fingerprint,
+            successor,
+            ready_revision,
+            ready_control_record_fingerprint,
+        };
+        validate_catalog_high_water_advance_receipt_v1(&committed, &preview)
+            .map_err(|error| anyhow::anyhow!("invalid high-water proposal: {error:?}"))?;
+        let request = CatalogControlReadyAdvanceRequestV1 {
+            control_binding: committed.control_guard.high_water.binding.clone(),
+            pending_revision: committed.pending_revision,
+            publishing_head_reservation_fingerprint: committed
+                .publishing_head_reservation_fingerprint,
+            pending_control_record_fingerprint: committed.pending_control_record_fingerprint,
+            canonical_pending_control_record_bytes: committed
+                .canonical_pending_control_record_bytes
+                .clone(),
+            successor,
+            ready_revision,
+            canonical_ready_control_record_bytes,
+            ready_control_record_fingerprint,
+        };
+        let receipt = committed
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .liveness
+            .compare_and_swap_ready_v1(request)
+            .await
+            .context("advancing external catalog high-water to Ready")?;
+        require_held_control_lease_live_v1(&committed.control_guard)
+            .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+        validate_catalog_high_water_advance_receipt_v1(&committed, &receipt)
+            .map_err(|error| anyhow::anyhow!("external high-water receipt mismatch: {error:?}"))?;
+        Ok::<_, anyhow::Error>(receipt)
+    }
+    .await;
+    match result {
+        Ok(receipt) => Ok(finish_catalog_high_water_advance_v1(committed, receipt)),
+        Err(error) => Err(FailedCatalogHighWaterAdvanceV1 {
+            committed,
+            ready_revision_fingerprint,
+            error,
+        }),
+    }
+}
+
+/// Retry an ambiguous or rejected external high-water CAS with the exact same
+/// committed successor and ready revision fingerprint.
+pub(crate) async fn recover_failed_catalog_high_water_advance_v1(
+    failure: FailedCatalogHighWaterAdvanceV1,
+) -> Result<AdvancedCatalogHighWaterV1, FailedCatalogHighWaterAdvanceV1> {
+    let FailedCatalogHighWaterAdvanceV1 {
+        committed,
+        ready_revision_fingerprint,
+        error: _,
+    } = failure;
+    advance_catalog_high_water_v1(committed, ready_revision_fingerprint).await
 }
 
 pub(super) fn classify_publishing_head_v1(
@@ -3826,6 +4915,36 @@ mod tests {
         fn is_live_v1(&self) -> bool {
             self.live.load(std::sync::atomic::Ordering::SeqCst)
         }
+
+        fn compare_and_swap_ready_v1<'a>(
+            &'a self,
+            request: CatalogControlReadyAdvanceRequestV1,
+        ) -> CatalogControlReadyAdvanceFutureV1<'a> {
+            Box::pin(async move {
+                anyhow::ensure!(self.is_live_v1(), "test catalog control lease is not live");
+                anyhow::ensure!(
+                    super::super::domain_object_id_v1(
+                        CATALOG_CONTROL_RECORD_DOMAIN_V1,
+                        &request.canonical_pending_control_record_bytes,
+                    ) == request.pending_control_record_fingerprint
+                        && super::super::domain_object_id_v1(
+                            CATALOG_CONTROL_RECORD_DOMAIN_V1,
+                            &request.canonical_ready_control_record_bytes,
+                        ) == request.ready_control_record_fingerprint,
+                    "test control CAS request contains an invalid canonical record"
+                );
+                Ok(TrustedCatalogHighWaterAdvanceReceiptV1 {
+                    control_binding: request.control_binding,
+                    pending_revision: request.pending_revision,
+                    publishing_head_reservation_fingerprint: request
+                        .publishing_head_reservation_fingerprint,
+                    pending_control_record_fingerprint: request.pending_control_record_fingerprint,
+                    successor: request.successor,
+                    ready_revision: request.ready_revision,
+                    ready_control_record_fingerprint: request.ready_control_record_fingerprint,
+                })
+            })
+        }
     }
 
     fn test_spec() -> RootSpecV1Config {
@@ -3984,11 +5103,6 @@ mod tests {
         Into<Vec<crate::reconcile::ReconcileAction>>
     );
     static_assertions::assert_not_impl_any!(
-        TrustedCatalogPublishingHeadInstalledReceiptV1: Clone,
-        serde::Serialize,
-        Default
-    );
-    static_assertions::assert_not_impl_any!(
         CatalogNamespaceMutationCapabilityV1<'static>: Clone,
         serde::Serialize,
         Default,
@@ -3996,7 +5110,7 @@ mod tests {
         Into<Vec<crate::reconcile::ReconcileAction>>
     );
     static_assertions::assert_not_impl_any!(
-        CatalogNamespaceMutationCapabilityBindFailureV1<'static>: Clone,
+        CatalogPublishingHeadInstallFailureV1<'static>: Clone,
         serde::Serialize,
         Default,
         Into<CatalogNamespaceMutationCapabilityV1<'static>>,
@@ -4021,6 +5135,15 @@ mod tests {
         Into<Vec<crate::reconcile::ReconcileAction>>
     );
     static_assertions::assert_not_impl_any!(
+        FailedCatalogCommittedFinalizationV1<'static>: Clone,
+        serde::Serialize,
+        Default,
+        Into<AppliedCatalogNamespaceMutationsV1<'static>>,
+        Into<BoundCommittedCatalogSuccessorV1>,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
         BoundCommittedCatalogSuccessorV1: Clone,
         serde::Serialize,
         Default,
@@ -4031,6 +5154,15 @@ mod tests {
         TrustedCatalogHighWaterAdvanceReceiptV1: Clone,
         serde::Serialize,
         Default
+    );
+    static_assertions::assert_not_impl_any!(
+        FailedCatalogHighWaterAdvanceV1: Clone,
+        serde::Serialize,
+        Default,
+        Into<BoundCommittedCatalogSuccessorV1>,
+        Into<AdvancedCatalogHighWaterV1>,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
     );
     static_assertions::assert_not_impl_any!(
         AdvancedCatalogHighWaterV1: Clone,
@@ -4241,6 +5373,7 @@ mod tests {
                     etag: "journal-etag".to_owned(),
                 },
                 successor_payloads: Vec::new(),
+                predecessor_entries: Vec::new(),
             },
         )
     }
@@ -4369,39 +5502,6 @@ mod tests {
         match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap()
     }
 
-    async fn install_test_publishing_head_receipt(
-        pending: &BoundPendingCatalogControlV1<'_>,
-    ) -> TrustedCatalogPublishingHeadInstalledReceiptV1 {
-        let publication = &pending.transition.publication;
-        let head_key = super::super::catalog_head_key_v1(&publication.context.remote_prefix);
-        publication
-            .storage_authority
-            .operator
-            .write(
-                &head_key,
-                pending.transition.canonical_publishing_head_bytes.clone(),
-            )
-            .await
-            .unwrap();
-        let observed = read_raw_object_snapshot_v1(
-            publication.storage_authority.operator,
-            &head_key,
-            RegisteredRootPlanContractV1::strict_v1()
-                .remote_contract()
-                .max_catalog_head_object_bytes(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let RawObjectReadV1::Bound(snapshot) = observed else {
-            panic!("test publishing HEAD must carry an exact binding");
-        };
-        let (_, _, binding) = snapshot.into_parts();
-        TrustedCatalogPublishingHeadInstalledReceiptV1 {
-            publishing_head_binding: registered_binding_from_raw_v1(binding),
-        }
-    }
-
     fn committed_successor(
         pending: BoundPendingCatalogControlV1<'_>,
     ) -> BoundCommittedCatalogSuccessorV1 {
@@ -4413,18 +5513,26 @@ mod tests {
             .publishing_head_reservation_fingerprint;
         let pending_control_record_fingerprint =
             pending.pending_receipt.pending_control_record_fingerprint;
+        let canonical_pending_control_record_bytes = pending
+            .transition
+            .canonical_pending_control_record_bytes
+            .clone();
         let publication = pending.transition.publication;
         BoundCommittedCatalogSuccessorV1 {
             control_guard: publication.control_guard,
             pending_revision,
             publishing_head_reservation_fingerprint,
             pending_control_record_fingerprint,
+            canonical_pending_control_record_bytes,
             context: publication.context,
             sequence: publication.sequence,
             publication_nonce: publication.publication_nonce,
             parent_head_revision: publication.parent_head_revision,
             head_revision,
             committed_head_bytes,
+            committed_head_binding: RegisteredRootRemoteObjectBindingV1::Etag {
+                etag: "committed-head-etag".to_owned(),
+            },
         }
     }
 
@@ -4629,10 +5737,7 @@ mod tests {
             .write("roots/index/added.txt", successor_bytes.clone())
             .await
             .unwrap();
-        let receipt = install_test_publishing_head_receipt(&pending).await;
-        let capability = bind_catalog_namespace_mutation_capability_v1(pending, receipt)
-            .await
-            .unwrap();
+        let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
         let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
             .await
             .unwrap();
@@ -4668,6 +5773,89 @@ mod tests {
                 .get(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn publishing_head_cas_is_exact_replay_safe_and_preserves_competitors() {
+        {
+            let (fixture, corpus, observed) =
+                observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                    "retained.txt".to_owned(),
+                )])
+                .await;
+            let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+            let expected_bytes = pending.transition.canonical_publishing_head_bytes.clone();
+            let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+
+            assert_eq!(
+                fixture
+                    .operator()
+                    .read("roots/.tcfs-catalog/v1/head")
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                expected_bytes
+            );
+            assert!(mutable_head_etag_v1(&capability.publishing_head_binding).is_some());
+        }
+
+        {
+            let (fixture, corpus, observed) =
+                observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                    "retained.txt".to_owned(),
+                )])
+                .await;
+            let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+            let expected_bytes = pending.transition.canonical_publishing_head_bytes.clone();
+            let expected_parent_etag = pending
+                .transition
+                .publication
+                .expected_parent_head_etag
+                .clone();
+            fixture
+                .operator()
+                .write_with("roots/.tcfs-catalog/v1/head", expected_bytes)
+                .if_match(&expected_parent_etag)
+                .await
+                .unwrap();
+
+            let capability = install_catalog_publishing_head_v1(pending)
+                .await
+                .expect("an ambiguous exact replay must recover by bounded reread");
+            assert!(mutable_head_etag_v1(&capability.publishing_head_binding).is_some());
+        }
+
+        {
+            let (fixture, corpus, observed) =
+                observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                    "retained.txt".to_owned(),
+                )])
+                .await;
+            let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+            fixture
+                .operator()
+                .write("roots/.tcfs-catalog/v1/head", b"competing head".to_vec())
+                .await
+                .unwrap();
+
+            let error = install_catalog_publishing_head_v1(pending)
+                .await
+                .expect_err("a stale predecessor must not overwrite a competing HEAD");
+            assert_eq!(
+                error.pending.transition.publication.sequence.get(),
+                2,
+                "failure must retain the exact pending authority"
+            );
+            assert_eq!(
+                fixture
+                    .operator()
+                    .read("roots/.tcfs-catalog/v1/head")
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                b"competing head"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4772,10 +5960,7 @@ mod tests {
         let transition = prepare_catalog_control_transition_v1(publication, [0xac; 32]).unwrap();
         let receipt = pending_receipt(&transition);
         let pending = match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap();
-        let receipt = install_test_publishing_head_receipt(&pending).await;
-        let capability = bind_catalog_namespace_mutation_capability_v1(pending, receipt)
-            .await
-            .unwrap();
+        let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
         let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
             .await
             .unwrap();
@@ -4815,6 +6000,225 @@ mod tests {
                 .to_vec(),
             manifest_bytes
         );
+        let committed = finalize_catalog_committed_head_v1(applied).await.unwrap();
+        assert_eq!(committed.sequence.get(), 2);
+        let reread = read_semantically_bound_remote_catalog_corpus_v1(
+            fixture.operator(),
+            &test_selected(),
+            fixture.receipt(),
+        )
+        .await
+        .unwrap();
+        let StrictSemanticallyBoundRemoteCatalogReadV1::Verified(reread) = reread else {
+            panic!("all-kind successor catalog must pass the production semantic reader");
+        };
+        assert_eq!(reread.index_object_count(), 1);
+        assert_eq!(reread.reservation_count(), 1);
+        assert_eq!(reread.manifest_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn committed_finalization_publishes_a_complete_readable_successor_catalog() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+        let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+        let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
+            .await
+            .unwrap();
+        let committed = finalize_catalog_committed_head_v1(applied).await.unwrap();
+
+        assert_eq!(committed.sequence.get(), 2);
+        assert_eq!(
+            committed.head_revision,
+            super::super::catalog_head_revision_v1(&committed.committed_head_bytes)
+        );
+        assert!(mutable_head_etag_v1(&committed.committed_head_binding).is_some());
+        let head =
+            serde_json::from_slice::<RemoteCatalogHeadWireV1>(&committed.committed_head_bytes)
+                .unwrap();
+        assert_eq!(head.catalog_sequence, 2);
+        assert_eq!(
+            head.parent_head_revision,
+            Some(lower_hex(&observed.head_revision))
+        );
+        assert_eq!(head.catalog_root.entry_count, 2);
+
+        let reread = read_semantically_bound_remote_catalog_corpus_v1(
+            fixture.operator(),
+            &test_selected(),
+            fixture.receipt(),
+        )
+        .await
+        .unwrap();
+        let StrictSemanticallyBoundRemoteCatalogReadV1::Verified(reread) = reread else {
+            panic!("committed successor catalog must pass the production semantic reader");
+        };
+        assert_eq!(reread.catalog_sequence().get(), 2);
+        assert_eq!(reread.index_object_count(), 2);
+        assert_eq!(reread.reservation_count(), 0);
+        assert_eq!(reread.manifest_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn committed_finalization_retains_evidence_on_head_drift_and_lease_loss() {
+        {
+            let (fixture, corpus, observed) =
+                observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                    "retained.txt".to_owned(),
+                )])
+                .await;
+            let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+            let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+            let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
+                .await
+                .unwrap();
+            fixture
+                .operator()
+                .write(
+                    "roots/.tcfs-catalog/v1/head",
+                    b"competing final head".to_vec(),
+                )
+                .await
+                .unwrap();
+
+            let failure = match finalize_catalog_committed_head_v1(applied).await {
+                Err(failure) => failure,
+                Ok(_) => panic!("visible HEAD drift must stop committed finalization"),
+            };
+            assert_eq!(failure.applied.applied.len(), 2);
+            assert!(failure
+                .applied
+                .capability
+                .pending
+                .transition
+                .publication
+                .control_guard
+                .all_writers
+                .retained_control_lease
+                .is_live_v1());
+            assert!(format!("{failure:#}").contains("publishing HEAD changed"));
+        }
+
+        {
+            let (fixture, corpus, observed) =
+                observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                    "retained.txt".to_owned(),
+                )])
+                .await;
+            let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+            let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+            let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
+                .await
+                .unwrap();
+            applied
+                .capability
+                .pending
+                .transition
+                .publication
+                .control_guard
+                .all_writers
+                .retained_control_lease
+                .test_live
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+
+            let failure = match finalize_catalog_committed_head_v1(applied).await {
+                Err(failure) => failure,
+                Ok(_) => panic!("lost backend lease must stop committed finalization"),
+            };
+            assert_eq!(failure.applied.applied.len(), 2);
+            assert!(format!("{failure:#}").contains("control lease is not live"));
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_replays_partial_namespace_and_reconstructs_committed_closure() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+        let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+        let (first_kind, first_key, first_bytes, first_blake3) = {
+            let first_payload = &capability
+                .pending
+                .transition
+                .publication
+                .mutation_journal
+                .successor_payloads[0];
+            (
+                first_payload.kind,
+                first_payload.object_key.clone(),
+                first_payload.raw_bytes.clone(),
+                first_payload.raw_blake3,
+            )
+        };
+        fixture
+            .operator()
+            .write(&first_key, first_bytes.clone())
+            .await
+            .unwrap();
+        let first_binding =
+            read_exact_catalog_successor_v1(&capability, first_kind, &first_key, &first_bytes)
+                .await
+                .unwrap();
+        let failure = FailedCatalogNamespaceMutationsV1 {
+            capability,
+            applied: vec![AppliedCatalogNamespaceObjectV1 {
+                kind: first_kind,
+                object_key: first_key,
+                raw_blake3: first_blake3,
+                binding: first_binding,
+            }],
+            error: anyhow::anyhow!("simulated crash after the first canonical mutation"),
+        };
+        let applied = recover_failed_catalog_namespace_mutations_v1(failure)
+            .await
+            .unwrap();
+        assert_eq!(applied.applied.len(), 2);
+
+        let published = publish_catalog_successor_closure_v1(&applied)
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .operator()
+                .read("roots/.tcfs-catalog/v1/head")
+                .await
+                .unwrap()
+                .to_vec(),
+            published.committed_head_bytes
+        );
+        let failure = FailedCatalogCommittedFinalizationV1 {
+            applied,
+            error: anyhow::anyhow!("simulated crash after committed HEAD CAS"),
+        };
+        let committed = recover_failed_catalog_committed_finalization_v1(failure)
+            .await
+            .unwrap();
+        assert_eq!(committed.sequence.get(), 2);
+        assert_eq!(committed.head_revision, published.head_revision);
+        assert_eq!(
+            committed.committed_head_binding,
+            published.committed_head_binding
+        );
+
+        let reread = read_semantically_bound_remote_catalog_corpus_v1(
+            fixture.operator(),
+            &test_selected(),
+            fixture.receipt(),
+        )
+        .await
+        .unwrap();
+        let StrictSemanticallyBoundRemoteCatalogReadV1::Verified(reread) = reread else {
+            panic!("recovered committed successor must pass the production semantic reader");
+        };
+        assert_eq!(reread.catalog_sequence().get(), 2);
+        assert_eq!(reread.index_object_count(), 2);
     }
 
     #[tokio::test]
@@ -4826,7 +6230,6 @@ mod tests {
                 )])
                 .await;
             let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
-            let receipt = install_test_publishing_head_receipt(&pending).await;
             pending
                 .transition
                 .publication
@@ -4835,10 +6238,19 @@ mod tests {
                 .retained_control_lease
                 .test_live
                 .store(false, std::sync::atomic::Ordering::SeqCst);
-            let error = bind_catalog_namespace_mutation_capability_v1(pending, receipt)
+            let error = install_catalog_publishing_head_v1(pending)
                 .await
-                .expect_err("a lost backend lease must not mint a writer capability");
+                .expect_err("a lost backend lease must not install publishing HEAD");
             assert!(error.to_string().contains("control lease is not live"));
+            assert_eq!(
+                fixture
+                    .operator()
+                    .read("roots/.tcfs-catalog/v1/head")
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                observed.committed_head_bytes
+            );
         }
 
         {
@@ -4848,10 +6260,7 @@ mod tests {
                 )])
                 .await;
             let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
-            let receipt = install_test_publishing_head_receipt(&pending).await;
-            let capability = bind_catalog_namespace_mutation_capability_v1(pending, receipt)
-                .await
-                .unwrap();
+            let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
             capability
                 .pending
                 .transition
@@ -4879,10 +6288,7 @@ mod tests {
                 )])
                 .await;
             let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
-            let receipt = install_test_publishing_head_receipt(&pending).await;
-            let capability = bind_catalog_namespace_mutation_capability_v1(pending, receipt)
-                .await
-                .unwrap();
+            let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
             fixture
                 .operator()
                 .write(
@@ -4915,10 +6321,7 @@ mod tests {
                 .write("roots/index/added.txt", b"wrong collision".to_vec())
                 .await
                 .unwrap();
-            let receipt = install_test_publishing_head_receipt(&pending).await;
-            let capability = bind_catalog_namespace_mutation_capability_v1(pending, receipt)
-                .await
-                .unwrap();
+            let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
             let error = apply_authoritative_catalog_namespace_mutations_v1(capability)
                 .await
                 .expect_err("a different create collision must fail closed");
@@ -6005,6 +7408,48 @@ mod tests {
             match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap_err(),
             CatalogPublicationContractErrorV1::ControlTransitionMismatch
         );
+    }
+
+    #[tokio::test]
+    async fn retained_control_backend_advances_only_the_committed_successor() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+        let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+        let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
+            .await
+            .unwrap();
+        let committed = finalize_catalog_committed_head_v1(applied).await.unwrap();
+        let advanced = advance_catalog_high_water_v1(committed, [0xad; 32])
+            .await
+            .unwrap();
+
+        assert_eq!(advanced.successor.sequence.get(), 2);
+        assert_eq!(advanced.ready_revision.generation.get(), 9);
+        assert_eq!(advanced.ready_revision.fingerprint, [0xad; 32]);
+        assert!(advanced.retained_control_lease.is_live_v1());
+
+        let committed = committed_successor(bound_pending(&fixture, &observed));
+        let failure = match advance_catalog_high_water_v1(committed, [0; 32]).await {
+            Err(failure) => failure,
+            Ok(_) => panic!("zero ready revision must not reach the control backend"),
+        };
+        assert_eq!(failure.committed.sequence.get(), 2);
+        assert_eq!(failure.ready_revision_fingerprint, [0; 32]);
+        assert!(failure
+            .committed
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .is_live_v1());
+        let failure = match recover_failed_catalog_high_water_advance_v1(failure).await {
+            Err(failure) => failure,
+            Ok(_) => panic!("invalid high-water proposal must stay fail-closed on recovery"),
+        };
+        assert_eq!(failure.committed.sequence.get(), 2);
     }
 
     #[tokio::test]
