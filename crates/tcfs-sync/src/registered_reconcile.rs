@@ -20,7 +20,8 @@ use crate::blacklist::Blacklist;
 use crate::conflict::{ConflictInfo, VectorClock};
 use crate::index_entry::portable_casefold_path;
 use crate::index_entry::{
-    manifest_object_id, namespace_reservation_object_id, namespace_reservation_prefix,
+    manifest_object_id, namespace_index_prefix, namespace_logical_entry_from_index_path,
+    namespace_reservation_object_id, namespace_reservation_prefix,
     read_expected_raw_object_snapshot_v1, read_raw_object_snapshot_v1,
     validate_canonical_namespace_remote_prefix, validate_namespace_logical_path,
     validate_relative_storage_key, validate_storage_key_component,
@@ -1241,6 +1242,68 @@ enum ParsedStrictIndexRecordV1 {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CatalogValidatedIndexStateV1 {
+    Current,
+    Historical,
+}
+
+/// Strict semantic projection of one catalog-visible index or directory-marker
+/// payload. Construction is intentionally limited to the same parsers and
+/// route validators used by the registered-root semantic reader.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogValidatedIndexPayloadV1 {
+    logical_path: String,
+    role: PortableNamespaceRole,
+    state: CatalogValidatedIndexStateV1,
+    committed: Option<StrictRemoteIndexEntryV1>,
+}
+
+impl CatalogValidatedIndexPayloadV1 {
+    pub(crate) fn logical_path(&self) -> &str {
+        &self.logical_path
+    }
+
+    pub(crate) const fn role(&self) -> PortableNamespaceRole {
+        self.role
+    }
+
+    pub(crate) const fn state(&self) -> CatalogValidatedIndexStateV1 {
+        self.state
+    }
+
+    pub(crate) const fn committed(&self) -> Option<&StrictRemoteIndexEntryV1> {
+        self.committed.as_ref()
+    }
+}
+
+/// One strict committed-index reference used to validate a manifest against
+/// the complete successor catalog rather than a caller-selected subset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogManifestReferenceV1 {
+    remote_prefix: String,
+    rel_path: String,
+    entry: StrictRemoteIndexEntryV1,
+}
+
+impl CatalogManifestReferenceV1 {
+    pub(crate) fn new(
+        remote_prefix: &str,
+        rel_path: &str,
+        entry: &StrictRemoteIndexEntryV1,
+    ) -> Self {
+        Self {
+            remote_prefix: remote_prefix.to_owned(),
+            rel_path: rel_path.to_owned(),
+            entry: entry.clone(),
+        }
+    }
+
+    pub(crate) fn manifest_hash(&self) -> &str {
+        self.entry.manifest_hash()
+    }
+}
+
 fn parse_strict_index_record_v1(bytes: &[u8]) -> Result<ParsedStrictIndexRecordV1> {
     let wire: StrictVersionedIndexEntryWireV1 =
         serde_json::from_slice(bytes).context("parsing strict V1 index record")?;
@@ -1312,6 +1375,87 @@ fn parse_strict_index_record_v1(bytes: &[u8]) -> Result<ParsedStrictIndexRecordV
             Ok(ParsedStrictIndexRecordV1::Preparing { current, pending })
         }
         _ => anyhow::bail!("unsupported strict V1 index version/state combination"),
+    }
+}
+
+/// Parse one proposed catalog index/marker payload through the production
+/// strict validators without manufacturing a bound storage object.
+pub(crate) fn validate_catalog_index_payload_v1(
+    remote_prefix: &str,
+    object_key: &str,
+    raw_bytes: &[u8],
+) -> Result<CatalogValidatedIndexPayloadV1> {
+    let index_prefix = namespace_index_prefix(remote_prefix);
+    let index_rel_path = object_key
+        .strip_prefix(&index_prefix)
+        .context("catalog successor index is outside the selected namespace")?;
+    let (logical_path, role) = namespace_logical_entry_from_index_path(index_rel_path)
+        .context("catalog successor index route is not canonical")?;
+
+    match role {
+        PortableNamespaceRole::File => {
+            let route = strict_remote_index_route_v1(remote_prefix, &logical_path)?;
+            anyhow::ensure!(
+                route.index_key() == object_key,
+                "catalog successor index route does not round-trip"
+            );
+            let parsed = parse_strict_index_record_v1(raw_bytes)?;
+            validate_strict_index_route_semantics_v1(
+                &parsed,
+                route.remote_prefix(),
+                route.rel_path(),
+            )?;
+            match parsed {
+                ParsedStrictIndexRecordV1::Deleted { .. } => Ok(CatalogValidatedIndexPayloadV1 {
+                    logical_path,
+                    role,
+                    state: CatalogValidatedIndexStateV1::Historical,
+                    committed: None,
+                }),
+                ParsedStrictIndexRecordV1::Committed { current, .. } => {
+                    Ok(CatalogValidatedIndexPayloadV1 {
+                        logical_path,
+                        role,
+                        state: CatalogValidatedIndexStateV1::Current,
+                        committed: Some(current),
+                    })
+                }
+                ParsedStrictIndexRecordV1::Preparing { .. } => {
+                    anyhow::bail!("catalog successor index cannot remain preparing")
+                }
+            }
+        }
+        PortableNamespaceRole::Directory => {
+            let route = strict_remote_directory_marker_route_v1(remote_prefix, &logical_path)?;
+            anyhow::ensure!(
+                route.marker_key() == object_key,
+                "catalog successor marker route does not round-trip"
+            );
+            if raw_bytes == DIRECTORY_MARKER_BYTES {
+                return Ok(CatalogValidatedIndexPayloadV1 {
+                    logical_path,
+                    role,
+                    state: CatalogValidatedIndexStateV1::Current,
+                    committed: None,
+                });
+            }
+            let parsed = parse_strict_index_record_v1(raw_bytes)?;
+            validate_strict_index_route_semantics_v1(
+                &parsed,
+                route.remote_prefix(),
+                route.marker_rel_path(),
+            )?;
+            anyhow::ensure!(
+                matches!(parsed, ParsedStrictIndexRecordV1::Deleted { .. }),
+                "catalog successor marker must be live marker bytes or a strict deletion"
+            );
+            Ok(CatalogValidatedIndexPayloadV1 {
+                logical_path,
+                role,
+                state: CatalogValidatedIndexStateV1::Historical,
+                committed: None,
+            })
+        }
     }
 }
 
@@ -2024,6 +2168,61 @@ fn classify_observed_namespace_reservation_v1(
     })
 }
 
+/// Strict semantic projection of one proposed namespace-reservation payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogValidatedReservationPayloadV1 {
+    exact_path: String,
+    folded_path: String,
+    role: PortableNamespaceRole,
+}
+
+impl CatalogValidatedReservationPayloadV1 {
+    pub(crate) fn exact_path(&self) -> &str {
+        &self.exact_path
+    }
+
+    pub(crate) fn folded_path(&self) -> &str {
+        &self.folded_path
+    }
+
+    pub(crate) const fn role(&self) -> PortableNamespaceRole {
+        self.role
+    }
+}
+
+/// Parse one proposed reservation through the production canonical serializer,
+/// path bounds, and content-addressed route check.
+pub(crate) fn validate_catalog_reservation_payload_v1(
+    remote_prefix: &str,
+    object_key: &str,
+    raw_bytes: &[u8],
+) -> Result<CatalogValidatedReservationPayloadV1> {
+    let reservation_prefix = namespace_reservation_prefix(remote_prefix);
+    let object_id = object_key
+        .strip_prefix(&reservation_prefix)
+        .context("catalog successor reservation is outside the selected namespace")?;
+    let route = strict_namespace_reservation_route_v1(remote_prefix, object_id)?;
+    anyhow::ensure!(
+        route.object_key() == object_key,
+        "catalog successor reservation route does not round-trip"
+    );
+    let reservation = PortableNamespaceReservationV1::from_json_bytes(raw_bytes)?;
+    validate_registered_remote_logical_path_bounds_v1(reservation.exact_path())?;
+    anyhow::ensure!(
+        reservation.to_json_bytes()? == raw_bytes,
+        "catalog successor reservation is not canonically encoded"
+    );
+    anyhow::ensure!(
+        namespace_reservation_object_id(reservation.folded_path()) == route.object_id(),
+        "catalog successor reservation address does not match its folded path"
+    );
+    Ok(CatalogValidatedReservationPayloadV1 {
+        exact_path: reservation.exact_path().to_owned(),
+        folded_path: reservation.folded_path().to_owned(),
+        role: reservation.role(),
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StrictWrappedFileKeyWireV1 {
@@ -2534,6 +2733,136 @@ fn validate_parsed_strict_manifest_reference_v1(
         _ => anyhow::bail!("strict manifest kind does not match an index reference"),
     }
     Ok(())
+}
+
+fn validate_catalog_manifest_reference_group_v1<'a>(
+    object_key: &str,
+    references: &'a [CatalogManifestReferenceV1],
+) -> Result<&'a CatalogManifestReferenceV1> {
+    let first = references
+        .first()
+        .context("catalog successor manifest reference group is empty")?;
+    validate_canonical_namespace_remote_prefix(&first.remote_prefix)?;
+    validate_registered_remote_logical_path_bounds_v1(&first.rel_path)?;
+    validate_lower_hex_64(
+        first.entry.manifest_hash(),
+        "catalog successor manifest object id",
+    )?;
+    let expected_key = format!(
+        "{}/manifests/{}",
+        first.remote_prefix,
+        first.entry.manifest_hash()
+    );
+    anyhow::ensure!(
+        object_key == expected_key,
+        "catalog successor manifest route does not match its references"
+    );
+    for reference in references {
+        anyhow::ensure!(
+            reference.remote_prefix == first.remote_prefix
+                && reference.entry.manifest_hash() == first.entry.manifest_hash()
+                && reference.entry.kind() == first.entry.kind(),
+            "catalog successor manifest reference group mixes roots, addresses, or kinds"
+        );
+        validate_registered_remote_logical_path_bounds_v1(&reference.rel_path)?;
+        anyhow::ensure!(
+            Blacklist::default()
+                .check_fixed_ingress_path_components(Path::new(&reference.rel_path))
+                .is_none(),
+            "catalog successor manifest reference is excluded by the fixed profile"
+        );
+    }
+    Ok(first)
+}
+
+fn validate_catalog_parsed_manifest_references_v1(
+    parsed: &ParsedStrictManifestV1,
+    references: &[CatalogManifestReferenceV1],
+) -> Result<()> {
+    for reference in references {
+        match (parsed, reference.entry.kind()) {
+            (ParsedStrictManifestV1::Regular(manifest), RemoteEntryKind::RegularFile) => {
+                anyhow::ensure!(
+                    manifest.rel_path() == reference.rel_path
+                        && manifest.file_size() == reference.entry.size()
+                        && u64::try_from(manifest.chunks().len())
+                            .context("catalog successor manifest chunk count does not fit u64")?
+                            == reference.entry.chunks(),
+                    "catalog successor regular manifest does not satisfy every reference"
+                );
+            }
+            (ParsedStrictManifestV1::Symlink(manifest), RemoteEntryKind::Symlink) => {
+                anyhow::ensure!(
+                    manifest.rel_path() == reference.rel_path
+                        && reference.entry.symlink_target() == Some(manifest.symlink_target()),
+                    "catalog successor symlink manifest does not satisfy every reference"
+                );
+                crate::engine::validate_indexed_symlink_target(
+                    Path::new(&reference.rel_path),
+                    manifest.symlink_target(),
+                )?;
+            }
+            _ => anyhow::bail!(
+                "catalog successor manifest kind does not match every index reference"
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Parse and validate one proposed manifest payload against the complete
+/// successor reference group using the production strict manifest rules.
+pub(crate) fn validate_catalog_manifest_payload_v1(
+    object_key: &str,
+    raw_bytes: &[u8],
+    references: &[CatalogManifestReferenceV1],
+) -> Result<()> {
+    let first = validate_catalog_manifest_reference_group_v1(object_key, references)?;
+    anyhow::ensure!(
+        manifest_object_id(raw_bytes) == first.entry.manifest_hash(),
+        "catalog successor manifest bytes do not match their content address"
+    );
+    let parsed = match first.entry.kind() {
+        RemoteEntryKind::RegularFile => {
+            let wire: StrictRegularManifestWireV1 =
+                serde_json::from_slice(raw_bytes).context("parsing strict regular manifest")?;
+            ParsedStrictManifestV1::Regular(strict_regular_manifest_v1(
+                wire,
+                &first.rel_path,
+                &first.entry,
+            )?)
+        }
+        RemoteEntryKind::Symlink => {
+            let wire: StrictSymlinkManifestWireV1 =
+                serde_json::from_slice(raw_bytes).context("parsing strict symlink manifest")?;
+            ParsedStrictManifestV1::Symlink(strict_symlink_manifest_v1(
+                wire,
+                &first.rel_path,
+                &first.entry,
+            )?)
+        }
+    };
+    validate_catalog_parsed_manifest_references_v1(&parsed, references)
+}
+
+/// Recheck one already-bound predecessor manifest against the complete
+/// successor reference group. This prevents a changed index set from reusing
+/// a manifest whose old semantic proof covered a different set of claims.
+pub(crate) fn validate_bound_catalog_manifest_references_v1(
+    object_key: &str,
+    manifest: &StrictRemoteManifestV1,
+    references: &[CatalogManifestReferenceV1],
+) -> Result<()> {
+    validate_catalog_manifest_reference_group_v1(object_key, references)?;
+    let parsed = match manifest {
+        StrictRemoteManifestV1::Regular { manifest, .. } => {
+            ParsedStrictManifestV1::Regular(manifest.clone())
+        }
+        StrictRemoteManifestV1::Symlink { manifest, .. } => {
+            ParsedStrictManifestV1::Symlink(manifest.clone())
+        }
+    };
+    validate_catalog_parsed_manifest_references_v1(&parsed, references)
 }
 
 fn strict_regular_manifest_v1(
