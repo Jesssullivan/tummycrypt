@@ -335,8 +335,11 @@ async fn validate_pull_manifests_for_execution(
         engine::validate_indexed_manifest_entry_binding(&bytes, manifest_hash, &entry, rel_path)
             .with_context(|| format!("binding pull manifest before mutation: {manifest_path}"))?;
         if let Some(target) = expected_symlink_target.as_deref() {
-            engine::validate_indexed_symlink_target(&local_root.join(rel_path), target)
-                .with_context(|| format!("validating pull symlink target: {rel_path}"))?;
+            engine::validate_restored_symlink_target_for_physical_path(
+                &local_root.join(rel_path),
+                target,
+            )
+            .with_context(|| format!("validating pull symlink target: {rel_path}"))?;
         }
     }
     Ok(())
@@ -3516,12 +3519,15 @@ fn parse_reconcile_manifest_causality(
                 .symlink_target
                 .as_deref()
                 .context("cross-kind remote symlink index entry is missing its target")?;
-            engine::validate_indexed_symlink_target(local_path, expected_target)
+            engine::validate_restored_symlink_target_for_physical_path(local_path, expected_target)
                 .context("validating cross-kind indexed symlink target")?;
             let manifest = SymlinkManifest::from_bytes(bytes)
                 .context("parsing cross-kind remote symlink manifest")?;
-            engine::validate_indexed_symlink_target(local_path, &manifest.symlink_target)
-                .context("validating cross-kind manifest symlink target")?;
+            engine::validate_restored_symlink_target_for_physical_path(
+                local_path,
+                &manifest.symlink_target,
+            )
+            .context("validating cross-kind manifest symlink target")?;
             anyhow::ensure!(
                 manifest.symlink_target == expected_target,
                 "cross-kind remote symlink manifest target does not match index at {rel_path:?}"
@@ -3566,7 +3572,7 @@ async fn compare_both_exist_cross_kind(
                 local_path.display()
             )
         })?;
-        engine::validate_indexed_symlink_target(local_path, &target)
+        engine::validate_restored_symlink_target_for_physical_path(local_path, &target)
             .context("validating local symlink target during type transition")?;
         (
             RemoteEntryKind::Symlink,
@@ -4124,9 +4130,9 @@ async fn compare_both_exist_symlink(
     // Read the local link target without following it.
     let local_target = crate::engine::read_symlink_target_text(local_path)
         .with_context(|| format!("reading local symlink target: {}", local_path.display()))?;
-    engine::validate_indexed_symlink_target(local_path, &local_target)
+    engine::validate_restored_symlink_target_for_physical_path(local_path, &local_target)
         .context("validating local symlink target before reconciliation")?;
-    engine::validate_indexed_symlink_target(local_path, expected_target)
+    engine::validate_restored_symlink_target_for_physical_path(local_path, expected_target)
         .context("validating indexed symlink target before reconciliation")?;
     let local_hash = crate::engine::symlink_manifest_hash(&local_target);
     let local_vclock = tracked.map(|s| s.vclock.clone()).unwrap_or_default();
@@ -4156,8 +4162,11 @@ async fn compare_both_exist_symlink(
     })?;
     let remote_manifest = SymlinkManifest::from_bytes(&remote_bytes)
         .with_context(|| format!("parsing remote symlink manifest: {manifest_path}"))?;
-    engine::validate_indexed_symlink_target(local_path, &remote_manifest.symlink_target)
-        .context("validating manifest symlink target before reconciliation")?;
+    engine::validate_restored_symlink_target_for_physical_path(
+        local_path,
+        &remote_manifest.symlink_target,
+    )
+    .context("validating manifest symlink target before reconciliation")?;
     if remote_manifest.symlink_target != expected_target {
         anyhow::bail!("remote symlink manifest target does not match index at {rel_path:?}");
     }

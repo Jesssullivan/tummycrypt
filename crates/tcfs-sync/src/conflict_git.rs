@@ -47,6 +47,31 @@ fn repo_git_command(
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn descriptor_rooted_sanitized_git_command(
+    directory: &std::fs::File,
+) -> Result<std::process::Command> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let directory = directory
+        .try_clone()
+        .context("cloning descriptor-rooted Git cwd")?;
+    let mut command = git_safety::sanitized_git_command();
+    // SAFETY: `fchdir(2)` is async-signal-safe. The callback owns the cloned
+    // descriptor, so delayed spawn cannot observe a closed/reused fd number.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(directory.as_raw_fd()) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    Ok(command)
+}
+
 fn git_output_at(
     repo_root: &Path,
     anchor: Option<&GitRepoAnchor>,
@@ -719,9 +744,47 @@ impl GitRepoAnchor {
                     canonical_root.display()
                 )
             })?;
+            Self::capture_from_authorized_root(&canonical_root, directory)
+        }
+    }
+
+    /// Build an anchor from a root descriptor that an earlier authority check
+    /// already opened and retained.
+    ///
+    /// The supplied descriptor, not a reopened pathname, becomes the worktree
+    /// capability. `.git` is opened relative to it with `O_NOFOLLOW`; the
+    /// canonical spelling is retained for identity revalidation and operator
+    /// diagnostics only.
+    pub(crate) fn capture_from_authorized_root(
+        canonical_root: &Path,
+        directory: std::fs::File,
+    ) -> Result<Self> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (canonical_root, directory);
+            bail!(
+                "registered-root Git resolution requires descriptor-anchored commands on Linux or macOS"
+            );
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let metadata = directory
+                .metadata()
+                .context("inspecting authorized repo root descriptor")?;
+            if !metadata.is_dir() {
+                bail!("authorized repo root descriptor is not a directory");
+            }
+            if !canonical_root.is_absolute() {
+                bail!(
+                    "authorized repo root spelling is not absolute: {}",
+                    canonical_root.display()
+                );
+            }
+
             let git_directory = git_safety::open_git_directory_at(&directory)?;
             let anchor = Self {
-                canonical_root,
+                canonical_root: canonical_root.to_owned(),
                 directory,
                 git_directory,
                 #[cfg(test)]
@@ -734,7 +797,11 @@ impl GitRepoAnchor {
         }
     }
 
-    fn revalidate(&self) -> Result<()> {
+    pub(crate) fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             bail!(
@@ -804,9 +871,8 @@ impl GitRepoAnchor {
         }
     }
 
-    /// Git command rooted in the captured worktree. This variant is for
-    /// read-only worktree/topology inspection only; mutations use
-    /// [`Self::metadata_git_command`].
+    /// Git command rooted in the captured worktree for legacy clean-worktree
+    /// inspection and the separately fenced mutation path.
     fn root_git_command(&self) -> Result<std::process::Command> {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -815,25 +881,7 @@ impl GitRepoAnchor {
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use std::os::fd::AsRawFd;
-            use std::os::unix::process::CommandExt;
-
-            let directory_fd = self.directory.as_raw_fd();
-            let mut command = git_safety::sanitized_git_command();
-            // SAFETY: `fchdir` is async-signal-safe and the descriptor remains
-            // alive for the full child spawn. Git discovery after the cwd
-            // change is read-only on this command path; root and `.git`
-            // identity are both revalidated immediately before mutation.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::fchdir(directory_fd) == 0 {
-                        Ok(())
-                    } else {
-                        Err(std::io::Error::last_os_error())
-                    }
-                });
-            }
-            Ok(command)
+            descriptor_rooted_sanitized_git_command(&self.directory)
         }
     }
 
@@ -877,29 +925,12 @@ impl GitRepoAnchor {
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use std::os::fd::AsRawFd;
-            use std::os::unix::process::CommandExt;
-
-            let git_directory_fd = self.git_directory.as_raw_fd();
-            let mut command = git_safety::sanitized_git_command();
+            let mut command = descriptor_rooted_sanitized_git_command(&self.git_directory)?;
             command
                 .arg("-c")
                 .arg("core.fsync=reference")
                 .env("GIT_DIR", ".")
                 .env("GIT_COMMON_DIR", ".");
-            // SAFETY: only async-signal-safe `fchdir` runs in this callback.
-            // The common sanitized builder already installs the private child
-            // umask. This metadata command set does not need a worktree and
-            // resolves all Git state from the captured `.git` cwd.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::fchdir(git_directory_fd) == 0 {
-                        Ok(())
-                    } else {
-                        Err(std::io::Error::last_os_error())
-                    }
-                });
-            }
             Ok(command)
         }
     }
@@ -2282,6 +2313,47 @@ mod tests {
                 .expect_err("redirected/shared Git topology must fail closed");
             assert!(error.to_string().contains(expected), "{error:#}");
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn authorized_descriptor_anchor_revalidates_the_captured_route() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repo = temporary.path().join("repo");
+        init_repo(&repo);
+        commit(&repo, "tracked.txt", "base\n", "base");
+        let canonical_root = repo.canonicalize().unwrap();
+        let directory = std::fs::File::open(&canonical_root).unwrap();
+
+        let anchor =
+            GitRepoAnchor::capture_from_authorized_root(&canonical_root, directory).unwrap();
+        assert_eq!(anchor.canonical_root(), canonical_root);
+        validate_standalone_repo_topology(&canonical_root).unwrap();
+
+        anchor.revalidate().unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn authorized_descriptor_anchor_rejects_a_different_canonical_route() {
+        let temporary = tempfile::tempdir().unwrap();
+        let authorized = temporary.path().join("authorized");
+        let different = temporary.path().join("different");
+        init_repo(&authorized);
+        init_repo(&different);
+
+        let authorized_descriptor = std::fs::File::open(&authorized).unwrap();
+        let error = GitRepoAnchor::capture_from_authorized_root(
+            &different.canonicalize().unwrap(),
+            authorized_descriptor,
+        )
+        .expect_err("the held descriptor, not the supplied route, is authoritative");
+        assert!(
+            error
+                .to_string()
+                .contains("repo root was replaced after authorization"),
+            "{error:#}"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

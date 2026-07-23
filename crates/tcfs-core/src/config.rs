@@ -1,5 +1,7 @@
+use crate::fixed_ingress::{FixedIngressPolicySchemaFingerprintV1, FixedIngressPolicyV1};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use url::{Host, Url};
@@ -990,6 +992,1005 @@ impl RootProfileV1 {
             Self::AgentStaticV1 => "agent-static-v1",
         }
     }
+
+    /// Immutable planning policy carried by this profile version.
+    ///
+    /// Registered-root planning must not inherit mutable primary-root
+    /// collection or deletion settings. A profile name therefore expands to
+    /// one closed bundle whose settings and fingerprint cannot be paired with
+    /// a different profile.
+    pub fn policy(self) -> RootProfilePolicyV1 {
+        let settings = self.settings();
+        RootProfilePolicyV1 {
+            profile: self,
+            settings,
+            settings_fingerprint: fingerprint_root_profile_settings_v1(self, settings),
+        }
+    }
+
+    fn settings(self) -> RootProfileSettingsV1 {
+        let git = match self {
+            Self::GitRawV1 => RootGitPolicyV1::StandaloneRawWithFastForwardProofV1,
+            Self::AgentStaticV1 => RootGitPolicyV1::ExcludedV1,
+        };
+        RootProfileSettingsV1 {
+            hidden_paths: RootHiddenPathPolicyV1::IncludeV1,
+            exclusions: RootExclusionPolicyV1::FixedIngressPathComponentsV1,
+            git,
+            git_observation: git.observation_contract(),
+            symlinks: RootSymlinkPolicyV1::PreserveExactTargetV1,
+            hardlinks: RootHardlinkPolicyV1::RejectV1,
+            special_files: RootSpecialFilePolicyV1::RejectV1,
+            empty_directories: RootEmptyDirectoryPolicyV1::IgnoreV1,
+            metadata: RootMetadataPolicyV1::RegularFileManifestModeAndMtimeV1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootHiddenPathPolicyV1 {
+    IncludeV1,
+}
+
+impl RootHiddenPathPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::IncludeV1 => "include-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootExclusionPolicyV1 {
+    /// Exactly the config-independent checks owned by
+    /// [`FixedIngressPolicyV1`].
+    ///
+    /// The profile settings fingerprint also binds that policy's schema
+    /// fingerprint, so changing membership, matcher semantics, labels, or
+    /// order changes profile identity even if this canonical name is retained.
+    FixedIngressPathComponentsV1,
+}
+
+impl RootExclusionPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::FixedIngressPathComponentsV1 => "fixed-ingress-path-components-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootGitPolicyV1 {
+    ExcludedV1,
+    StandaloneRawWithFastForwardProofV1,
+}
+
+impl RootGitPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ExcludedV1 => "excluded-v1",
+            Self::StandaloneRawWithFastForwardProofV1 => {
+                "standalone-raw-with-fast-forward-proof-v1"
+            }
+        }
+    }
+
+    pub const fn observation_contract(self) -> RootGitObservationContractV1 {
+        match self {
+            Self::ExcludedV1 => RootGitObservationContractV1::ExcludedV1,
+            Self::StandaloneRawWithFastForwardProofV1 => {
+                RootGitObservationContractV1::TwoPassImmutableRawMetadataV1
+            }
+        }
+    }
+}
+
+/// Closed resource and stability contract for capturing raw Git metadata.
+///
+/// The operational variant retains one bounded, process-owned shadow of the
+/// inventory-A config, HEAD, packed refs, and loose refs. Config syntax is
+/// interpreted only from those captured bytes and ref/HEAD topology is derived
+/// twice without reopening live Git metadata. Both derivations must be exact;
+/// inventory C and the held root/`.git` descriptors still have to revalidate
+/// before the shadow can be promoted.
+/// Object kind, ancestry, fast-forward, and enduring writer exclusion are not
+/// part of this source-only contract. OID lengths are the byte lengths of their
+/// hexadecimal raw-metadata representations.
+///
+/// `ExcludedV1` is a distinct, fingerprinted policy. Its numeric accessors
+/// return zero to represent non-applicability, not an executable zero-budget
+/// observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootGitObservationContractV1 {
+    ExcludedV1,
+    TwoPassImmutableRawMetadataV1,
+}
+
+impl RootGitObservationContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ExcludedV1 => "excluded-v1",
+            Self::TwoPassImmutableRawMetadataV1 => "two-pass-immutable-raw-metadata-v1",
+        }
+    }
+
+    pub const fn is_applicable(self) -> bool {
+        match self {
+            Self::ExcludedV1 => false,
+            Self::TwoPassImmutableRawMetadataV1 => true,
+        }
+    }
+
+    /// Maximum refs retained by one complete observation pass.
+    pub const fn max_refs(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 1_000_000,
+        }
+    }
+
+    /// Maximum bytes in one ref name or symbolic-ref target.
+    pub const fn max_ref_or_symref_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 1023,
+        }
+    }
+
+    /// Maximum aggregate payload bytes in one effective raw-ref map or one
+    /// derived canonical ref/symref set.
+    ///
+    /// This is not a peak-RSS claim. The immutable raw config, HEAD, and
+    /// packed-ref inputs retain their independently bounded payloads, and
+    /// bounded intermediate maps can coexist during an exact derivation.
+    pub const fn max_retained_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum captured packed-ref or config-query output bytes.
+    pub const fn max_command_stdout_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 320 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum repository-local Git config bytes accepted by inventory A.
+    pub const fn max_config_file_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 1024 * 1024,
+        }
+    }
+
+    /// Maximum `.git/HEAD` bytes accepted by inventory A, including syntax and
+    /// newline.
+    pub const fn max_head_file_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 1029,
+        }
+    }
+
+    /// Exact number of canonical derivations from the immutable shadow.
+    pub const fn pass_count(self) -> u8 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 2,
+        }
+    }
+
+    /// Number of retries allowed after capture or validation fails.
+    pub const fn retry_count(self) -> u8 {
+        match self {
+            Self::ExcludedV1 | Self::TwoPassImmutableRawMetadataV1 => 0,
+        }
+    }
+
+    /// SHA-1 object ID length in hexadecimal command-output bytes.
+    pub const fn sha1_oid_hex_bytes(self) -> u8 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 40,
+        }
+    }
+
+    /// SHA-256 object ID length in hexadecimal command-output bytes.
+    pub const fn sha256_oid_hex_bytes(self) -> u8 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassImmutableRawMetadataV1 => 64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSymlinkPolicyV1 {
+    PreserveExactTargetV1,
+}
+
+impl RootSymlinkPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::PreserveExactTargetV1 => "preserve-exact-target-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootHardlinkPolicyV1 {
+    /// Reject multiply linked regular files rather than collapsing identity.
+    RejectV1,
+}
+
+impl RootHardlinkPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RejectV1 => "reject-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSpecialFilePolicyV1 {
+    /// Reject sockets, devices, FIFOs, and other non-file entry kinds.
+    RejectV1,
+}
+
+impl RootSpecialFilePolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RejectV1 => "reject-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootEmptyDirectoryPolicyV1 {
+    IgnoreV1,
+}
+
+impl RootEmptyDirectoryPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::IgnoreV1 => "ignore-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootMetadataPolicyV1 {
+    /// Bind regular-file mode and mtime from its manifest.
+    ///
+    /// Symlink target semantics are governed separately by
+    /// `RootSymlinkPolicyV1`; V1 does not claim symlink metadata fidelity.
+    RegularFileManifestModeAndMtimeV1,
+}
+
+impl RootMetadataPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RegularFileManifestModeAndMtimeV1 => "regular-file-manifest-mode-and-mtime-v1",
+        }
+    }
+}
+
+/// Closed operational settings for one registered-root profile generation.
+///
+/// These are deliberately not deserialized from host configuration. Changing
+/// any value requires a new profile version so a plan digest cannot retain the
+/// same policy identity while silently changing collection or deletion
+/// semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootProfileSettingsV1 {
+    hidden_paths: RootHiddenPathPolicyV1,
+    exclusions: RootExclusionPolicyV1,
+    git: RootGitPolicyV1,
+    git_observation: RootGitObservationContractV1,
+    symlinks: RootSymlinkPolicyV1,
+    hardlinks: RootHardlinkPolicyV1,
+    special_files: RootSpecialFilePolicyV1,
+    empty_directories: RootEmptyDirectoryPolicyV1,
+    metadata: RootMetadataPolicyV1,
+}
+
+impl RootProfileSettingsV1 {
+    pub const fn hidden_path_policy(self) -> RootHiddenPathPolicyV1 {
+        self.hidden_paths
+    }
+
+    pub const fn exclusion_policy(self) -> RootExclusionPolicyV1 {
+        self.exclusions
+    }
+
+    pub const fn git_policy(self) -> RootGitPolicyV1 {
+        self.git
+    }
+
+    pub const fn git_observation_contract(self) -> RootGitObservationContractV1 {
+        self.git_observation
+    }
+
+    pub const fn symlink_policy(self) -> RootSymlinkPolicyV1 {
+        self.symlinks
+    }
+
+    pub const fn hardlink_policy(self) -> RootHardlinkPolicyV1 {
+        self.hardlinks
+    }
+
+    pub const fn special_file_policy(self) -> RootSpecialFilePolicyV1 {
+        self.special_files
+    }
+
+    pub const fn empty_directory_policy(self) -> RootEmptyDirectoryPolicyV1 {
+        self.empty_directories
+    }
+
+    pub const fn metadata_policy(self) -> RootMetadataPolicyV1 {
+        self.metadata
+    }
+}
+
+/// Closed profile/settings/fingerprint bundle for registered-root planning.
+///
+/// The fields are private so a caller cannot pair one profile's settings with
+/// another profile's fingerprint. Planners accept `RootProfileV1` and derive
+/// this bundle rather than accepting its components independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootProfilePolicyV1 {
+    profile: RootProfileV1,
+    settings: RootProfileSettingsV1,
+    settings_fingerprint: RootProfileSettingsFingerprintV1,
+}
+
+impl RootProfilePolicyV1 {
+    pub const fn profile(self) -> RootProfileV1 {
+        self.profile
+    }
+
+    pub const fn settings(self) -> RootProfileSettingsV1 {
+        self.settings
+    }
+
+    pub const fn settings_fingerprint(self) -> RootProfileSettingsFingerprintV1 {
+        self.settings_fingerprint
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootPathContractV1 {
+    PortableNfcCaseFoldV1,
+}
+
+impl RootPathContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::PortableNfcCaseFoldV1 => "portable-nfc-case-fold-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootMountBoundaryPolicyV1 {
+    /// Reject every descendant mount boundary, including same-filesystem bind
+    /// mounts. Device-ID equality alone does not satisfy this policy.
+    SameMountNoCrossingV1,
+}
+
+impl RootMountBoundaryPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::SameMountNoCrossingV1 => "same-mount-no-crossing-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootLocalSnapshotContractV1 {
+    /// Walk and read through no-follow descriptors, then prove both entry
+    /// identity and content identity remained stable.
+    DescriptorRelativeIdentityContentIdentityV1,
+}
+
+impl RootLocalSnapshotContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => {
+                "descriptor-relative-identity-content-identity-v1"
+            }
+        }
+    }
+
+    /// Mount containment required while walking the enrolled root.
+    pub const fn mount_boundary_policy(self) -> RootMountBoundaryPolicyV1 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => {
+                RootMountBoundaryPolicyV1::SameMountNoCrossingV1
+            }
+        }
+    }
+
+    /// Maximum number of path components beneath the enrolled root.
+    pub const fn max_depth(self) -> u32 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 256,
+        }
+    }
+
+    /// Maximum retained entry count for one complete snapshot.
+    pub const fn max_entries(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 1_000_000,
+        }
+    }
+
+    /// Maximum combined byte length of all retained canonical paths.
+    pub const fn max_retained_path_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one preserved symlink target.
+    pub const fn max_symlink_target_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 1023,
+        }
+    }
+
+    /// Maximum byte length of one regular file admitted for hashing.
+    pub const fn max_regular_file_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 1024 * 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum aggregate regular-file bytes hashed for one snapshot.
+    pub const fn max_total_hashed_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 8 * 1024 * 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Fixed regular-file hashing buffer size.
+    pub const fn hash_buffer_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 64 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootStateContractV1 {
+    ImmutablePrimarySemanticExactV1,
+}
+
+impl RootStateContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => "immutable-primary-semantic-exact-v1",
+        }
+    }
+
+    /// Maximum exact byte length of one accepted state primary.
+    pub const fn max_primary_bytes(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 64 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum generated namespace-claim observations before deduplication.
+    pub const fn max_generated_claim_observations(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 4_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes across generated state claims.
+    pub const fn max_generated_claim_bytes(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum compatible unique namespace claims retained from state.
+    pub const fn max_retained_unique_claims(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 2_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes retained for unique state claims.
+    pub const fn max_retained_unique_claim_bytes(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 512 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRemoteObservationModelV1 {
+    /// Exactly two exhaustive passes over each listed key universe independently
+    /// identity-bind every index, marker, reservation, and referenced manifest
+    /// object. The passes must have identical keys, bindings, bytes, and strict
+    /// semantics. A mismatch proves observed drift; equality still does not
+    /// provide transaction or globally atomic namespace snapshot isolation.
+    ///
+    /// Each sequential, non-overlapping pass lists index then reservation keys,
+    /// validates and sorts both keysets, binds every index and reservation
+    /// object, derives and deduplicates committed manifest keys, then binds
+    /// those manifests. Errors fail the observation; V1 never retries until a
+    /// stable result appears.
+    TwoListedUniverseBoundPassesNonAtomicV1,
+}
+
+impl RootRemoteObservationModelV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::TwoListedUniverseBoundPassesNonAtomicV1 => {
+                "two-listed-universe-bound-passes-non-atomic-v1"
+            }
+        }
+    }
+
+    pub const fn pass_count(self) -> u8 {
+        match self {
+            Self::TwoListedUniverseBoundPassesNonAtomicV1 => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRemoteCompletenessAuthorityV1 {
+    /// One conditionally updated current HEAD selects an immutable,
+    /// content-addressed catalog root whose ordered pages enumerate the exact
+    /// registered-root reconcile metadata corpus: every index, every namespace
+    /// reservation, and exactly the manifests referenced by that metadata.
+    /// Chunks, staging objects, probes, and the catalog's own objects are
+    /// outside this corpus. Generic object-store listings are diagnostic only
+    /// and cannot contribute completeness authority.
+    ///
+    /// This contract is not satisfied merely by publishing catalog objects.
+    /// Every namespace writer must be fenced behind the HEAD CAS protocol, and
+    /// the initial catalog must be bootstrapped from externally established
+    /// complete truth rather than from an ordinary LIST. The selected HEAD
+    /// proves closure only at that exact revision; current-namespace authority
+    /// also requires linearizable current-HEAD reads or an externally trusted
+    /// monotonic high-water mark that rejects replay and rollback.
+    ImmutableCatalogHeadClosureV1,
+}
+
+impl RootRemoteCompletenessAuthorityV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ImmutableCatalogHeadClosureV1 => "immutable-catalog-head-closure-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRemoteContractV1 {
+    RawCommittedManifestBoundV1,
+}
+
+impl RootRemoteContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RawCommittedManifestBoundV1 => "raw-committed-manifest-bound-v1",
+        }
+    }
+
+    /// Observation mechanics available from generic S3-compatible backends.
+    ///
+    /// This model is intentionally weaker than the registered-root plan's
+    /// `CompleteOrNoDigestV1` completeness contract. A stable observation is
+    /// evidence, not authority to mint a plan digest.
+    pub const fn observation_model(self) -> RootRemoteObservationModelV1 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => {
+                RootRemoteObservationModelV1::TwoListedUniverseBoundPassesNonAtomicV1
+            }
+        }
+    }
+
+    /// The only remote source permitted to satisfy complete-or-no-digest.
+    ///
+    /// The repeated LIST model above remains useful drift evidence, but it
+    /// cannot be promoted into this authority even when both passes match.
+    pub const fn completeness_authority(self) -> RootRemoteCompletenessAuthorityV1 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => {
+                RootRemoteCompletenessAuthorityV1::ImmutableCatalogHeadClosureV1
+            }
+        }
+    }
+
+    /// Requested backend page limit for each streaming namespace listing.
+    ///
+    /// OpenDAL exposes this as a backend hint, never as a safety boundary. The
+    /// independent total-row and total-key-byte ceilings remain authoritative.
+    pub const fn listing_page_request_limit(self) -> u32 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1000,
+        }
+    }
+
+    /// Maximum concurrent identity-bound object reads.
+    ///
+    /// This and [`Self::listing_page_request_limit`] are acquisition-only
+    /// tuning. They cannot change canonical output, incompleteness rules, or
+    /// any acceptance ceiling and therefore are not fingerprint fields.
+    pub const fn max_concurrent_bound_reads(self) -> u32 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 8,
+        }
+    }
+
+    /// Maximum rows emitted by both backend listers in one pass.
+    ///
+    /// Every row counts before mode/path validation, filtering, or duplicate
+    /// detection, including synthetic directories and malformed rows.
+    pub const fn max_listing_rows_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4_000_000,
+        }
+    }
+
+    /// Maximum raw key bytes emitted by both backend listers in one pass.
+    ///
+    /// As with rows, bytes count before any validation or filtering.
+    pub const fn max_listing_key_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of every emitted or constructed storage key.
+    ///
+    /// This also bounds the remote prefix because it is a strict key prefix.
+    pub const fn max_storage_key_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024,
+        }
+    }
+
+    /// Maximum physical non-directory index objects observed in one pass.
+    pub const fn max_index_observations_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1_000_000,
+        }
+    }
+
+    /// Maximum combined byte length of retained physical index keys per pass.
+    pub const fn max_retained_index_key_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum physical namespace-reservation objects observed in one pass.
+    pub const fn max_reservation_observations_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 2_000_000,
+        }
+    }
+
+    /// Maximum combined byte length of retained reservation keys per pass.
+    pub const fn max_retained_reservation_key_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one exact raw index object.
+    pub const fn max_index_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one exact committed manifest object.
+    pub const fn max_manifest_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one exact namespace-reservation object.
+    pub const fn max_reservation_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one strict logical namespace path.
+    pub const fn max_logical_path_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024,
+        }
+    }
+
+    /// Maximum UTF-8 byte length of one portable logical path component.
+    pub const fn max_logical_component_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 255,
+        }
+    }
+
+    /// Maximum component depth of one strict logical namespace path.
+    pub const fn max_logical_path_depth(self) -> u32 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 256,
+        }
+    }
+
+    /// Maximum generated namespace-claim observations in one pass.
+    ///
+    /// Every derived claim counts before alias/role compatibility
+    /// deduplication.
+    pub const fn max_generated_claim_observations_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes across generated claims in one pass.
+    ///
+    /// Every derived claim counts before alias/role compatibility deduplication.
+    pub const fn max_generated_claim_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum unique compatible claims retained in one pass.
+    pub const fn max_retained_unique_claims_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 2_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes retained for unique claims in one pass.
+    pub const fn max_retained_unique_claim_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum aggregate bytes from all identity-bound object reads in one
+    /// pass. Every actual body read counts before retention.
+    pub const fn max_bound_object_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 8 * 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one retained version or ETag identity token.
+    pub const fn max_binding_token_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum combined retained version and ETag bytes in one pass.
+    pub const fn max_retained_binding_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum chunk-address entries decoded from one strict manifest.
+    pub const fn max_manifest_chunk_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 262_144,
+        }
+    }
+
+    /// Maximum per-device wrapped-key entries decoded from one manifest.
+    pub const fn max_manifest_wrapped_key_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum vector-clock entries decoded from one remote object.
+    pub const fn max_remote_vector_clock_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum canonical bytes in the mutable catalog HEAD.
+    pub const fn max_catalog_head_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024,
+        }
+    }
+
+    /// Maximum canonical bytes in one immutable catalog root.
+    pub const fn max_catalog_root_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum canonical bytes in one immutable catalog page.
+    pub const fn max_catalog_page_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum immutable pages referenced by one catalog root.
+    pub const fn max_catalog_pages(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum physical namespace objects named by one catalog page.
+    pub const fn max_catalog_entries_per_page(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum physical namespace objects named by the complete catalog.
+    pub const fn max_catalog_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 3_000_000,
+        }
+    }
+
+    /// Maximum combined storage-key bytes retained from all catalog entries.
+    pub const fn max_catalog_entry_key_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum combined version and ETag bytes retained from catalog object
+    /// bindings, including root, pages, and named namespace objects.
+    pub const fn max_catalog_binding_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum aggregate canonical bytes read for the immutable catalog root
+    /// and all pages. The mutable HEAD is charged separately.
+    pub const fn max_catalog_closure_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootCausalityContractV1 {
+    TypedVectorClockV1,
+}
+
+impl RootCausalityContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::TypedVectorClockV1 => "typed-vector-clock-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootActionContractV1 {
+    PlanOnlyNoDeleteV1,
+}
+
+impl RootActionContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::PlanOnlyNoDeleteV1 => "plan-only-no-delete-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootOrderingContractV1 {
+    /// Sort by canonical relative-path bytes, then entry-kind discriminant,
+    /// then proof bytes. V1 planners must reject paths that do not have one
+    /// unambiguous portable canonical form before applying this ordering.
+    RelativePathKindProofV1,
+}
+
+impl RootOrderingContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RelativePathKindProofV1 => "relative-path-kind-proof-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootCompletenessContractV1 {
+    CompleteOrNoDigestV1,
+}
+
+impl RootCompletenessContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::CompleteOrNoDigestV1 => "complete-or-no-digest-v1",
+        }
+    }
+}
+
+/// Fixed semantic contract for the first registered-root planner.
+///
+/// The fields are private so callers cannot weaken an individual dimension or
+/// manufacture an unreviewed contract while retaining the V1 type name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisteredRootPlanContractV1 {
+    path: RootPathContractV1,
+    local_snapshot: RootLocalSnapshotContractV1,
+    state: RootStateContractV1,
+    remote: RootRemoteContractV1,
+    causality: RootCausalityContractV1,
+    actions: RootActionContractV1,
+    ordering: RootOrderingContractV1,
+    completeness: RootCompletenessContractV1,
+}
+
+impl RegisteredRootPlanContractV1 {
+    pub const fn strict_v1() -> Self {
+        Self {
+            path: RootPathContractV1::PortableNfcCaseFoldV1,
+            local_snapshot:
+                RootLocalSnapshotContractV1::DescriptorRelativeIdentityContentIdentityV1,
+            state: RootStateContractV1::ImmutablePrimarySemanticExactV1,
+            remote: RootRemoteContractV1::RawCommittedManifestBoundV1,
+            causality: RootCausalityContractV1::TypedVectorClockV1,
+            actions: RootActionContractV1::PlanOnlyNoDeleteV1,
+            ordering: RootOrderingContractV1::RelativePathKindProofV1,
+            completeness: RootCompletenessContractV1::CompleteOrNoDigestV1,
+        }
+    }
+
+    pub const fn path_contract(self) -> RootPathContractV1 {
+        self.path
+    }
+
+    pub const fn local_snapshot_contract(self) -> RootLocalSnapshotContractV1 {
+        self.local_snapshot
+    }
+
+    pub const fn state_contract(self) -> RootStateContractV1 {
+        self.state
+    }
+
+    pub const fn remote_contract(self) -> RootRemoteContractV1 {
+        self.remote
+    }
+
+    pub const fn causality_contract(self) -> RootCausalityContractV1 {
+        self.causality
+    }
+
+    pub const fn action_contract(self) -> RootActionContractV1 {
+        self.actions
+    }
+
+    pub const fn ordering_contract(self) -> RootOrderingContractV1 {
+        self.ordering
+    }
+
+    pub const fn completeness_contract(self) -> RootCompletenessContractV1 {
+        self.completeness
+    }
+
+    pub fn fingerprint(self) -> RegisteredRootPlanContractFingerprintV1 {
+        fingerprint_registered_root_plan_contract_v1(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1098,6 +2099,596 @@ fn update_root_fingerprint_field(hasher: &mut blake3::Hasher, tag: &str, value: 
 
 fn finish_root_fingerprint(hasher: blake3::Hasher) -> String {
     format!("b3v1:{}", hasher.finalize().to_hex())
+}
+
+const CANONICAL_ROOT_FINGERPRINT_SCHEMA_V1: u32 = 1;
+
+struct CanonicalRootFingerprintEncoderV1 {
+    hasher: blake3::Hasher,
+    expected_fields: u32,
+    encoded_fields: u32,
+}
+
+impl CanonicalRootFingerprintEncoderV1 {
+    fn new(domain: &'static str, expected_fields: usize) -> Self {
+        let expected_fields = u32::try_from(expected_fields)
+            .expect("canonical root fingerprint field count must fit u32");
+        let mut hasher = blake3::Hasher::new_derive_key(domain);
+        hasher.update(&CANONICAL_ROOT_FINGERPRINT_SCHEMA_V1.to_be_bytes());
+        hasher.update(&expected_fields.to_be_bytes());
+        Self {
+            hasher,
+            expected_fields,
+            encoded_fields: 0,
+        }
+    }
+
+    fn field(&mut self, tag: &'static str, value: &[u8]) {
+        let tag_len =
+            u32::try_from(tag.len()).expect("canonical root fingerprint tag length must fit u32");
+        let value_len = u64::try_from(value.len())
+            .expect("canonical root fingerprint value length must fit u64");
+        self.hasher.update(&tag_len.to_be_bytes());
+        self.hasher.update(tag.as_bytes());
+        self.hasher.update(&value_len.to_be_bytes());
+        self.hasher.update(value);
+        self.encoded_fields = self
+            .encoded_fields
+            .checked_add(1)
+            .expect("canonical root fingerprint field count overflow");
+    }
+
+    fn finish(self) -> [u8; 32] {
+        assert_eq!(
+            self.encoded_fields, self.expected_fields,
+            "canonical root fingerprint field count does not match its schema"
+        );
+        *self.hasher.finalize().as_bytes()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RootProfileSettingsFingerprintV1([u8; 32]);
+
+impl RootProfileSettingsFingerprintV1 {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Display for RootProfileSettingsFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("b3v1:")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for RootProfileSettingsFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RootProfileSettingsFingerprintV1({self})")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegisteredRootPlanContractFingerprintV1([u8; 32]);
+
+impl RegisteredRootPlanContractFingerprintV1 {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Display for RegisteredRootPlanContractFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("b3v1:")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for RegisteredRootPlanContractFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RegisteredRootPlanContractFingerprintV1({self})")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RootProfileSettingsFingerprintFieldsV1 {
+    canonical_names: [(&'static str, &'static str); 10],
+    fixed_ingress_schema: FixedIngressPolicySchemaFingerprintV1,
+    git_observation_max_refs: u64,
+    git_observation_max_ref_or_symref_bytes: u64,
+    git_observation_max_retained_bytes: u64,
+    git_observation_max_command_stdout_bytes: u64,
+    git_observation_max_config_file_bytes: u64,
+    git_observation_max_head_file_bytes: u64,
+    git_observation_pass_count: u8,
+    git_observation_retry_count: u8,
+    git_observation_sha1_oid_hex_bytes: u8,
+    git_observation_sha256_oid_hex_bytes: u8,
+}
+
+fn root_profile_settings_fingerprint_fields_v1(
+    profile: RootProfileV1,
+    settings: RootProfileSettingsV1,
+) -> RootProfileSettingsFingerprintFieldsV1 {
+    RootProfileSettingsFingerprintFieldsV1 {
+        canonical_names: [
+            ("profile", profile.canonical_name()),
+            ("hidden_path_policy", settings.hidden_paths.canonical_name()),
+            ("exclusion_policy", settings.exclusions.canonical_name()),
+            ("git_policy", settings.git.canonical_name()),
+            (
+                "git_observation_contract",
+                settings.git_observation.canonical_name(),
+            ),
+            ("symlink_policy", settings.symlinks.canonical_name()),
+            ("hardlink_policy", settings.hardlinks.canonical_name()),
+            (
+                "special_file_policy",
+                settings.special_files.canonical_name(),
+            ),
+            (
+                "empty_directory_policy",
+                settings.empty_directories.canonical_name(),
+            ),
+            ("metadata_policy", settings.metadata.canonical_name()),
+        ],
+        fixed_ingress_schema: FixedIngressPolicyV1::strict_v1().schema_fingerprint(),
+        git_observation_max_refs: settings.git_observation.max_refs(),
+        git_observation_max_ref_or_symref_bytes: settings.git_observation.max_ref_or_symref_bytes(),
+        git_observation_max_retained_bytes: settings.git_observation.max_retained_bytes(),
+        git_observation_max_command_stdout_bytes: settings
+            .git_observation
+            .max_command_stdout_bytes(),
+        git_observation_max_config_file_bytes: settings.git_observation.max_config_file_bytes(),
+        git_observation_max_head_file_bytes: settings.git_observation.max_head_file_bytes(),
+        git_observation_pass_count: settings.git_observation.pass_count(),
+        git_observation_retry_count: settings.git_observation.retry_count(),
+        git_observation_sha1_oid_hex_bytes: settings.git_observation.sha1_oid_hex_bytes(),
+        git_observation_sha256_oid_hex_bytes: settings.git_observation.sha256_oid_hex_bytes(),
+    }
+}
+
+fn fingerprint_root_profile_settings_fields_v1(
+    fields: RootProfileSettingsFingerprintFieldsV1,
+) -> RootProfileSettingsFingerprintV1 {
+    let mut encoder = CanonicalRootFingerprintEncoderV1::new(
+        "tinyland.tcfs.root-profile-settings.b3v1",
+        fields.canonical_names.len() + 11,
+    );
+    for (tag, value) in fields.canonical_names {
+        encoder.field(tag, value.as_bytes());
+    }
+    encoder.field(
+        "fixed_ingress_policy_schema",
+        fields.fixed_ingress_schema.as_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_refs",
+        &fields.git_observation_max_refs.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_ref_or_symref_bytes",
+        &fields.git_observation_max_ref_or_symref_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_retained_bytes",
+        &fields.git_observation_max_retained_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_command_stdout_bytes",
+        &fields
+            .git_observation_max_command_stdout_bytes
+            .to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_config_file_bytes",
+        &fields.git_observation_max_config_file_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_head_file_bytes",
+        &fields.git_observation_max_head_file_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_pass_count",
+        &fields.git_observation_pass_count.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_retry_count",
+        &fields.git_observation_retry_count.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_sha1_oid_hex_bytes",
+        &fields.git_observation_sha1_oid_hex_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_sha256_oid_hex_bytes",
+        &fields.git_observation_sha256_oid_hex_bytes.to_be_bytes(),
+    );
+    RootProfileSettingsFingerprintV1(encoder.finish())
+}
+
+fn fingerprint_root_profile_settings_v1(
+    profile: RootProfileV1,
+    settings: RootProfileSettingsV1,
+) -> RootProfileSettingsFingerprintV1 {
+    fingerprint_root_profile_settings_fields_v1(root_profile_settings_fingerprint_fields_v1(
+        profile, settings,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegisteredRootPlanContractFingerprintFieldsV1 {
+    canonical_names: [(&'static str, &'static str); 11],
+    local_snapshot_max_depth: u32,
+    local_snapshot_max_entries: u64,
+    local_snapshot_max_retained_path_bytes: u64,
+    local_snapshot_max_symlink_target_bytes: u64,
+    local_snapshot_max_regular_file_bytes: u64,
+    local_snapshot_max_total_hashed_bytes: u64,
+    local_snapshot_hash_buffer_bytes: u64,
+    state_max_primary_bytes: u64,
+    state_max_generated_claim_observations: u64,
+    state_max_generated_claim_bytes: u64,
+    state_max_retained_unique_claims: u64,
+    state_max_retained_unique_claim_bytes: u64,
+    remote_max_listing_rows_per_pass: u64,
+    remote_max_listing_key_bytes_per_pass: u64,
+    remote_max_storage_key_bytes: u64,
+    remote_max_index_observations_per_pass: u64,
+    remote_max_retained_index_key_bytes_per_pass: u64,
+    remote_max_reservation_observations_per_pass: u64,
+    remote_max_retained_reservation_key_bytes_per_pass: u64,
+    remote_max_index_object_bytes: u64,
+    remote_max_manifest_object_bytes: u64,
+    remote_max_reservation_object_bytes: u64,
+    remote_max_logical_path_bytes: u64,
+    remote_max_logical_component_bytes: u64,
+    remote_max_logical_path_depth: u32,
+    remote_max_generated_claim_observations_per_pass: u64,
+    remote_max_generated_claim_bytes_per_pass: u64,
+    remote_max_retained_unique_claims_per_pass: u64,
+    remote_max_retained_unique_claim_bytes_per_pass: u64,
+    remote_max_bound_object_bytes_per_pass: u64,
+    remote_max_binding_token_bytes: u64,
+    remote_max_retained_binding_bytes_per_pass: u64,
+    remote_max_manifest_chunk_entries: u64,
+    remote_max_manifest_wrapped_key_entries: u64,
+    remote_max_remote_vector_clock_entries: u64,
+    remote_max_catalog_head_object_bytes: u64,
+    remote_max_catalog_root_object_bytes: u64,
+    remote_max_catalog_page_object_bytes: u64,
+    remote_max_catalog_pages: u64,
+    remote_max_catalog_entries_per_page: u64,
+    remote_max_catalog_entries: u64,
+    remote_max_catalog_entry_key_bytes: u64,
+    remote_max_catalog_binding_bytes: u64,
+    remote_max_catalog_closure_object_bytes: u64,
+}
+
+fn registered_root_plan_contract_fingerprint_fields_v1(
+    contract: RegisteredRootPlanContractV1,
+) -> RegisteredRootPlanContractFingerprintFieldsV1 {
+    RegisteredRootPlanContractFingerprintFieldsV1 {
+        canonical_names: [
+            ("path_policy", contract.path.canonical_name()),
+            (
+                "local_snapshot_policy",
+                contract.local_snapshot.canonical_name(),
+            ),
+            (
+                "local_snapshot_mount_boundary_policy",
+                contract
+                    .local_snapshot
+                    .mount_boundary_policy()
+                    .canonical_name(),
+            ),
+            ("state_policy", contract.state.canonical_name()),
+            ("remote_policy", contract.remote.canonical_name()),
+            (
+                "remote_observation_model",
+                contract.remote.observation_model().canonical_name(),
+            ),
+            (
+                "remote_completeness_authority",
+                contract.remote.completeness_authority().canonical_name(),
+            ),
+            ("causality_policy", contract.causality.canonical_name()),
+            ("action_policy", contract.actions.canonical_name()),
+            ("ordering_policy", contract.ordering.canonical_name()),
+            (
+                "completeness_policy",
+                contract.completeness.canonical_name(),
+            ),
+        ],
+        local_snapshot_max_depth: contract.local_snapshot.max_depth(),
+        local_snapshot_max_entries: contract.local_snapshot.max_entries(),
+        local_snapshot_max_retained_path_bytes: contract.local_snapshot.max_retained_path_bytes(),
+        local_snapshot_max_symlink_target_bytes: contract.local_snapshot.max_symlink_target_bytes(),
+        local_snapshot_max_regular_file_bytes: contract.local_snapshot.max_regular_file_bytes(),
+        local_snapshot_max_total_hashed_bytes: contract.local_snapshot.max_total_hashed_bytes(),
+        local_snapshot_hash_buffer_bytes: contract.local_snapshot.hash_buffer_bytes(),
+        state_max_primary_bytes: contract.state.max_primary_bytes(),
+        state_max_generated_claim_observations: contract.state.max_generated_claim_observations(),
+        state_max_generated_claim_bytes: contract.state.max_generated_claim_bytes(),
+        state_max_retained_unique_claims: contract.state.max_retained_unique_claims(),
+        state_max_retained_unique_claim_bytes: contract.state.max_retained_unique_claim_bytes(),
+        remote_max_listing_rows_per_pass: contract.remote.max_listing_rows_per_pass(),
+        remote_max_listing_key_bytes_per_pass: contract.remote.max_listing_key_bytes_per_pass(),
+        remote_max_storage_key_bytes: contract.remote.max_storage_key_bytes(),
+        remote_max_index_observations_per_pass: contract.remote.max_index_observations_per_pass(),
+        remote_max_retained_index_key_bytes_per_pass: contract
+            .remote
+            .max_retained_index_key_bytes_per_pass(),
+        remote_max_reservation_observations_per_pass: contract
+            .remote
+            .max_reservation_observations_per_pass(),
+        remote_max_retained_reservation_key_bytes_per_pass: contract
+            .remote
+            .max_retained_reservation_key_bytes_per_pass(),
+        remote_max_index_object_bytes: contract.remote.max_index_object_bytes(),
+        remote_max_manifest_object_bytes: contract.remote.max_manifest_object_bytes(),
+        remote_max_reservation_object_bytes: contract.remote.max_reservation_object_bytes(),
+        remote_max_logical_path_bytes: contract.remote.max_logical_path_bytes(),
+        remote_max_logical_component_bytes: contract.remote.max_logical_component_bytes(),
+        remote_max_logical_path_depth: contract.remote.max_logical_path_depth(),
+        remote_max_generated_claim_observations_per_pass: contract
+            .remote
+            .max_generated_claim_observations_per_pass(),
+        remote_max_generated_claim_bytes_per_pass: contract
+            .remote
+            .max_generated_claim_bytes_per_pass(),
+        remote_max_retained_unique_claims_per_pass: contract
+            .remote
+            .max_retained_unique_claims_per_pass(),
+        remote_max_retained_unique_claim_bytes_per_pass: contract
+            .remote
+            .max_retained_unique_claim_bytes_per_pass(),
+        remote_max_bound_object_bytes_per_pass: contract.remote.max_bound_object_bytes_per_pass(),
+        remote_max_binding_token_bytes: contract.remote.max_binding_token_bytes(),
+        remote_max_retained_binding_bytes_per_pass: contract
+            .remote
+            .max_retained_binding_bytes_per_pass(),
+        remote_max_manifest_chunk_entries: contract.remote.max_manifest_chunk_entries(),
+        remote_max_manifest_wrapped_key_entries: contract.remote.max_manifest_wrapped_key_entries(),
+        remote_max_remote_vector_clock_entries: contract.remote.max_remote_vector_clock_entries(),
+        remote_max_catalog_head_object_bytes: contract.remote.max_catalog_head_object_bytes(),
+        remote_max_catalog_root_object_bytes: contract.remote.max_catalog_root_object_bytes(),
+        remote_max_catalog_page_object_bytes: contract.remote.max_catalog_page_object_bytes(),
+        remote_max_catalog_pages: contract.remote.max_catalog_pages(),
+        remote_max_catalog_entries_per_page: contract.remote.max_catalog_entries_per_page(),
+        remote_max_catalog_entries: contract.remote.max_catalog_entries(),
+        remote_max_catalog_entry_key_bytes: contract.remote.max_catalog_entry_key_bytes(),
+        remote_max_catalog_binding_bytes: contract.remote.max_catalog_binding_bytes(),
+        remote_max_catalog_closure_object_bytes: contract.remote.max_catalog_closure_object_bytes(),
+    }
+}
+
+fn fingerprint_registered_root_plan_contract_fields_v1(
+    fields: RegisteredRootPlanContractFingerprintFieldsV1,
+) -> RegisteredRootPlanContractFingerprintV1 {
+    let mut encoder = CanonicalRootFingerprintEncoderV1::new(
+        "tinyland.tcfs.registered-root-plan-contract.b3v1",
+        fields.canonical_names.len() + 44,
+    );
+    for (tag, value) in fields.canonical_names {
+        encoder.field(tag, value.as_bytes());
+        if tag == "local_snapshot_policy" {
+            encoder.field(
+                "local_snapshot_max_depth",
+                &fields.local_snapshot_max_depth.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_entries",
+                &fields.local_snapshot_max_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_retained_path_bytes",
+                &fields.local_snapshot_max_retained_path_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_symlink_target_bytes",
+                &fields.local_snapshot_max_symlink_target_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_regular_file_bytes",
+                &fields.local_snapshot_max_regular_file_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_total_hashed_bytes",
+                &fields.local_snapshot_max_total_hashed_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_hash_buffer_bytes",
+                &fields.local_snapshot_hash_buffer_bytes.to_be_bytes(),
+            );
+        }
+        if tag == "state_policy" {
+            encoder.field(
+                "state_max_primary_bytes",
+                &fields.state_max_primary_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_generated_claim_observations",
+                &fields.state_max_generated_claim_observations.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_generated_claim_bytes",
+                &fields.state_max_generated_claim_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_retained_unique_claims",
+                &fields.state_max_retained_unique_claims.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_retained_unique_claim_bytes",
+                &fields.state_max_retained_unique_claim_bytes.to_be_bytes(),
+            );
+        }
+        if tag == "remote_observation_model" {
+            encoder.field(
+                "remote_max_listing_rows_per_pass",
+                &fields.remote_max_listing_rows_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_listing_key_bytes_per_pass",
+                &fields.remote_max_listing_key_bytes_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_storage_key_bytes",
+                &fields.remote_max_storage_key_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_index_observations_per_pass",
+                &fields.remote_max_index_observations_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_index_key_bytes_per_pass",
+                &fields
+                    .remote_max_retained_index_key_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_reservation_observations_per_pass",
+                &fields
+                    .remote_max_reservation_observations_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_reservation_key_bytes_per_pass",
+                &fields
+                    .remote_max_retained_reservation_key_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_index_object_bytes",
+                &fields.remote_max_index_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_manifest_object_bytes",
+                &fields.remote_max_manifest_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_reservation_object_bytes",
+                &fields.remote_max_reservation_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_logical_path_bytes",
+                &fields.remote_max_logical_path_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_logical_component_bytes",
+                &fields.remote_max_logical_component_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_logical_path_depth",
+                &fields.remote_max_logical_path_depth.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_generated_claim_observations_per_pass",
+                &fields
+                    .remote_max_generated_claim_observations_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_generated_claim_bytes_per_pass",
+                &fields
+                    .remote_max_generated_claim_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_unique_claims_per_pass",
+                &fields
+                    .remote_max_retained_unique_claims_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_unique_claim_bytes_per_pass",
+                &fields
+                    .remote_max_retained_unique_claim_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_bound_object_bytes_per_pass",
+                &fields.remote_max_bound_object_bytes_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_binding_token_bytes",
+                &fields.remote_max_binding_token_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_binding_bytes_per_pass",
+                &fields
+                    .remote_max_retained_binding_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_manifest_chunk_entries",
+                &fields.remote_max_manifest_chunk_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_manifest_wrapped_key_entries",
+                &fields.remote_max_manifest_wrapped_key_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_remote_vector_clock_entries",
+                &fields.remote_max_remote_vector_clock_entries.to_be_bytes(),
+            );
+        }
+        if tag == "remote_completeness_authority" {
+            encoder.field(
+                "remote_max_catalog_head_object_bytes",
+                &fields.remote_max_catalog_head_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_root_object_bytes",
+                &fields.remote_max_catalog_root_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_page_object_bytes",
+                &fields.remote_max_catalog_page_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_pages",
+                &fields.remote_max_catalog_pages.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_entries_per_page",
+                &fields.remote_max_catalog_entries_per_page.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_entries",
+                &fields.remote_max_catalog_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_entry_key_bytes",
+                &fields.remote_max_catalog_entry_key_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_binding_bytes",
+                &fields.remote_max_catalog_binding_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_closure_object_bytes",
+                &fields.remote_max_catalog_closure_object_bytes.to_be_bytes(),
+            );
+        }
+    }
+    RegisteredRootPlanContractFingerprintV1(encoder.finish())
+}
+
+fn fingerprint_registered_root_plan_contract_v1(
+    contract: RegisteredRootPlanContractV1,
+) -> RegisteredRootPlanContractFingerprintV1 {
+    fingerprint_registered_root_plan_contract_fields_v1(
+        registered_root_plan_contract_fingerprint_fields_v1(contract),
+    )
 }
 
 impl RootSpecV1Config {
@@ -1997,6 +3588,752 @@ resolution_policy = "inspect-only"
         assert_ne!(local_path_only, state_path_only);
         assert_eq!(identity, spec.identity_fingerprint("work"));
         assert_ne!(identity, spec.identity_fingerprint("other-work"));
+    }
+
+    #[test]
+    fn versioned_root_profile_settings_are_closed_and_typed() {
+        let git_policy = RootProfileV1::GitRawV1.policy();
+        let agent_policy = RootProfileV1::AgentStaticV1.policy();
+        let git = git_policy.settings();
+        let agent = agent_policy.settings();
+
+        assert_eq!(git_policy.profile(), RootProfileV1::GitRawV1);
+        assert_eq!(agent_policy.profile(), RootProfileV1::AgentStaticV1);
+
+        for settings in [git, agent] {
+            assert_eq!(
+                settings.hidden_path_policy(),
+                RootHiddenPathPolicyV1::IncludeV1
+            );
+            assert_eq!(
+                settings.exclusion_policy(),
+                RootExclusionPolicyV1::FixedIngressPathComponentsV1
+            );
+            assert_eq!(
+                settings.symlink_policy(),
+                RootSymlinkPolicyV1::PreserveExactTargetV1
+            );
+            assert_eq!(settings.hardlink_policy(), RootHardlinkPolicyV1::RejectV1);
+            assert_eq!(
+                settings.special_file_policy(),
+                RootSpecialFilePolicyV1::RejectV1
+            );
+            assert_eq!(
+                settings.empty_directory_policy(),
+                RootEmptyDirectoryPolicyV1::IgnoreV1
+            );
+            assert_eq!(
+                settings.metadata_policy(),
+                RootMetadataPolicyV1::RegularFileManifestModeAndMtimeV1
+            );
+        }
+        assert_eq!(
+            git.git_policy(),
+            RootGitPolicyV1::StandaloneRawWithFastForwardProofV1
+        );
+        assert_eq!(agent.git_policy(), RootGitPolicyV1::ExcludedV1);
+        let git_observation = git.git_observation_contract();
+        assert_eq!(
+            git_observation,
+            RootGitObservationContractV1::TwoPassImmutableRawMetadataV1
+        );
+        assert_eq!(git.git_policy().observation_contract(), git_observation);
+        assert!(git_observation.is_applicable());
+        assert_eq!(git_observation.max_refs(), 1_000_000);
+        assert_eq!(git_observation.max_ref_or_symref_bytes(), 1023);
+        assert_eq!(git_observation.max_retained_bytes(), 256 * 1024 * 1024);
+        assert_eq!(
+            git_observation.max_command_stdout_bytes(),
+            320 * 1024 * 1024
+        );
+        assert_eq!(git_observation.max_config_file_bytes(), 1024 * 1024);
+        assert_eq!(git_observation.max_head_file_bytes(), 1029);
+        assert_eq!(git_observation.pass_count(), 2);
+        assert_eq!(git_observation.retry_count(), 0);
+        assert_eq!(git_observation.sha1_oid_hex_bytes(), 40);
+        assert_eq!(git_observation.sha256_oid_hex_bytes(), 64);
+
+        let excluded_observation = agent.git_observation_contract();
+        assert_eq!(
+            excluded_observation,
+            RootGitObservationContractV1::ExcludedV1
+        );
+        assert_eq!(
+            agent.git_policy().observation_contract(),
+            excluded_observation
+        );
+        assert!(!excluded_observation.is_applicable());
+        assert_eq!(excluded_observation.max_refs(), 0);
+        assert_eq!(excluded_observation.max_ref_or_symref_bytes(), 0);
+        assert_eq!(excluded_observation.max_retained_bytes(), 0);
+        assert_eq!(excluded_observation.max_command_stdout_bytes(), 0);
+        assert_eq!(excluded_observation.max_config_file_bytes(), 0);
+        assert_eq!(excluded_observation.max_head_file_bytes(), 0);
+        assert_eq!(excluded_observation.pass_count(), 0);
+        assert_eq!(excluded_observation.retry_count(), 0);
+        assert_eq!(excluded_observation.sha1_oid_hex_bytes(), 0);
+        assert_eq!(excluded_observation.sha256_oid_hex_bytes(), 0);
+
+        let git_fingerprint = git_policy.settings_fingerprint();
+        let agent_fingerprint = agent_policy.settings_fingerprint();
+        assert_eq!(git_fingerprint.as_bytes().len(), 32);
+        assert_eq!(agent_fingerprint.as_bytes().len(), 32);
+        assert_eq!(
+            git_fingerprint,
+            RootProfileV1::GitRawV1.policy().settings_fingerprint()
+        );
+        assert_ne!(git_fingerprint, agent_fingerprint);
+        assert_eq!(
+            git_fingerprint.to_string(),
+            "b3v1:99d9d7a2f881738c36b8ad518fe6138c2243b3cc5bcf466029f7db8e25f2f9c4"
+        );
+        assert_eq!(
+            agent_fingerprint.to_string(),
+            "b3v1:92f2569ed6fc3379b2710c0abc11d28da9b7ed1e970a971a06d4675b519c619d"
+        );
+    }
+
+    #[test]
+    fn root_profile_fingerprint_schema_binds_every_policy_field() {
+        let git = RootProfileV1::GitRawV1.policy();
+        let git_fields = root_profile_settings_fingerprint_fields_v1(git.profile(), git.settings());
+        assert_eq!(
+            git_fields.canonical_names,
+            [
+                ("profile", "git-raw-v1"),
+                ("hidden_path_policy", "include-v1"),
+                ("exclusion_policy", "fixed-ingress-path-components-v1"),
+                ("git_policy", "standalone-raw-with-fast-forward-proof-v1",),
+                (
+                    "git_observation_contract",
+                    "two-pass-immutable-raw-metadata-v1",
+                ),
+                ("symlink_policy", "preserve-exact-target-v1"),
+                ("hardlink_policy", "reject-v1"),
+                ("special_file_policy", "reject-v1"),
+                ("empty_directory_policy", "ignore-v1"),
+                ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
+            ]
+        );
+        assert_eq!(
+            git_fields.fixed_ingress_schema,
+            FixedIngressPolicyV1::strict_v1().schema_fingerprint()
+        );
+        assert_eq!(git_fields.git_observation_max_refs, 1_000_000);
+        assert_eq!(git_fields.git_observation_max_ref_or_symref_bytes, 1023);
+        assert_eq!(
+            git_fields.git_observation_max_retained_bytes,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            git_fields.git_observation_max_command_stdout_bytes,
+            320 * 1024 * 1024
+        );
+        assert_eq!(
+            git_fields.git_observation_max_config_file_bytes,
+            1024 * 1024
+        );
+        assert_eq!(git_fields.git_observation_max_head_file_bytes, 1029);
+        assert_eq!(git_fields.git_observation_pass_count, 2);
+        assert_eq!(git_fields.git_observation_retry_count, 0);
+        assert_eq!(git_fields.git_observation_sha1_oid_hex_bytes, 40);
+        assert_eq!(git_fields.git_observation_sha256_oid_hex_bytes, 64);
+        assert_eq!(
+            git.settings().exclusion_policy().canonical_name(),
+            FixedIngressPolicyV1::strict_v1().canonical_name()
+        );
+
+        let agent = RootProfileV1::AgentStaticV1.policy();
+        let agent_fields =
+            root_profile_settings_fingerprint_fields_v1(agent.profile(), agent.settings());
+        assert_eq!(
+            agent_fields.canonical_names,
+            [
+                ("profile", "agent-static-v1"),
+                ("hidden_path_policy", "include-v1"),
+                ("exclusion_policy", "fixed-ingress-path-components-v1"),
+                ("git_policy", "excluded-v1"),
+                ("git_observation_contract", "excluded-v1"),
+                ("symlink_policy", "preserve-exact-target-v1"),
+                ("hardlink_policy", "reject-v1"),
+                ("special_file_policy", "reject-v1"),
+                ("empty_directory_policy", "ignore-v1"),
+                ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
+            ]
+        );
+        assert_eq!(
+            agent_fields.fixed_ingress_schema,
+            FixedIngressPolicyV1::strict_v1().schema_fingerprint()
+        );
+        assert_eq!(agent_fields.git_observation_max_refs, 0);
+        assert_eq!(agent_fields.git_observation_max_ref_or_symref_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_retained_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_command_stdout_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_config_file_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_head_file_bytes, 0);
+        assert_eq!(agent_fields.git_observation_pass_count, 0);
+        assert_eq!(agent_fields.git_observation_retry_count, 0);
+        assert_eq!(agent_fields.git_observation_sha1_oid_hex_bytes, 0);
+        assert_eq!(agent_fields.git_observation_sha256_oid_hex_bytes, 0);
+        assert_eq!(
+            git_fields.fixed_ingress_schema,
+            agent_fields.fixed_ingress_schema
+        );
+    }
+
+    #[test]
+    fn root_profile_fingerprint_binds_hardlink_and_special_file_policies() {
+        let policy = RootProfileV1::GitRawV1.policy();
+        let fields =
+            root_profile_settings_fingerprint_fields_v1(policy.profile(), policy.settings());
+        let baseline = fingerprint_root_profile_settings_fields_v1(fields);
+
+        for (index, mutation) in [
+            (6, "allow-hardlinks-test-v0"),
+            (7, "allow-special-files-test-v0"),
+        ] {
+            let mut mutated = fields;
+            mutated.canonical_names[index].1 = mutation;
+            assert_ne!(
+                baseline,
+                fingerprint_root_profile_settings_fields_v1(mutated)
+            );
+        }
+    }
+
+    #[test]
+    fn root_profile_fingerprint_binds_git_observation_contract_and_bounds() {
+        let policy = RootProfileV1::GitRawV1.policy();
+        let fields =
+            root_profile_settings_fingerprint_fields_v1(policy.profile(), policy.settings());
+        let baseline = fingerprint_root_profile_settings_fields_v1(fields);
+
+        let mut contract_mutation = fields;
+        contract_mutation.canonical_names[4].1 = "one-pass-refs-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_root_profile_settings_fields_v1(contract_mutation)
+        );
+
+        let mutations = [
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_refs += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_ref_or_symref_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_retained_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_command_stdout_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_config_file_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_head_file_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_pass_count += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_retry_count += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_sha1_oid_hex_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_sha256_oid_hex_bytes += 1;
+                mutation
+            },
+        ];
+
+        for mutation in mutations {
+            assert_ne!(
+                baseline,
+                fingerprint_root_profile_settings_fields_v1(mutation)
+            );
+        }
+    }
+
+    #[test]
+    fn registered_root_plan_contract_is_fixed_and_digest_bound() {
+        let contract = RegisteredRootPlanContractV1::strict_v1();
+        assert_eq!(
+            contract.path_contract(),
+            RootPathContractV1::PortableNfcCaseFoldV1
+        );
+        let local_snapshot = contract.local_snapshot_contract();
+        assert_eq!(
+            local_snapshot,
+            RootLocalSnapshotContractV1::DescriptorRelativeIdentityContentIdentityV1
+        );
+        assert_eq!(
+            local_snapshot.mount_boundary_policy(),
+            RootMountBoundaryPolicyV1::SameMountNoCrossingV1
+        );
+        assert_eq!(local_snapshot.max_depth(), 256);
+        assert_eq!(local_snapshot.max_entries(), 1_000_000);
+        assert_eq!(local_snapshot.max_retained_path_bytes(), 256 * 1024 * 1024);
+        assert_eq!(local_snapshot.max_symlink_target_bytes(), 1023);
+        assert_eq!(
+            local_snapshot.max_regular_file_bytes(),
+            1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            local_snapshot.max_total_hashed_bytes(),
+            8 * 1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(local_snapshot.hash_buffer_bytes(), 64 * 1024);
+        assert_eq!(
+            contract.state_contract(),
+            RootStateContractV1::ImmutablePrimarySemanticExactV1
+        );
+        let state = contract.state_contract();
+        assert_eq!(state.max_primary_bytes(), 64 * 1024 * 1024);
+        assert_eq!(state.max_generated_claim_observations(), 4_000_000);
+        assert_eq!(state.max_generated_claim_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(state.max_retained_unique_claims(), 2_000_000);
+        assert_eq!(state.max_retained_unique_claim_bytes(), 512 * 1024 * 1024);
+        assert_eq!(
+            contract.remote_contract(),
+            RootRemoteContractV1::RawCommittedManifestBoundV1
+        );
+        let remote = contract.remote_contract();
+        assert_eq!(
+            remote.observation_model(),
+            RootRemoteObservationModelV1::TwoListedUniverseBoundPassesNonAtomicV1
+        );
+        assert_eq!(
+            remote.completeness_authority(),
+            RootRemoteCompletenessAuthorityV1::ImmutableCatalogHeadClosureV1
+        );
+        assert_eq!(remote.observation_model().pass_count(), 2);
+        assert_eq!(remote.listing_page_request_limit(), 1000);
+        assert_eq!(remote.max_concurrent_bound_reads(), 8);
+        assert_eq!(remote.max_listing_rows_per_pass(), 4_000_000);
+        assert_eq!(remote.max_listing_key_bytes_per_pass(), 1024 * 1024 * 1024);
+        assert_eq!(remote.max_storage_key_bytes(), 1024);
+        assert_eq!(remote.max_index_observations_per_pass(), 1_000_000);
+        assert_eq!(
+            remote.max_retained_index_key_bytes_per_pass(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(remote.max_reservation_observations_per_pass(), 2_000_000);
+        assert_eq!(
+            remote.max_retained_reservation_key_bytes_per_pass(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(remote.max_index_object_bytes(), 1024 * 1024);
+        assert_eq!(remote.max_manifest_object_bytes(), 16 * 1024 * 1024);
+        assert_eq!(remote.max_reservation_object_bytes(), 16 * 1024);
+        assert_eq!(remote.max_logical_path_bytes(), 1024);
+        assert_eq!(remote.max_logical_component_bytes(), 255);
+        assert_eq!(remote.max_logical_path_depth(), 256);
+        assert_eq!(
+            remote.max_generated_claim_observations_per_pass(),
+            4_000_000
+        );
+        assert_eq!(
+            remote.max_generated_claim_bytes_per_pass(),
+            1024 * 1024 * 1024
+        );
+        assert_eq!(remote.max_retained_unique_claims_per_pass(), 2_000_000);
+        assert_eq!(
+            remote.max_retained_unique_claim_bytes_per_pass(),
+            512 * 1024 * 1024
+        );
+        assert_eq!(
+            remote.max_bound_object_bytes_per_pass(),
+            8 * 1024 * 1024 * 1024
+        );
+        assert_eq!(remote.max_binding_token_bytes(), 4096);
+        assert_eq!(
+            remote.max_retained_binding_bytes_per_pass(),
+            512 * 1024 * 1024
+        );
+        assert_eq!(remote.max_manifest_chunk_entries(), 262_144);
+        assert_eq!(remote.max_manifest_wrapped_key_entries(), 4096);
+        assert_eq!(remote.max_remote_vector_clock_entries(), 4096);
+        assert_eq!(remote.max_catalog_head_object_bytes(), 16 * 1024);
+        assert_eq!(remote.max_catalog_root_object_bytes(), 4 * 1024 * 1024);
+        assert_eq!(remote.max_catalog_page_object_bytes(), 16 * 1024 * 1024);
+        assert_eq!(remote.max_catalog_pages(), 4096);
+        assert_eq!(remote.max_catalog_entries_per_page(), 4096);
+        assert_eq!(remote.max_catalog_entries(), 3_000_000);
+        assert_eq!(remote.max_catalog_entry_key_bytes(), 512 * 1024 * 1024);
+        assert_eq!(remote.max_catalog_binding_bytes(), 512 * 1024 * 1024);
+        assert_eq!(
+            remote.max_catalog_closure_object_bytes(),
+            4 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            contract.causality_contract(),
+            RootCausalityContractV1::TypedVectorClockV1
+        );
+        assert_eq!(
+            contract.action_contract(),
+            RootActionContractV1::PlanOnlyNoDeleteV1
+        );
+        assert_eq!(
+            contract.ordering_contract(),
+            RootOrderingContractV1::RelativePathKindProofV1
+        );
+        assert_eq!(
+            contract.completeness_contract(),
+            RootCompletenessContractV1::CompleteOrNoDigestV1
+        );
+
+        let fingerprint = contract.fingerprint();
+        assert_eq!(fingerprint.as_bytes().len(), 32);
+        assert_eq!(
+            fingerprint,
+            RegisteredRootPlanContractV1::strict_v1().fingerprint()
+        );
+        assert_eq!(
+            fingerprint.to_string(),
+            "b3v1:8767d0b8866f8c319f16e816a1996e2a7b638fe01ba972ed28dd2075345f9b6f"
+        );
+    }
+
+    #[test]
+    fn registered_root_plan_fingerprint_schema_binds_acceptance_resources() {
+        let contract = RegisteredRootPlanContractV1::strict_v1();
+        let fields = registered_root_plan_contract_fingerprint_fields_v1(contract);
+        assert_eq!(
+            fields.canonical_names,
+            [
+                ("path_policy", "portable-nfc-case-fold-v1"),
+                (
+                    "local_snapshot_policy",
+                    "descriptor-relative-identity-content-identity-v1",
+                ),
+                (
+                    "local_snapshot_mount_boundary_policy",
+                    "same-mount-no-crossing-v1",
+                ),
+                ("state_policy", "immutable-primary-semantic-exact-v1"),
+                ("remote_policy", "raw-committed-manifest-bound-v1"),
+                (
+                    "remote_observation_model",
+                    "two-listed-universe-bound-passes-non-atomic-v1",
+                ),
+                (
+                    "remote_completeness_authority",
+                    "immutable-catalog-head-closure-v1",
+                ),
+                ("causality_policy", "typed-vector-clock-v1"),
+                ("action_policy", "plan-only-no-delete-v1"),
+                ("ordering_policy", "relative-path-kind-proof-v1"),
+                ("completeness_policy", "complete-or-no-digest-v1"),
+            ]
+        );
+        assert_eq!(fields.local_snapshot_max_depth, 256);
+        assert_eq!(fields.local_snapshot_max_entries, 1_000_000);
+        assert_eq!(
+            fields.local_snapshot_max_retained_path_bytes,
+            256 * 1024 * 1024
+        );
+        assert_eq!(fields.local_snapshot_max_symlink_target_bytes, 1023);
+        assert_eq!(
+            fields.local_snapshot_max_regular_file_bytes,
+            1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            fields.local_snapshot_max_total_hashed_bytes,
+            8 * 1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(fields.local_snapshot_hash_buffer_bytes, 64 * 1024);
+        assert_eq!(fields.state_max_primary_bytes, 64 * 1024 * 1024);
+        assert_eq!(fields.state_max_generated_claim_observations, 4_000_000);
+        assert_eq!(fields.state_max_generated_claim_bytes, 1024 * 1024 * 1024);
+        assert_eq!(fields.state_max_retained_unique_claims, 2_000_000);
+        assert_eq!(
+            fields.state_max_retained_unique_claim_bytes,
+            512 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_listing_rows_per_pass, 4_000_000);
+        assert_eq!(
+            fields.remote_max_listing_key_bytes_per_pass,
+            1024 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_storage_key_bytes, 1024);
+        assert_eq!(fields.remote_max_index_observations_per_pass, 1_000_000);
+        assert_eq!(
+            fields.remote_max_retained_index_key_bytes_per_pass,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            fields.remote_max_reservation_observations_per_pass,
+            2_000_000
+        );
+        assert_eq!(
+            fields.remote_max_retained_reservation_key_bytes_per_pass,
+            256 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_index_object_bytes, 1024 * 1024);
+        assert_eq!(fields.remote_max_manifest_object_bytes, 16 * 1024 * 1024);
+        assert_eq!(fields.remote_max_reservation_object_bytes, 16 * 1024);
+        assert_eq!(fields.remote_max_logical_path_bytes, 1024);
+        assert_eq!(fields.remote_max_logical_component_bytes, 255);
+        assert_eq!(fields.remote_max_logical_path_depth, 256);
+        assert_eq!(
+            fields.remote_max_generated_claim_observations_per_pass,
+            4_000_000
+        );
+        assert_eq!(
+            fields.remote_max_generated_claim_bytes_per_pass,
+            1024 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_retained_unique_claims_per_pass, 2_000_000);
+        assert_eq!(
+            fields.remote_max_retained_unique_claim_bytes_per_pass,
+            512 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_catalog_head_object_bytes, 16 * 1024);
+        assert_eq!(fields.remote_max_catalog_root_object_bytes, 4 * 1024 * 1024);
+        assert_eq!(
+            fields.remote_max_catalog_page_object_bytes,
+            16 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_catalog_pages, 4096);
+        assert_eq!(fields.remote_max_catalog_entries_per_page, 4096);
+        assert_eq!(fields.remote_max_catalog_entries, 3_000_000);
+        assert_eq!(fields.remote_max_catalog_entry_key_bytes, 512 * 1024 * 1024);
+        assert_eq!(fields.remote_max_catalog_binding_bytes, 512 * 1024 * 1024);
+        assert_eq!(
+            fields.remote_max_catalog_closure_object_bytes,
+            4 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            fields.remote_max_bound_object_bytes_per_pass,
+            8 * 1024 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_binding_token_bytes, 4096);
+        assert_eq!(
+            fields.remote_max_retained_binding_bytes_per_pass,
+            512 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_manifest_chunk_entries, 262_144);
+        assert_eq!(fields.remote_max_manifest_wrapped_key_entries, 4096);
+        assert_eq!(fields.remote_max_remote_vector_clock_entries, 4096);
+
+        let baseline = fingerprint_registered_root_plan_contract_fields_v1(fields);
+
+        let mut policy_mutation = fields;
+        policy_mutation.canonical_names[1].1 = "path-open-content-only-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(policy_mutation)
+        );
+
+        let mut mount_policy_mutation = fields;
+        mount_policy_mutation.canonical_names[2].1 = "device-id-only-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(mount_policy_mutation)
+        );
+
+        let mut depth_mutation = fields;
+        depth_mutation.local_snapshot_max_depth += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(depth_mutation)
+        );
+
+        let mut entries_mutation = fields;
+        entries_mutation.local_snapshot_max_entries += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(entries_mutation)
+        );
+
+        let mut path_bytes_mutation = fields;
+        path_bytes_mutation.local_snapshot_max_retained_path_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(path_bytes_mutation)
+        );
+
+        let mut target_bytes_mutation = fields;
+        target_bytes_mutation.local_snapshot_max_symlink_target_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(target_bytes_mutation)
+        );
+
+        let mut regular_file_bytes_mutation = fields;
+        regular_file_bytes_mutation.local_snapshot_max_regular_file_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(regular_file_bytes_mutation)
+        );
+
+        let mut total_hashed_bytes_mutation = fields;
+        total_hashed_bytes_mutation.local_snapshot_max_total_hashed_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(total_hashed_bytes_mutation)
+        );
+
+        let mut buffer_bytes_mutation = fields;
+        buffer_bytes_mutation.local_snapshot_hash_buffer_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(buffer_bytes_mutation)
+        );
+
+        let mut observation_model_mutation = fields;
+        observation_model_mutation.canonical_names[5].1 = "atomic-namespace-snapshot-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(observation_model_mutation)
+        );
+
+        let mut completeness_authority_mutation = fields;
+        completeness_authority_mutation.canonical_names[6].1 = "listing-equality-authority-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(completeness_authority_mutation)
+        );
+
+        macro_rules! assert_state_resource_is_bound {
+            ($field:ident) => {{
+                let mut mutation = fields;
+                mutation.$field += 1;
+                assert_ne!(
+                    baseline,
+                    fingerprint_registered_root_plan_contract_fields_v1(mutation),
+                    "state contract fingerprint omitted {}",
+                    stringify!($field)
+                );
+            }};
+        }
+
+        assert_state_resource_is_bound!(state_max_primary_bytes);
+        assert_state_resource_is_bound!(state_max_generated_claim_observations);
+        assert_state_resource_is_bound!(state_max_generated_claim_bytes);
+        assert_state_resource_is_bound!(state_max_retained_unique_claims);
+        assert_state_resource_is_bound!(state_max_retained_unique_claim_bytes);
+
+        macro_rules! assert_remote_resource_is_bound {
+            ($field:ident) => {{
+                let mut mutation = fields;
+                mutation.$field += 1;
+                assert_ne!(
+                    baseline,
+                    fingerprint_registered_root_plan_contract_fields_v1(mutation),
+                    "remote contract fingerprint omitted {}",
+                    stringify!($field)
+                );
+            }};
+        }
+
+        assert_remote_resource_is_bound!(remote_max_listing_rows_per_pass);
+        assert_remote_resource_is_bound!(remote_max_listing_key_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_storage_key_bytes);
+        assert_remote_resource_is_bound!(remote_max_index_observations_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_index_key_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_reservation_observations_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_reservation_key_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_index_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_manifest_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_reservation_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_logical_path_bytes);
+        assert_remote_resource_is_bound!(remote_max_logical_component_bytes);
+        assert_remote_resource_is_bound!(remote_max_logical_path_depth);
+        assert_remote_resource_is_bound!(remote_max_generated_claim_observations_per_pass);
+        assert_remote_resource_is_bound!(remote_max_generated_claim_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_unique_claims_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_unique_claim_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_bound_object_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_binding_token_bytes);
+        assert_remote_resource_is_bound!(remote_max_retained_binding_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_manifest_chunk_entries);
+        assert_remote_resource_is_bound!(remote_max_manifest_wrapped_key_entries);
+        assert_remote_resource_is_bound!(remote_max_remote_vector_clock_entries);
+        assert_remote_resource_is_bound!(remote_max_catalog_head_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_root_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_page_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_pages);
+        assert_remote_resource_is_bound!(remote_max_catalog_entries_per_page);
+        assert_remote_resource_is_bound!(remote_max_catalog_entries);
+        assert_remote_resource_is_bound!(remote_max_catalog_entry_key_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_binding_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_closure_object_bytes);
+    }
+
+    #[test]
+    fn canonical_root_fingerprint_framing_separates_fields_and_domains() {
+        fn encode(domain: &'static str, fields: &[(&'static str, &[u8])]) -> [u8; 32] {
+            let mut encoder = CanonicalRootFingerprintEncoderV1::new(domain, fields.len());
+            for (tag, value) in fields {
+                encoder.field(tag, value);
+            }
+            encoder.finish()
+        }
+
+        let left = encode("tinyland.tcfs.test-framing.b3v1", &[("a", b"bc")]);
+        let right = encode("tinyland.tcfs.test-framing.b3v1", &[("ab", b"c")]);
+        let other_domain = encode("tinyland.tcfs.test-domain.b3v1", &[("a", b"bc")]);
+        let ordered = encode(
+            "tinyland.tcfs.test-ordering.b3v1",
+            &[("first", b"one"), ("second", b"two")],
+        );
+        let permuted = encode(
+            "tinyland.tcfs.test-ordering.b3v1",
+            &[("second", b"two"), ("first", b"one")],
+        );
+        let mutated = encode(
+            "tinyland.tcfs.test-ordering.b3v1",
+            &[("first", b"one"), ("second", b"too")],
+        );
+
+        assert_eq!(
+            blake3::Hash::from_bytes(left).to_hex().to_string(),
+            "dee4f6c7d62fc770a28b56121139daa070b3f8a42cd89a65d916dbbb9ecbcc00"
+        );
+        assert_eq!(
+            blake3::Hash::from_bytes(right).to_hex().to_string(),
+            "155a944066efbd250f2d5dc9d88a2f7d023c4fc792fc34c62e2012e7243e06eb"
+        );
+        assert_eq!(
+            blake3::Hash::from_bytes(other_domain).to_hex().to_string(),
+            "419c248d4d7f18324fad3a54a9f1af1b6defec6e0336d94b21034c0907b586a2"
+        );
+        assert_ne!(left, right);
+        assert_ne!(left, other_domain);
+        assert_ne!(ordered, permuted);
+        assert_ne!(ordered, mutated);
+    }
+
+    #[test]
+    #[should_panic(expected = "canonical root fingerprint field count does not match its schema")]
+    fn canonical_root_fingerprint_rejects_declared_field_count_mismatch() {
+        let mut encoder =
+            CanonicalRootFingerprintEncoderV1::new("tinyland.tcfs.test-count.b3v1", 2);
+        encoder.field("only", b"one");
+        let _ = encoder.finish();
     }
 
     #[test]
