@@ -35,6 +35,8 @@
           "aarch64-apple-darwin"
           "aarch64-apple-ios"
           "aarch64-apple-ios-sim"
+        ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          "x86_64-pc-windows-gnu"
         ];
         rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
@@ -215,6 +217,7 @@
             cargo-watch
             cargo-deny
             cargo-audit
+            gitleaks
             shellcheck
             jq
 
@@ -237,13 +240,21 @@
             git
             just
             yq-go
-          ]);
+          ]) ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.pkgsCross.mingwW64.stdenv.cc
+          ];
           TCFS_RUST_TOOLCHAIN = rustVersion;
 
           shellHook = ''
             # Home Manager user profiles may carry an older rustc/cargo ahead
             # of Nix's shell paths. Keep the project-pinned toolchain first.
             export PATH="$PWD/target/debug:$PWD/target/release:${pkgs.lib.makeBinPath [ rustToolchain pkgs.go-task pkgs.just pkgs.shellcheck pkgs.jq.bin pkgs.awscli2 pkgs.s5cmd pkgs.minio-client ]}:$PATH"
+
+            if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+              export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+              export CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc
+              export AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
+            fi
 
             echo "tcfs devShell (tummycrypt monorepo)"
             echo "  rustc --version  # pinned toolchain should report ${rustVersion}"

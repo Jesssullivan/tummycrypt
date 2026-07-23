@@ -6,238 +6,163 @@ on:
   pull_request:
     branches: [main, dev]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_TOOLCHAIN: 1.93.0
-  GITLEAKS_VERSION: 8.30.1
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  # TIN-3127 public-read-only applies to Attic authentication. The pinned
+  # helper may separately retain the contents:read GitHub token for Nix source
+  # fetches; checked-out PR code receives no Attic token or inherited netrc.
+  ATTIC_TOKEN: ""
 
 jobs:
-  check:
-    name: Build + Lint + Test
-    runs-on: ubuntu-latest
+  linux-source:
+    name: Linux source authority (GloriousFlywheel)
+    runs-on: tinyland-nix
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-
-      - name: Free hosted runner disk
-        run: |
-          set -euo pipefail
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          df -h /
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            protobuf-compiler \
-            libfuse3-dev \
-            pkg-config \
-            libssl-dev
-
-      - name: Verify Cargo.lock is consistent
-        run: cargo check --workspace --locked
-
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
-
-      - name: FileProvider surface contract
-        run: bash scripts/test-fileprovider-surface-contract.sh
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
-
-      - name: cargo test
-        run: cargo test --workspace
-
-      - name: cargo test tcfs-sync (nats + crypto features)
-        run: cargo test -p tcfs-sync --features nats,crypto
-
-      - name: Feature-isolated consumer tests
-        run: |
-          cargo test -p tcfs-file-provider --no-default-features --features grpc --locked
-          cargo test -p tcfs-file-provider --no-default-features --features uniffi --locked
-          cargo test -p tcfs-dbus --features grpc --locked
-
-      - name: Wire-up integration tests (prove modules are connected)
-        run: |
-          cargo test -p tcfs-e2e --test blacklist_wireup -- --nocapture
-          cargo test -p tcfs-e2e --test reconcile_wireup -- --nocapture
-
-      - name: Trim incremental artifacts before final builds
-        run: |
-          set -euo pipefail
-          du -sh target || true
-          find target -type d -name incremental -prune -exec rm -rf {} +
-          du -sh target || true
-          df -h .
-
-      - name: Build workspace (default features)
-        run: cargo build --workspace
-
-      - name: Build tcfsd (k8s-worker feature)
-        run: cargo build -p tcfsd --features k8s-worker
-
-      - name: Build tcfs CLI (no FUSE — macOS/Windows compat)
-        run: cargo build -p tcfs-cli --no-default-features
-
-  cloudfilter-windows:
-    name: CloudFilter compile (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-
-      - name: Compile Windows CloudFilter targets
-        run: cargo check -p tcfs-cloudfilter --all-targets --locked
-
-  nix:
-    name: Nix Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Bootstrap Nix CLI
-        uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            extra-substituters = https://nix-cache.tinyland.dev/main
-            extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
-
-      - name: Verify runner Nix toolchain
-        run: nix --version
-
-      - name: Nix flake check
-        run: nix flake check --accept-flake-config
-
-      - name: Verify devShell Rust version
-        run: |
-          VERSION="$(nix develop --accept-flake-config --command rustc --version)"
-          echo "$VERSION"
-          echo "$VERSION" | grep -q "1.93.0"
-
-      - name: Build tcfsd
-        run: nix build --accept-flake-config --fallback .#tcfsd
-
-      - name: Build tcfs-cli
-        run: nix build --accept-flake-config --fallback .#tcfs-cli
-
-      - name: Build tcfs-tui
-        run: nix build --accept-flake-config --fallback .#tcfs-tui
-
-      - name: Build tcfs-mcp
-        run: nix build --accept-flake-config --fallback .#tcfs-mcp
-
-  fileprovider-staticlib:
-    name: FileProvider staticlib (macOS)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-
-      - name: Build staticlib
-        run: cargo build -p tcfs-file-provider --release
-
-      - name: Verify staticlib exists
-        run: |
-          test -f target/release/libtcfs_file_provider.a
-          echo "staticlib size: $(du -h target/release/libtcfs_file_provider.a | cut -f1)"
-
-      - name: Verify cbindgen header
-        run: |
-          HEADER=$(find target -name tcfs_file_provider.h | head -1)
-          test -n "$HEADER"
-          grep -q "tcfs_provider_new" "$HEADER"
-          grep -q "tcfs_provider_upload" "$HEADER"
-          grep -q "tcfs_provider_delete" "$HEADER"
-          echo "header: $HEADER"
-
-      - name: Check gRPC backend compiles
-        run: cargo check -p tcfs-file-provider --no-default-features --features grpc
-
-  ios-typecheck:
-    name: iOS FileProvider typecheck
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: aarch64-apple-ios-sim
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-
-      - name: Build iOS staticlib + type-check Swift
-        run: bash swift/ios/Scripts/build-ios.sh --simulator
-
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - name: Install cargo-deny build dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends build-essential
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
-      - name: cargo deny check
-        run: cargo deny check
-
-  secret-scan:
-    name: Secret Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Install gitleaks
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact checked out revision
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Require the preinstalled GF Nix runtime
+        run: command -v nix
+
+      - name: Attach GloriousFlywheel public-read-only cache runtime
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@TIN_3127_SIGNED_MERGE_REVISION_PENDING
+        env:
+          GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ATTIC_TOKEN: ""
+        with:
+          attic-enabled: "true"
+          attic-public-key: ${{ vars.ATTIC_PUBLIC_KEY || '' }}
+          attic-public-read-only: "true"
+          attic-public-read-site: tcfs-linux-source
+          push-cache: "false"
+          require-cache-push: "false"
+          command: |
+            set -euo pipefail
+            test "${GF_EXPECTED_RUNNER_ENVIRONMENT:-}" = self-hosted
+            test "${ATTIC_TOKEN:-}" = ""
+            test -n "${ATTIC_SERVER:-}"
+            test "${ATTIC_CACHE:-}" = main
+            test -n "${ATTIC_PUBLIC_KEY:-}"
+            test -n "${BAZEL_REMOTE_CACHE:-}"
+            test "${GF_BAZEL_SUBSTRATE_MODE:-}" = shared-cache-backed
+            test "${NIX_USER_CONF_FILES:-}" = /dev/null
+            test "${NETRC:-}" = /dev/null
+            test "$(nix config show netrc-file)" = /dev/null
+            nix config show extra-substituters |
+              tr ' ' '\n' |
+              grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
+
+      - name: Build, lint, test, and scan in the repo toolchain
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         run: |
-          curl --retry 5 --retry-all-errors --retry-delay 2 -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | sudo tar xz -C /usr/local/bin gitleaks
-      - name: Scan for secrets
+          # shellcheck disable=SC2016 # Expanded by the inner repo-toolchain shell.
+          nix develop --accept-flake-config .#default --command bash -euo pipefail -c '
+            python3 scripts/test-ci-authority-contract.py
+            cargo check --workspace --locked
+            cargo fmt --all -- --check
+            bash scripts/test-fileprovider-surface-contract.sh
+            cargo clippy --workspace --all-targets --locked -- -D warnings
+            cargo test --workspace --locked
+            cargo test -p tcfs-sync --features nats,crypto --locked
+            cargo test -p tcfs-file-provider --no-default-features --features grpc --locked
+            cargo test -p tcfs-file-provider --no-default-features --features uniffi --locked
+            cargo test -p tcfs-dbus --features grpc --locked
+            cargo test -p tcfs-e2e --test blacklist_wireup --locked -- --nocapture
+            cargo test -p tcfs-e2e --test reconcile_wireup --locked -- --nocapture
+            cargo build --workspace --locked
+            cargo build -p tcfsd --features k8s-worker --locked
+            cargo build -p tcfs-cli --no-default-features --locked
+            cargo deny check
+            if [ -n "$BASE_SHA" ]; then
+              gitleaks git --config .gitleaks.toml --redact --log-opts="$BASE_SHA..HEAD"
+            else
+              gitleaks git --config .gitleaks.toml --redact
+            fi
+          '
+
+  windows-cross:
+    name: Windows CFAPI cross-check (source-only)
+    runs-on: tinyland-nix
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact checked out revision
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Require the preinstalled GF Nix runtime
+        run: command -v nix
+
+      - name: Attach GloriousFlywheel public-read-only cache runtime
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@TIN_3127_SIGNED_MERGE_REVISION_PENDING
+        env:
+          GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ATTIC_TOKEN: ""
+        with:
+          attic-enabled: "true"
+          attic-public-key: ${{ vars.ATTIC_PUBLIC_KEY || '' }}
+          attic-public-read-only: "true"
+          attic-public-read-site: tcfs-windows-cross
+          push-cache: "false"
+          require-cache-push: "false"
+          command: |
+            set -euo pipefail
+            test "${GF_EXPECTED_RUNNER_ENVIRONMENT:-}" = self-hosted
+            test "${ATTIC_TOKEN:-}" = ""
+            test -n "${ATTIC_SERVER:-}"
+            test "${ATTIC_CACHE:-}" = main
+            test -n "${ATTIC_PUBLIC_KEY:-}"
+            test -n "${BAZEL_REMOTE_CACHE:-}"
+            test "${GF_BAZEL_SUBSTRATE_MODE:-}" = shared-cache-backed
+            test "${NIX_USER_CONF_FILES:-}" = /dev/null
+            test "${NETRC:-}" = /dev/null
+            test "$(nix config show netrc-file)" = /dev/null
+            nix config show extra-substituters |
+              tr ' ' '\n' |
+              grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
+
+      - name: Type-check the Windows CFAPI surface from sanctioned Linux compute
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            gitleaks detect --source . --config .gitleaks.toml --log-opts="${{ github.event.pull_request.base.sha }}..HEAD" --verbose
-          else
-            gitleaks detect --source . --config .gitleaks.toml --verbose
-          fi
+          nix develop --accept-flake-config .#default --command \
+            cargo check -p tcfs-cloudfilter \
+              --target x86_64-pc-windows-gnu \
+              --all-targets \
+              --locked
+
+  darwin-authority-held:
+    name: HELD - native Darwin and iOS authority
+    runs-on: tinyland-nix
+    timeout-minutes: 5
+    steps:
+      - name: Hold until the authorized GF Darwin worker is proved
+        run: |
+          echo "::error title=Darwin authority held::TIN-2998 has not yet proved an authorized native Apple Silicon GF worker. Linux cross-compilation is not a substitute for FileProvider or iOS native proof."
+          exit 1

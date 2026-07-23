@@ -1,16 +1,11 @@
 name: CI Live Storage
 
-# TIN-1421: real-storage CI lane.
-#
-# Brings up SeaweedFS + NATS via the project's existing docker-compose stack
-# inside the job container, then runs `cargo test -p tcfs-e2e --test fleet_live`
-# with TCFS_E2E_LIVE=1. This is the single highest-leverage QA investment from
-# the 2026-05-18 audit: today PRs can land broken sync paths and ci.yml stays
-# green because the live-fleet tests are operator-only on neo/honey/yoga.
-#
-# The compose stack is a subset of `task dev` (masters + volume + filer + nats —
-# no prometheus/grafana since those aren't on the test path). Same images, same
-# config, so a green CI run carries the same authority as a green local run.
+# TIN-2538: live-storage proof is valid only on the shared GloriousFlywheel
+# DinD capability lane with immutable service images and the TIN-3127
+# public-read-only Nix front door. Public-only applies to Attic authentication:
+# the pinned helper may retain the repository-scoped contents:read GitHub token
+# for Nix source fetches. A missing personal-owner binding queues this job; it
+# never falls back to hosted execution.
 
 on:
   pull_request:
@@ -22,6 +17,8 @@ on:
       - "docker-compose.yml"
       - "config/**"
       - ".github/workflows/ci-live-storage.yml"
+      - "scripts/test-ci-authority-contract.py"
+      - "config/ci-authority-policy.json"
   push:
     branches: [main]
     paths:
@@ -32,63 +29,96 @@ on:
       - "docker-compose.yml"
       - "config/**"
       - ".github/workflows/ci-live-storage.yml"
+      - "scripts/test-ci-authority-contract.py"
+      - "config/ci-authority-policy.json"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-live-storage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: "1.93.0"
-  # Override defaults baked into fleet_live.rs (which point at tailnet MagicDNS)
+  ATTIC_TOKEN: ""
   TCFS_E2E_LIVE: "1"
   TCFS_S3_ENDPOINT: "http://127.0.0.1:8333"
-  # Explicit test-only opt-in for the job-local compose endpoint.
   TCFS_STORAGE_ALLOW_INSECURE_HTTP: "true"
   TCFS_S3_BUCKET: "tcfs"
   TCFS_NATS_URL: "nats://127.0.0.1:4222"
-  # Keep infra failures cheap in CI; the production default is 300s.
   TCFS_UPLOAD_CHUNK_TIMEOUT_SECS: "30"
   AWS_ACCESS_KEY_ID: "admin"
   AWS_SECRET_ACCESS_KEY: "admin"
 
 jobs:
   fleet-live:
-    name: fleet_live tests against compose-managed SeaweedFS + NATS
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    name: fleet_live on GloriousFlywheel DinD
+    runs-on: tinyland-dind
+    timeout-minutes: 35
 
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
+      - name: Verify exact checked out revision
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Require the preinstalled GF Nix runtime
+        run: command -v nix
+
+      - name: Attach GloriousFlywheel public-read-only DinD cache runtime
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@TIN_3127_SIGNED_MERGE_REVISION_PENDING
+        env:
+          GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ATTIC_TOKEN: ""
         with:
-          shared-key: ci-live-storage-${{ runner.os }}
-          workspaces: ". -> target"
+          attic-enabled: "true"
+          attic-public-key: ${{ vars.ATTIC_PUBLIC_KEY || '' }}
+          attic-public-read-only: "true"
+          attic-public-read-site: tcfs-live-storage
+          push-cache: "false"
+          require-cache-push: "false"
+          command: |
+            set -euo pipefail
+            test "${GF_EXPECTED_RUNNER_ENVIRONMENT:-}" = self-hosted
+            test "${ATTIC_TOKEN:-}" = ""
+            test -n "${DOCKER_HOST:-}"
+            test -n "${ATTIC_SERVER:-}"
+            test "${ATTIC_CACHE:-}" = main
+            test -n "${ATTIC_PUBLIC_KEY:-}"
+            test -n "${BAZEL_REMOTE_CACHE:-}"
+            test "${GF_BAZEL_SUBSTRATE_MODE:-}" = shared-cache-backed
+            test "${NIX_USER_CONF_FILES:-}" = /dev/null
+            test "${NETRC:-}" = /dev/null
+            test "$(nix config show netrc-file)" = /dev/null
+            nix config show extra-substituters |
+              tr ' ' '\n' |
+              grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
+            docker version
+            docker info
 
-      - name: Write CI compose override
-        # Keep CI on the repo-managed dev stack, with narrow overrides for
-        # image-version realities that currently make a fresh runner fail
-        # before tcfs is under test:
-        #
-        # - SeaweedFS: the shared stack uses `-max=0` for the volume server.
-        #   Current SeaweedFS can then report "No writable volumes" for the
-        #   S3 bucket collection. Give the CI volume server room to create
-        #   collection volumes.
-        # - NATS: the shared stack passes `--max_payload 8MB`; current
-        #   nats:2.10-alpine rejects that CLI flag.
+      - name: Write immutable CI compose override
         run: |
           set -euo pipefail
           mkdir -p .github/compose-overrides
           cat > .github/compose-overrides/ci.yml <<'EOF'
           services:
+            seaweed-master-1:
+              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
+            seaweed-master-2:
+              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
+            seaweed-master-3:
+              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
             seaweed-volume:
+              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
               command: >
                 volume
                 -mserver=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
@@ -99,7 +129,10 @@ jobs:
                 -max=32
                 -ip=seaweed-volume
                 -ip.bind=0.0.0.0
+            seaweed-filer:
+              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
             nats:
+              image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
               command: >
                 --name tcfs-nats
                 --jetstream
@@ -107,7 +140,7 @@ jobs:
                 --http_port 8222
           EOF
 
-      - name: Bring up compose-managed SeaweedFS + NATS
+      - name: Bring up compose-managed SeaweedFS and NATS
         run: |
           set -euo pipefail
           docker compose -f docker-compose.yml -f .github/compose-overrides/ci.yml up -d \
@@ -120,10 +153,6 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
-            # -s silent, -o discard body, -w just the http code. NO -f, since -f
-            # suppresses --write-out on HTTP error responses (SeaweedFS S3 returns
-            # 403 from `/` without credentials, which is the correct "service up"
-            # signal but would silence the code under -f).
             CODE="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "${TCFS_S3_ENDPOINT}/" || echo "000")"
             case "$CODE" in
               200|301|302|307|403|404)
@@ -132,7 +161,8 @@ jobs:
                 ;;
             esac
             echo "waiting for SeaweedFS S3 (attempt $i/60, last code: $CODE)..."
-            sleep 2
+            sleep 2 &
+            wait $!
           done
           echo "::error::SeaweedFS S3 did not become reachable at ${TCFS_S3_ENDPOINT}" >&2
           docker compose logs seaweed-filer | tail -80 || true
@@ -148,52 +178,38 @@ jobs:
               exit 0
             fi
             echo "waiting for NATS ($i/30)..."
-            sleep 1
+            sleep 1 &
+            wait $!
           done
           echo "::error::NATS did not become healthy" >&2
           docker compose logs nats | tail -80 || true
           exit 1
 
-      - name: Create S3 bucket (if not auto-created)
+      - name: Create S3 bucket
         run: |
           set -euo pipefail
-          # SeaweedFS S3 auto-creates buckets on PUT for admin identities, but
-          # do an explicit create with awscli to surface auth/config issues
-          # before the cargo test step.
-          aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
-              s3api create-bucket --bucket "${TCFS_S3_BUCKET}" \
-              --region us-east-1 2>&1 \
+          nix develop --accept-flake-config .#default --command \
+            aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
+                s3api create-bucket --bucket "${TCFS_S3_BUCKET}" \
+                --region us-east-1 2>&1 \
             | tee /tmp/bucket-create.log || true
-          aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
-              s3api head-bucket --bucket "${TCFS_S3_BUCKET}"
-          echo "S3 bucket '${TCFS_S3_BUCKET}' reachable"
+          nix develop --accept-flake-config .#default --command \
+            aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
+                s3api head-bucket --bucket "${TCFS_S3_BUCKET}"
 
       - name: Run fleet_live tests
         run: |
-          set -euo pipefail
-          cargo test -p tcfs-e2e --test fleet_live -- --nocapture
-        env:
-          # Re-export so the test process sees env from `env:` above
-          # (cargo test inherits the workflow env; this is belt-and-suspenders).
-          TCFS_E2E_LIVE: "1"
+          nix develop --accept-flake-config .#default --command \
+            cargo test -p tcfs-e2e --test fleet_live --locked -- --nocapture
 
-      - name: Collect compose logs on failure
+      - name: Print compose logs on failure
         if: failure()
         run: |
-          mkdir -p /tmp/compose-logs
           for svc in seaweed-master-1 seaweed-master-2 seaweed-master-3 seaweed-volume seaweed-filer nats; do
-            docker compose logs "$svc" > "/tmp/compose-logs/${svc}.log" 2>&1 || true
+            echo "===== ${svc} ====="
+            docker compose logs --no-color "$svc" | tail -200 || true
           done
-
-      - name: Upload compose logs artifact
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: compose-logs-${{ github.run_id }}
-          path: /tmp/compose-logs/
-          retention-days: 7
 
       - name: Tear down compose stack
         if: always()
-        run: |
-          docker compose down -v --remove-orphans || true
+        run: docker compose down -v --remove-orphans || true
