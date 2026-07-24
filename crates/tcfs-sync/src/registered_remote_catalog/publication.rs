@@ -3147,7 +3147,7 @@ fn catalog_buffer_equals_slice_v1(buffer: &Buffer, expected: &[u8]) -> bool {
     if buffer.len() != expected.len() {
         return false;
     }
-    let mut offset = 0;
+    let mut offset = 0_usize;
     for chunk in buffer.chunks(CATALOG_BUFFER_VALIDATION_CHUNK_BYTES_V1) {
         let chunk = chunk.to_bytes();
         let Some(end) = offset.checked_add(chunk.len()) else {
