@@ -207,7 +207,7 @@ pub(crate) enum StrictSemanticallyBoundRemoteCatalogReadV1 {
     Incomplete(StrictSemanticallyBoundRemoteCatalogIncompleteV1),
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RemoteCatalogContextWireV1 {
     root_id: String,
@@ -1288,13 +1288,7 @@ fn validate_page_v1(
     Ok(page)
 }
 
-/// Validate one exact immutable catalog root and every ordered page selected by
-/// an unchanged, current, ETag-bound HEAD.
-///
-/// No LIST operation is issued. The expected context must come from the
-/// daemon-authenticated selected-root route, never from the remote bytes. The
-/// caller must also acquire a live conditional-semantics receipt for this
-/// exact operator and prefix.
+/// Read and validate one unchanged current catalog closure.
 pub(crate) async fn read_verified_remote_catalog_closure_v1(
     op: &Operator,
     selected: &ValidatedSelectedRegisteredRootRemoteContextV1,
@@ -1326,6 +1320,68 @@ pub(crate) async fn read_verified_remote_catalog_closure_v1(
             return Ok(StrictRemoteCatalogClosureReadV1::Incomplete(incomplete));
         }
     };
+    read_verified_remote_catalog_closure_from_head_snapshot_v1(
+        op,
+        selected,
+        receipt,
+        head_a_raw,
+        Some(&head_key),
+    )
+    .await
+}
+
+/// Validate the immutable root/page inventory selected by an exact archived
+/// committed HEAD snapshot.
+///
+/// Unlike the current-HEAD reader this deliberately performs no mutable HEAD
+/// read or stability comparison. The caller must first bind the archive by its
+/// persisted content-address, length, and storage identity, and must recheck
+/// that immutable binding after this function returns.
+pub(crate) async fn read_verified_remote_catalog_closure_from_archived_head_v1(
+    op: &Operator,
+    selected: &ValidatedSelectedRegisteredRootRemoteContextV1,
+    receipt: &ConditionalWriteSemanticsReceipt,
+    archived_head: RawObjectSnapshotV1,
+) -> Result<StrictRemoteCatalogClosureReadV1> {
+    read_verified_remote_catalog_closure_from_head_snapshot_v1(
+        op,
+        selected,
+        receipt,
+        archived_head,
+        None,
+    )
+    .await
+}
+
+/// Validate one exact immutable catalog root and every ordered page selected by
+/// an already bound committed HEAD snapshot.
+///
+/// No LIST operation is issued. The expected context must come from the
+/// daemon-authenticated selected-root route, never from the remote bytes. The
+/// caller must also acquire a live conditional-semantics receipt for this
+/// exact operator and prefix. `stable_head_key` requests the current-HEAD
+/// second read; archived snapshots deliberately omit it.
+async fn read_verified_remote_catalog_closure_from_head_snapshot_v1(
+    op: &Operator,
+    selected: &ValidatedSelectedRegisteredRootRemoteContextV1,
+    receipt: &ConditionalWriteSemanticsReceipt,
+    head_a_raw: RawObjectSnapshotV1,
+    stable_head_key: Option<&str>,
+) -> Result<StrictRemoteCatalogClosureReadV1> {
+    let remote_prefix =
+        match validate_canonical_namespace_remote_prefix(&selected.spec().remote_prefix) {
+            Ok(prefix) if !prefix.is_empty() => prefix,
+            _ => {
+                return Ok(StrictRemoteCatalogClosureReadV1::Incomplete(
+                    StrictRemoteCatalogIncompleteV1::InvalidRemotePrefix,
+                ));
+            }
+        };
+    if !receipt.authorizes(op, remote_prefix)? {
+        return Ok(StrictRemoteCatalogClosureReadV1::Incomplete(
+            StrictRemoteCatalogIncompleteV1::StorageSemanticsUnverified,
+        ));
+    }
     let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
     if u64::try_from(head_a_raw.raw_bytes().len()).map_or(true, |length| {
         length > remote_contract.max_catalog_head_object_bytes()
@@ -1527,16 +1583,18 @@ pub(crate) async fn read_verified_remote_catalog_closure_v1(
         )));
     }
 
-    let head_b_raw = match read_current_head_v1(op, &head_key).await? {
-        Ok(raw) => raw,
-        Err(incomplete) => {
-            return Ok(StrictRemoteCatalogClosureReadV1::Incomplete(incomplete));
+    if let Some(head_key) = stable_head_key {
+        let head_b_raw = match read_current_head_v1(op, head_key).await? {
+            Ok(raw) => raw,
+            Err(incomplete) => {
+                return Ok(StrictRemoteCatalogClosureReadV1::Incomplete(incomplete));
+            }
+        };
+        if head_a_raw != head_b_raw {
+            return Ok(StrictRemoteCatalogClosureReadV1::Incomplete(
+                StrictRemoteCatalogIncompleteV1::HeadChanged,
+            ));
         }
-    };
-    if head_a_raw != head_b_raw {
-        return Ok(StrictRemoteCatalogClosureReadV1::Incomplete(
-            StrictRemoteCatalogIncompleteV1::HeadChanged,
-        ));
     }
 
     let head_revision = catalog_head_revision_v1(head_a_raw.raw_bytes());
