@@ -16,11 +16,18 @@
 //! executes only the complete fact-bound journal, publishes a complete
 //! immutable successor catalog, finalizes committed HEAD, reconstructs exact
 //! recovery states, and advances the external high-water to `Ready(n+1)`.
-//! Every conditional write is bracketed by the retained live backend lease.
+//! Every authoritative mutable write must pass through one storage-side
+//! monotonic-fence request whose control identity, writer epoch, journal,
+//! ordinal, key, condition, and payload are exact-bound. Advisory liveness
+//! checks and raw object rereads never substitute for that backend receipt;
+//! immutable content-addressed archive, journal, payload, page, and root writes
+//! remain direct absent-only publications.
 //! A separately namespaced diagnostic draft remains non-authoritative and
-//! cannot convert into the authoritative journal. The lease and authenticated
-//! control receipts still have no production constructors or implementation,
-//! so this source path remains unreachable by deployed writers and cannot mint
+//! cannot convert into the authoritative journal. The lease, authenticated
+//! control receipts, and storage-enforced fence still have no production
+//! constructors or implementation, and this checkpoint does not claim
+//! cold-process reconstruction from persisted authenticated state. The source
+//! path therefore remains unreachable by deployed writers and cannot mint
 //! production authority, produce a plan digest, or authorize an action.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,6 +80,8 @@ const PUBLISHING_HEAD_RESERVATION_DOMAIN_V1: &str =
     "tinyland.tcfs.remote-catalog-publishing-head-reservation.b3v1";
 const PREDECESSOR_HEAD_STORAGE_BINDING_DOMAIN_V1: &str =
     "tinyland.tcfs.remote-catalog-predecessor-head-storage-binding.b3v1";
+const FENCED_STORAGE_WRITE_REQUEST_DOMAIN_V1: &str =
+    "tinyland.tcfs.remote-catalog-fenced-storage-write-request.b3v1";
 const ARCHIVED_HEAD_OBJECT_SUFFIX_V1: &str = ".tcfs-catalog/v1/publications/archived-heads";
 const MUTATION_JOURNAL_OBJECT_SUFFIX_V1: &str = ".tcfs-catalog/v1/publications/mutation-journals";
 const UNTRUSTED_MUTATION_JOURNAL_DRAFT_OBJECT_SUFFIX_V1: &str =
@@ -293,13 +302,152 @@ struct CatalogControlAuthorityRevisionV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct NonSecretLeasePublicFingerprintV1([u8; 32]);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogFencedStorageWriteStageV1 {
+    PublishingHead,
+    NamespaceIndex,
+    NamespaceReservation,
+    NamespaceManifest,
+    CommittedHead,
+}
+
+impl CatalogFencedStorageWriteStageV1 {
+    fn for_namespace_kind(kind: RemoteCatalogObjectKindV1) -> Self {
+        match kind {
+            RemoteCatalogObjectKindV1::Index => Self::NamespaceIndex,
+            RemoteCatalogObjectKindV1::Reservation => Self::NamespaceReservation,
+            RemoteCatalogObjectKindV1::Manifest => Self::NamespaceManifest,
+        }
+    }
+
+    fn namespace_kind(self) -> Option<RemoteCatalogObjectKindV1> {
+        match self {
+            Self::NamespaceIndex => Some(RemoteCatalogObjectKindV1::Index),
+            Self::NamespaceReservation => Some(RemoteCatalogObjectKindV1::Reservation),
+            Self::NamespaceManifest => Some(RemoteCatalogObjectKindV1::Manifest),
+            Self::PublishingHead | Self::CommittedHead => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "condition", rename_all = "kebab-case")]
+enum CatalogFencedStorageWriteConditionV1 {
+    CreateIfAbsent,
+    ReplaceIfMatch { etag: String },
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogFencedStorageWriteRequestWireV1 {
+    version: u32,
+    context: RemoteCatalogContextWireV1,
+    storage_authority_fingerprint: String,
+    control_authority_fingerprint: String,
+    writer_epoch: String,
+    ready_control_generation: u64,
+    ready_control_revision_fingerprint: String,
+    pending_control_generation: u64,
+    pending_control_revision_fingerprint: String,
+    pending_control_record_fingerprint: String,
+    writer_fence_authority_revision_fingerprint: String,
+    writer_fence_lease_public_fingerprint: String,
+    mutation_journal_object_id: String,
+    mutation_count: u64,
+    ordinal: u64,
+    stage: CatalogFencedStorageWriteStageV1,
+    object_key: String,
+    condition: CatalogFencedStorageWriteConditionV1,
+    successor_raw_bytes_len: u64,
+    successor_raw_blake3: String,
+}
+
+/// Exact storage mutation submitted to the backend that owns the opaque
+/// monotonic fence token.
+///
+/// The OpenDAL operator is retained only so the source-only test backend can
+/// exercise the real conditional-write behavior. A production implementation
+/// must ignore or independently authenticate that caller-held accessor and
+/// perform the fence check and object mutation atomically at the storage
+/// authorization point. Checking a control record and then using this operator
+/// would not satisfy the trait contract.
+struct CatalogFencedStorageWriteRequestV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    pending_control_record_fingerprint: [u8; 32],
+    writer_fence_authority_revision_fingerprint: [u8; 32],
+    writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
+    mutation_journal_object_id: [u8; 32],
+    mutation_count: u64,
+    ordinal: u64,
+    stage: CatalogFencedStorageWriteStageV1,
+    object_key: String,
+    condition: CatalogFencedStorageWriteConditionV1,
+    successor_raw_bytes: Buffer,
+    successor_raw_bytes_len: NonZeroU64,
+    successor_raw_blake3: [u8; 32],
+    request_fingerprint: [u8; 32],
+    operator: Operator,
+}
+
+/// Opaque backend receipt proving that one exact request was admitted by the
+/// still-current storage-side monotonic fence and applied with its exact
+/// per-object condition.
+struct CatalogFencedStorageWriteReceiptV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    pending_control_record_fingerprint: [u8; 32],
+    ordinal: u64,
+    request_fingerprint: [u8; 32],
+    binding: RegisteredRootRemoteObjectBindingV1,
+}
+
+struct CatalogControlPendingRequestV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    publishing_head_reservation_fingerprint: [u8; 32],
+    writer_fence_authority_revision_fingerprint: [u8; 32],
+    writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
+    canonical_pending_control_record_bytes: Vec<u8>,
+    pending_control_record_fingerprint: [u8; 32],
+}
+
+type CatalogControlPendingFutureV1<'a> = Pin<
+    Box<dyn Future<Output = AnyhowResult<TrustedCatalogPublicationPendingReceiptV1>> + Send + 'a>,
+>;
+type CatalogFencedStorageWriteFutureV1<'a> =
+    Pin<Box<dyn Future<Output = AnyhowResult<CatalogFencedStorageWriteReceiptV1>> + Send + 'a>>;
+
 /// Non-cloneable retained backend lease for one exact control acquisition.
 ///
 /// The public fingerprint serialized into catalog/control records is only a
-/// correlation identifier. This value is the separate live backend handle.
-/// There is deliberately no production constructor in this checkpoint.
-trait CatalogControlLeaseLivenessV1: Send + Sync {
+/// correlation identifier. The opaque token remains inside this backend
+/// object and is never serialized or supplied by the caller. `is_live_v1` is
+/// diagnostic/fail-fast only: it never authorizes a storage mutation.
+///
+/// Implementations must atomically compare the current monotonic fence and
+/// apply every `write_fenced_v1` request at the storage authorization point.
+/// An in-process mutex, boolean, or control-record read followed by raw
+/// OpenDAL I/O does not satisfy this contract. There is deliberately no
+/// production constructor or implementation in this checkpoint.
+trait CatalogMonotonicFenceLeaseV1: Send + Sync {
     fn is_live_v1(&self) -> bool;
+
+    /// Atomically replace the acquired exact Ready control revision with the
+    /// exact PublicationPending record that arms this fence epoch.
+    fn compare_and_swap_pending_v1<'a>(
+        &'a self,
+        request: CatalogControlPendingRequestV1,
+    ) -> CatalogControlPendingFutureV1<'a>;
+
+    /// Atomically reject a stale fence or apply one exact ordered catalog
+    /// mutation. Exact request replay must return the same authenticated
+    /// receipt; another request at the same ordinal must fail without I/O.
+    fn write_fenced_v1<'a>(
+        &'a self,
+        request: CatalogFencedStorageWriteRequestV1,
+    ) -> CatalogFencedStorageWriteFutureV1<'a>;
 
     /// Atomically replace the exact pending control revision with the exact
     /// ready record. Implementations must resolve ambiguous backend outcomes
@@ -314,9 +462,13 @@ struct RetainedCatalogControlLeaseV1 {
     control_binding: CatalogControlAcquisitionBindingV1,
     writer_fence_authority_revision_fingerprint: [u8; 32],
     writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
-    liveness: Box<dyn CatalogControlLeaseLivenessV1>,
+    liveness: Box<dyn CatalogMonotonicFenceLeaseV1>,
     #[cfg(test)]
     test_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    test_revoke_before_next_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    test_fail_after_next_backend_apply: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RetainedCatalogControlLeaseV1 {
@@ -2824,6 +2976,8 @@ pub(crate) struct TrustedCatalogPublicationPendingReceiptV1 {
     control_binding: CatalogControlAcquisitionBindingV1,
     pending_revision: CatalogControlAuthorityRevisionV1,
     publishing_head_reservation_fingerprint: [u8; 32],
+    writer_fence_authority_revision_fingerprint: [u8; 32],
+    writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
     pending_control_record_fingerprint: [u8; 32],
 }
 
@@ -2979,6 +3133,303 @@ impl std::error::Error for FailedCatalogNamespaceMutationsV1<'_> {
     }
 }
 
+fn catalog_fenced_storage_write_request_fingerprint_v1(
+    wire: &CatalogFencedStorageWriteRequestWireV1,
+) -> AnyhowResult<[u8; 32]> {
+    let canonical =
+        serde_json::to_vec(wire).context("serializing canonical catalog fenced-storage request")?;
+    let canonical_len = u64::try_from(canonical.len())
+        .context("catalog fenced-storage request length does not fit u64")?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FENCED_STORAGE_WRITE_REQUEST_DOMAIN_V1.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&canonical_len.to_be_bytes());
+    hasher.update(&canonical);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn catalog_fenced_storage_write_request_wire_v1(
+    request: &CatalogFencedStorageWriteRequestV1,
+) -> CatalogFencedStorageWriteRequestWireV1 {
+    CatalogFencedStorageWriteRequestWireV1 {
+        version: 1,
+        context: request.control_binding.context.to_wire(),
+        storage_authority_fingerprint: lower_hex(
+            &request.control_binding.storage_authority_fingerprint,
+        ),
+        control_authority_fingerprint: lower_hex(
+            &request.control_binding.control_authority_fingerprint,
+        ),
+        writer_epoch: lower_hex(&request.control_binding.bootstrap.writer_epoch),
+        ready_control_generation: request.control_binding.ready_revision.generation.get(),
+        ready_control_revision_fingerprint: lower_hex(
+            &request.control_binding.ready_revision.fingerprint,
+        ),
+        pending_control_generation: request.pending_revision.generation.get(),
+        pending_control_revision_fingerprint: lower_hex(&request.pending_revision.fingerprint),
+        pending_control_record_fingerprint: lower_hex(&request.pending_control_record_fingerprint),
+        writer_fence_authority_revision_fingerprint: lower_hex(
+            &request.writer_fence_authority_revision_fingerprint,
+        ),
+        writer_fence_lease_public_fingerprint: lower_hex(
+            &request.writer_fence_lease_public_fingerprint.0,
+        ),
+        mutation_journal_object_id: lower_hex(&request.mutation_journal_object_id),
+        mutation_count: request.mutation_count,
+        ordinal: request.ordinal,
+        stage: request.stage,
+        object_key: request.object_key.clone(),
+        condition: request.condition.clone(),
+        successor_raw_bytes_len: request.successor_raw_bytes_len.get(),
+        successor_raw_blake3: lower_hex(&request.successor_raw_blake3),
+    }
+}
+
+fn catalog_fenced_storage_write_request_v1(
+    pending: &BoundPendingCatalogControlV1<'_>,
+    stage: CatalogFencedStorageWriteStageV1,
+    ordinal: u64,
+    object_key: String,
+    condition: CatalogFencedStorageWriteConditionV1,
+    successor_raw_bytes: Buffer,
+) -> AnyhowResult<CatalogFencedStorageWriteRequestV1> {
+    let transition = &pending.transition;
+    let publication = &transition.publication;
+    let journal = &publication.mutation_journal;
+    let successor_raw_bytes_len = NonZeroU64::new(
+        u64::try_from(successor_raw_bytes.len())
+            .context("catalog fenced-storage payload length does not fit u64")?,
+    )
+    .context("catalog fenced-storage payload must not be empty")?;
+    let successor_raw_blake3 = *blake3::hash(&successor_raw_bytes).as_bytes();
+    let journal_wire = validate_authoritative_catalog_mutation_journal_bytes_v1(
+        &journal.raw_bytes,
+        &publication.context,
+        publication.sequence,
+        publication.publication_nonce,
+        publication.parent_head_revision,
+    )
+    .map_err(|error| anyhow::anyhow!("authoritative mutation journal is invalid: {error:?}"))?;
+    let mutation_count = u64::try_from(journal_wire.mutations.len())
+        .context("catalog mutation count does not fit u64")?;
+    anyhow::ensure!(
+        mutation_count == journal_wire.mutation_count
+            && journal_wire.mutations.len() == journal.successor_payloads.len(),
+        "catalog fenced-storage request lost the complete authoritative journal"
+    );
+    let committed_ordinal = mutation_count
+        .checked_add(1)
+        .context("catalog fenced-storage committed ordinal overflow")?;
+    let head_key = super::catalog_head_key_v1(&publication.context.remote_prefix);
+    match stage {
+        CatalogFencedStorageWriteStageV1::PublishingHead => {
+            anyhow::ensure!(
+                ordinal == 0
+                    && object_key == head_key
+                    && successor_raw_bytes.as_ref()
+                        == transition.canonical_publishing_head_bytes.as_slice()
+                    && condition
+                        == CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
+                            etag: publication.expected_parent_head_etag.clone(),
+                        },
+                "publishing HEAD request is not the exact first fenced transition"
+            );
+        }
+        CatalogFencedStorageWriteStageV1::CommittedHead => {
+            anyhow::ensure!(
+                ordinal == committed_ordinal
+                    && object_key == head_key
+                    && matches!(
+                        &condition,
+                        CatalogFencedStorageWriteConditionV1::ReplaceIfMatch { etag }
+                            if !etag.is_empty() && etag != "null"
+                    ),
+                "committed HEAD request is not the exact terminal fenced transition"
+            );
+        }
+        namespace_stage => {
+            let kind = namespace_stage
+                .namespace_kind()
+                .context("catalog namespace stage has no object kind")?;
+            let mutation_index = ordinal
+                .checked_sub(1)
+                .and_then(|index| usize::try_from(index).ok())
+                .context("catalog namespace ordinal is not positive or does not fit usize")?;
+            let mutation = journal_wire
+                .mutations
+                .get(mutation_index)
+                .context("catalog namespace ordinal exceeds the authoritative journal")?;
+            let expected_condition = match (&mutation.operation, &mutation.predecessor) {
+                (
+                    RemoteCatalogMutationOperationDraftWireV1::CreateIfAbsent,
+                    RemoteCatalogMutationPredecessorDraftWireV1::Absent,
+                ) => CatalogFencedStorageWriteConditionV1::CreateIfAbsent,
+                (
+                    RemoteCatalogMutationOperationDraftWireV1::ReplaceIfMatch,
+                    RemoteCatalogMutationPredecessorDraftWireV1::Present { binding, .. },
+                ) => CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
+                    etag: wire_binding_etag_v1(binding)
+                        .context("authoritative replacement predecessor has no usable ETag")?
+                        .to_owned(),
+                },
+                _ => anyhow::bail!(
+                    "authoritative catalog journal contains an invalid storage operation"
+                ),
+            };
+            anyhow::ensure!(
+                ordinal >= 1
+                    && ordinal <= mutation_count
+                    && mutation.kind == kind
+                    && mutation.object_key == object_key
+                    && validate_catalog_object_route_v1(
+                        &publication.context.remote_prefix,
+                        kind,
+                        &object_key,
+                    )
+                    && condition == expected_condition,
+                "catalog namespace fenced request differs from its canonical journal ordinal"
+            );
+            anyhow::ensure!(
+                mutation.successor_payload.raw_bytes_len == successor_raw_bytes_len.get()
+                    && mutation.successor_payload.raw_blake3 == lower_hex(&successor_raw_blake3),
+                "catalog namespace fenced payload differs from its canonical journal ordinal"
+            );
+        }
+    }
+
+    let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+    match stage {
+        CatalogFencedStorageWriteStageV1::PublishingHead
+        | CatalogFencedStorageWriteStageV1::CommittedHead => anyhow::ensure!(
+            successor_raw_bytes_len.get() <= remote.max_catalog_head_object_bytes(),
+            "catalog fenced HEAD payload exceeds the object bound"
+        ),
+        namespace_stage => anyhow::ensure!(
+            validate_entry_size_v1(
+                namespace_stage
+                    .namespace_kind()
+                    .context("catalog namespace stage has no object kind")?,
+                successor_raw_bytes_len.get(),
+            ),
+            "catalog fenced namespace payload exceeds its kind bound"
+        ),
+    }
+
+    let control_binding = publication.control_guard.high_water.binding.clone();
+    let writers = &publication.control_guard.all_writers;
+    anyhow::ensure!(
+        writers.control_binding == control_binding
+            && pending.pending_receipt.control_binding == control_binding
+            && pending.pending_receipt.pending_revision == transition.pending_revision
+            && pending.pending_receipt.pending_control_record_fingerprint
+                == transition.pending_control_record_fingerprint
+            && pending
+                .pending_receipt
+                .writer_fence_authority_revision_fingerprint
+                == writers.authority_revision_fingerprint
+            && pending
+                .pending_receipt
+                .writer_fence_lease_public_fingerprint
+                == writers.lease_public_fingerprint
+            && writers.authority_revision_fingerprint != [0; 32]
+            && writers.lease_public_fingerprint.0 != [0; 32],
+        "catalog fenced-storage request lost its exact pending control acquisition"
+    );
+    let wire = CatalogFencedStorageWriteRequestWireV1 {
+        version: 1,
+        context: publication.context.to_wire(),
+        storage_authority_fingerprint: lower_hex(&control_binding.storage_authority_fingerprint),
+        control_authority_fingerprint: lower_hex(&control_binding.control_authority_fingerprint),
+        writer_epoch: lower_hex(&control_binding.bootstrap.writer_epoch),
+        ready_control_generation: control_binding.ready_revision.generation.get(),
+        ready_control_revision_fingerprint: lower_hex(&control_binding.ready_revision.fingerprint),
+        pending_control_generation: transition.pending_revision.generation.get(),
+        pending_control_revision_fingerprint: lower_hex(&transition.pending_revision.fingerprint),
+        pending_control_record_fingerprint: lower_hex(
+            &transition.pending_control_record_fingerprint,
+        ),
+        writer_fence_authority_revision_fingerprint: lower_hex(
+            &writers.authority_revision_fingerprint,
+        ),
+        writer_fence_lease_public_fingerprint: lower_hex(&writers.lease_public_fingerprint.0),
+        mutation_journal_object_id: lower_hex(&journal.object_id),
+        mutation_count,
+        ordinal,
+        stage,
+        object_key: object_key.clone(),
+        condition: condition.clone(),
+        successor_raw_bytes_len: successor_raw_bytes_len.get(),
+        successor_raw_blake3: lower_hex(&successor_raw_blake3),
+    };
+    let request_fingerprint = catalog_fenced_storage_write_request_fingerprint_v1(&wire)?;
+    Ok(CatalogFencedStorageWriteRequestV1 {
+        control_binding,
+        pending_revision: transition.pending_revision,
+        pending_control_record_fingerprint: transition.pending_control_record_fingerprint,
+        writer_fence_authority_revision_fingerprint: writers.authority_revision_fingerprint,
+        writer_fence_lease_public_fingerprint: writers.lease_public_fingerprint,
+        mutation_journal_object_id: journal.object_id,
+        mutation_count,
+        ordinal,
+        stage,
+        object_key,
+        condition,
+        successor_raw_bytes,
+        successor_raw_bytes_len,
+        successor_raw_blake3,
+        request_fingerprint,
+        operator: publication.storage_authority.operator.clone(),
+    })
+}
+
+async fn execute_catalog_fenced_storage_write_v1(
+    pending: &BoundPendingCatalogControlV1<'_>,
+    request: CatalogFencedStorageWriteRequestV1,
+) -> AnyhowResult<RegisteredRootRemoteObjectBindingV1> {
+    anyhow::ensure!(
+        catalog_fenced_storage_write_request_fingerprint_v1(
+            &catalog_fenced_storage_write_request_wire_v1(&request),
+        )? == request.request_fingerprint
+            && u64::try_from(request.successor_raw_bytes.len()).ok()
+                == Some(request.successor_raw_bytes_len.get())
+            && *blake3::hash(&request.successor_raw_bytes).as_bytes()
+                == request.successor_raw_blake3,
+        "catalog fenced-storage request fingerprint or payload identity changed"
+    );
+    let expected_control_binding = request.control_binding.clone();
+    let expected_pending_revision = request.pending_revision;
+    let expected_pending_record_fingerprint = request.pending_control_record_fingerprint;
+    let expected_ordinal = request.ordinal;
+    let expected_request_fingerprint = request.request_fingerprint;
+    let expected_stage = request.stage;
+    let receipt = pending
+        .transition
+        .publication
+        .control_guard
+        .all_writers
+        .retained_control_lease
+        .liveness
+        .write_fenced_v1(request)
+        .await
+        .context("applying catalog mutation through the storage-enforced monotonic fence")?;
+    anyhow::ensure!(
+        receipt.control_binding == expected_control_binding
+            && receipt.pending_revision == expected_pending_revision
+            && receipt.pending_control_record_fingerprint == expected_pending_record_fingerprint
+            && receipt.ordinal == expected_ordinal
+            && receipt.request_fingerprint == expected_request_fingerprint
+            && super::validate_binding_wire_v1(&binding_wire_v1(&receipt.binding)).is_some()
+            && (!matches!(
+                expected_stage,
+                CatalogFencedStorageWriteStageV1::PublishingHead
+                    | CatalogFencedStorageWriteStageV1::CommittedHead
+                    | CatalogFencedStorageWriteStageV1::NamespaceIndex
+            ) || mutable_head_etag_v1(&receipt.binding).is_some()),
+        "storage-enforced catalog fence returned a crossed or unusable receipt"
+    );
+    Ok(receipt.binding)
+}
+
 fn wire_binding_etag_v1(binding: &RemoteCatalogObjectBindingWireV1) -> Option<&str> {
     binding.etag.as_deref().filter(|etag| !etag.is_empty())
 }
@@ -3028,9 +3479,9 @@ async fn require_namespace_mutation_capability_live_v1(
 /// accessor while retaining the live lease.
 ///
 /// This is the only constructor for the namespace mutation capability.
-/// Conditional-write failure is treated as an ambiguous outcome until the
-/// bounded reread proves either the exact publishing bytes or a different
-/// state. Callers cannot provide HEAD bytes, keys, or predecessor bindings.
+/// A raw bounded reread is additional receipt validation only: backend
+/// rejection never becomes success merely because matching bytes are visible.
+/// Callers cannot provide HEAD bytes, keys, or predecessor bindings.
 pub(crate) async fn install_catalog_publishing_head_v1<'a>(
     pending: BoundPendingCatalogControlV1<'a>,
 ) -> Result<CatalogNamespaceMutationCapabilityV1<'a>, CatalogPublishingHeadInstallFailureV1<'a>> {
@@ -3062,13 +3513,21 @@ pub(crate) async fn install_catalog_publishing_head_v1<'a>(
             "publishing HEAD proposal no longer matches its exact pending transition"
         );
         let head_key = super::catalog_head_key_v1(&publication.context.remote_prefix);
-        let write_result = publication
-            .storage_authority
-            .operator
-            .write_with(&head_key, expected_bytes.clone())
-            .if_match(&publication.expected_parent_head_etag)
+        let request = catalog_fenced_storage_write_request_v1(
+            &pending,
+            CatalogFencedStorageWriteStageV1::PublishingHead,
+            0,
+            head_key.clone(),
+            CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
+                etag: publication.expected_parent_head_etag.clone(),
+            },
+            Buffer::from(expected_bytes.clone()),
+        )?;
+        let fenced_binding = execute_catalog_fenced_storage_write_v1(&pending, request)
             .await
-            .with_context(|| format!("conditionally installing catalog publishing HEAD: {head_key}"));
+            .with_context(|| {
+                format!("installing catalog publishing HEAD through the monotonic fence: {head_key}")
+            })?;
         let max_bytes = RegisteredRootPlanContractV1::strict_v1()
             .remote_contract()
             .max_catalog_head_object_bytes();
@@ -3082,21 +3541,15 @@ pub(crate) async fn install_catalog_publishing_head_v1<'a>(
         let exact_binding = match observed {
             Some(RawObjectReadV1::Bound(snapshot)) => {
                 let (raw_bytes, _, binding) = snapshot.into_parts();
-                (raw_bytes == expected_bytes).then(|| registered_binding_from_raw_v1(binding))
+                let binding = registered_binding_from_raw_v1(binding);
+                (raw_bytes == expected_bytes && binding == fenced_binding).then_some(binding)
             }
             None | Some(RawObjectReadV1::Unbound) => None,
         };
         let Some(binding) = exact_binding else {
-            return match write_result {
-                Ok(_) => anyhow::bail!(
-                    "catalog publishing HEAD changed after its successful compare-and-swap: {head_key}"
-                ),
-                Err(write_error) => Err(write_error).with_context(|| {
-                    format!(
-                        "catalog publishing HEAD compare-and-swap did not install the exact proposal: {head_key}"
-                    )
-                }),
-            };
+            anyhow::bail!(
+                "catalog publishing HEAD differs from its authenticated fenced-write receipt: {head_key}"
+            );
         };
         anyhow::ensure!(
             super::validate_binding_wire_v1(&binding_wire_v1(&binding)).is_some()
@@ -3115,6 +3568,19 @@ pub(crate) async fn install_catalog_publishing_head_v1<'a>(
         }),
         Err(error) => Err(CatalogPublishingHeadInstallFailureV1 { pending, error }),
     }
+}
+
+/// Retry an ambiguous or rejected publishing-HEAD installation with the exact
+/// retained pending transition.
+///
+/// Recovery replays ordinal zero through the backend and still requires the
+/// authenticated receipt to match a fresh raw reread. It never promotes
+/// matching raw bytes directly into a namespace-mutation capability.
+pub(crate) async fn recover_failed_catalog_publishing_head_install_v1<'a>(
+    failure: CatalogPublishingHeadInstallFailureV1<'a>,
+) -> Result<CatalogNamespaceMutationCapabilityV1<'a>, CatalogPublishingHeadInstallFailureV1<'a>> {
+    let CatalogPublishingHeadInstallFailureV1 { pending, error: _ } = failure;
+    install_catalog_publishing_head_v1(pending).await
 }
 
 async fn read_exact_catalog_successor_v1(
@@ -3149,6 +3615,7 @@ async fn read_exact_catalog_successor_v1(
 
 async fn apply_one_catalog_namespace_mutation_v1(
     capability: &CatalogNamespaceMutationCapabilityV1<'_>,
+    ordinal: u64,
     mutation: &RemoteCatalogFactBoundMutationWireV1,
     payload: &BoundCatalogSuccessorPayloadV1,
 ) -> AnyhowResult<AppliedCatalogNamespaceObjectV1> {
@@ -3193,61 +3660,49 @@ async fn apply_one_catalog_namespace_mutation_v1(
     );
 
     require_namespace_mutation_capability_live_v1(capability).await?;
-    let operator = capability
-        .pending
-        .transition
-        .publication
-        .storage_authority
-        .operator;
-    let write_result = match (&mutation.operation, &mutation.predecessor) {
+    let condition = match (&mutation.operation, &mutation.predecessor) {
         (
             RemoteCatalogMutationOperationDraftWireV1::CreateIfAbsent,
             RemoteCatalogMutationPredecessorDraftWireV1::Absent,
-        ) => {
-            operator
-                .write_with(&mutation.object_key, payload.raw_bytes.clone())
-                .if_not_exists(true)
-                .await
-        }
+        ) => CatalogFencedStorageWriteConditionV1::CreateIfAbsent,
         (
             RemoteCatalogMutationOperationDraftWireV1::ReplaceIfMatch,
             RemoteCatalogMutationPredecessorDraftWireV1::Present { binding, .. },
-        ) => {
-            let etag = wire_binding_etag_v1(binding)
-                .context("authoritative replacement predecessor has no usable ETag")?;
-            operator
-                .write_with(&mutation.object_key, payload.raw_bytes.clone())
-                .if_match(etag)
-                .await
-        }
+        ) => CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
+            etag: wire_binding_etag_v1(binding)
+                .context("authoritative replacement predecessor has no usable ETag")?
+                .to_owned(),
+        },
         _ => anyhow::bail!("authoritative catalog journal contains an invalid operation"),
     };
-
+    let request = catalog_fenced_storage_write_request_v1(
+        &capability.pending,
+        CatalogFencedStorageWriteStageV1::for_namespace_kind(mutation.kind),
+        ordinal,
+        mutation.object_key.clone(),
+        condition,
+        payload.raw_bytes.clone(),
+    )?;
+    let fenced_binding =
+        execute_catalog_fenced_storage_write_v1(&capability.pending, request).await?;
     let rebound = read_exact_catalog_successor_v1(
         capability,
         mutation.kind,
         &mutation.object_key,
         &payload_bytes,
     )
-    .await;
-    let binding = match (write_result, rebound) {
-        (_, Ok(binding)) => binding,
-        (Err(write_error), Err(read_error)) => {
-            return Err(read_error).with_context(|| {
-                format!(
-                    "catalog namespace conditional write also failed ({write_error}): {}",
-                    mutation.object_key
-                )
-            })
-        }
-        (Ok(_), Err(read_error)) => return Err(read_error),
-    };
+    .await?;
+    anyhow::ensure!(
+        rebound == fenced_binding,
+        "catalog namespace reread differs from its authenticated fenced-write receipt: {}",
+        mutation.object_key
+    );
     require_namespace_mutation_capability_live_v1(capability).await?;
     Ok(AppliedCatalogNamespaceObjectV1 {
         kind: mutation.kind,
         object_key: mutation.object_key.clone(),
         raw_blake3: payload.raw_blake3,
-        binding,
+        binding: rebound,
     })
 }
 
@@ -3312,10 +3767,15 @@ pub(crate) async fn apply_authoritative_catalog_namespace_mutations_v1<'a>(
     }
 
     for ordinal in 0..wire.mutations.len() {
+        let fenced_ordinal = u64::try_from(ordinal)
+            .ok()
+            .and_then(|ordinal| ordinal.checked_add(1))
+            .expect("bounded authoritative journal ordinal must fit u64");
         let result = {
             let journal = &capability.pending.transition.publication.mutation_journal;
             apply_one_catalog_namespace_mutation_v1(
                 &capability,
+                fenced_ordinal,
                 &wire.mutations[ordinal],
                 &journal.successor_payloads[ordinal],
             )
@@ -3615,6 +4075,72 @@ async fn publish_catalog_successor_immutable_v1(
     Ok(binding)
 }
 
+/// Execute or exactly replay the terminal committed-HEAD mutation through the
+/// retained storage fence, then prove the currently visible bytes and binding
+/// equal that authenticated receipt.
+///
+/// This deliberately does not require the visible HEAD still to be
+/// `Publishing`: recovery after an apply-before-response failure observes the
+/// committed bytes first, then must replay this exact terminal request to
+/// recover the backend receipt. A raw committed closure cannot satisfy this
+/// helper by itself.
+async fn execute_and_revalidate_catalog_committed_head_v1(
+    capability: &CatalogNamespaceMutationCapabilityV1<'_>,
+    committed_head_bytes: &[u8],
+) -> AnyhowResult<RegisteredRootRemoteObjectBindingV1> {
+    let publication = &capability.pending.transition.publication;
+    let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+    let publishing_etag = mutable_head_etag_v1(&capability.publishing_head_binding)
+        .context("visible publishing HEAD has no usable ETag")?;
+    let head_key = super::catalog_head_key_v1(&publication.context.remote_prefix);
+    let committed_ordinal = u64::try_from(publication.mutation_journal.successor_payloads.len())
+        .context("catalog mutation count does not fit u64")?
+        .checked_add(1)
+        .context("catalog committed ordinal overflow")?;
+    let request = catalog_fenced_storage_write_request_v1(
+        &capability.pending,
+        CatalogFencedStorageWriteStageV1::CommittedHead,
+        committed_ordinal,
+        head_key.clone(),
+        CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
+            etag: publishing_etag,
+        },
+        Buffer::from(committed_head_bytes.to_vec()),
+    )?;
+    let fenced_binding = execute_catalog_fenced_storage_write_v1(&capability.pending, request)
+        .await
+        .with_context(|| {
+            format!("finalizing catalog committed HEAD through the monotonic fence: {head_key}")
+        })?;
+    let observed = read_raw_object_snapshot_v1(
+        publication.storage_authority.operator,
+        &head_key,
+        remote.max_catalog_head_object_bytes(),
+    )
+    .await
+    .with_context(|| format!("revalidating committed catalog HEAD: {head_key}"))?;
+    let exact_binding = match observed {
+        Some(RawObjectReadV1::Bound(snapshot)) => {
+            let (raw_bytes, _, binding) = snapshot.into_parts();
+            let binding = registered_binding_from_raw_v1(binding);
+            (raw_bytes == committed_head_bytes && binding == fenced_binding).then_some(binding)
+        }
+        None | Some(RawObjectReadV1::Unbound) => None,
+    };
+    let Some(committed_head_binding) = exact_binding else {
+        anyhow::bail!(
+            "committed catalog HEAD differs from its authenticated fenced-write receipt: {head_key}"
+        );
+    };
+    anyhow::ensure!(
+        mutable_head_etag_v1(&committed_head_binding).is_some(),
+        "committed catalog HEAD has no usable exact ETag"
+    );
+    require_held_control_lease_live_v1(&publication.control_guard)
+        .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+    Ok(committed_head_binding)
+}
+
 async fn publish_catalog_successor_closure_v1(
     applied: &AppliedCatalogNamespaceMutationsV1<'_>,
 ) -> AnyhowResult<PublishedCatalogSuccessorClosureV1> {
@@ -3756,47 +4282,8 @@ async fn publish_catalog_successor_closure_v1(
             .is_some_and(|len| len <= remote.max_catalog_head_object_bytes()),
         "committed catalog HEAD exceeds the object bound"
     );
-    let publishing_etag = mutable_head_etag_v1(&capability.publishing_head_binding)
-        .context("visible publishing HEAD has no usable ETag")?;
-    let head_key = super::catalog_head_key_v1(&publication.context.remote_prefix);
-    let write_result = publication
-        .storage_authority
-        .operator
-        .write_with(&head_key, committed_head_bytes.clone())
-        .if_match(&publishing_etag)
-        .await;
-    let observed = read_raw_object_snapshot_v1(
-        publication.storage_authority.operator,
-        &head_key,
-        remote.max_catalog_head_object_bytes(),
-    )
-    .await
-    .with_context(|| format!("revalidating committed catalog HEAD: {head_key}"))?;
-    let exact_binding = match observed {
-        Some(RawObjectReadV1::Bound(snapshot)) => {
-            let (raw_bytes, _, binding) = snapshot.into_parts();
-            (raw_bytes == committed_head_bytes).then(|| registered_binding_from_raw_v1(binding))
-        }
-        None | Some(RawObjectReadV1::Unbound) => None,
-    };
-    let Some(committed_head_binding) = exact_binding else {
-        return match write_result {
-            Ok(_) => anyhow::bail!(
-                "committed catalog HEAD changed after successful finalization: {head_key}"
-            ),
-            Err(write_error) => Err(write_error).with_context(|| {
-                format!(
-                    "committed catalog HEAD compare-and-swap did not install exact bytes: {head_key}"
-                )
-            }),
-        };
-    };
-    anyhow::ensure!(
-        mutable_head_etag_v1(&committed_head_binding).is_some(),
-        "committed catalog HEAD has no usable exact ETag"
-    );
-    require_held_control_lease_live_v1(&publication.control_guard)
-        .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+    let committed_head_binding =
+        execute_and_revalidate_catalog_committed_head_v1(capability, &committed_head_bytes).await?;
     let head_revision = super::catalog_head_revision_v1(&committed_head_bytes);
     Ok(PublishedCatalogSuccessorClosureV1 {
         committed_head_bytes,
@@ -3810,8 +4297,10 @@ async fn publish_catalog_successor_closure_v1(
 ///
 /// Every unchanged entry comes from the retained semantic predecessor; every
 /// changed entry comes from terminal applied evidence. Immutable page/root
-/// collisions and ambiguous HEAD writes are accepted only after exact bounded
-/// rereads. Failure retains the complete capability and applied prefix.
+/// collisions are accepted only after exact bounded rereads. Mutable HEAD
+/// success additionally requires the matching storage-fence receipt; a raw
+/// reread cannot redeem backend rejection. Failure retains the complete
+/// capability and applied prefix.
 pub(crate) async fn finalize_catalog_committed_head_v1<'a>(
     applied: AppliedCatalogNamespaceMutationsV1<'a>,
 ) -> Result<BoundCommittedCatalogSuccessorV1, FailedCatalogCommittedFinalizationV1<'a>> {
@@ -4123,8 +4612,11 @@ async fn classify_catalog_committed_recovery_state_v1(
 ///
 /// An exact still-publishing HEAD resumes idempotent page/root publication and
 /// CAS. An exact committed successor is reconstructed through every immutable
-/// root/page reference and every named-object binding before being accepted.
-/// Any third state retains the complete applied evidence and fails closed.
+/// root/page reference and every named-object binding, then replays the exact
+/// terminal fenced-write request to obtain its authenticated backend receipt.
+/// The raw committed closure is never sufficient by itself. Any third state or
+/// missing fenced receipt retains the complete applied evidence and fails
+/// closed.
 pub(crate) async fn recover_failed_catalog_committed_finalization_v1<'a>(
     failure: FailedCatalogCommittedFinalizationV1<'a>,
 ) -> Result<BoundCommittedCatalogSuccessorV1, FailedCatalogCommittedFinalizationV1<'a>> {
@@ -4134,6 +4626,23 @@ pub(crate) async fn recover_failed_catalog_committed_finalization_v1<'a>(
             finalize_catalog_committed_head_v1(applied).await
         }
         Ok(CatalogCommittedRecoveryStateV1::Committed(published)) => {
+            let replayed_binding = match execute_and_revalidate_catalog_committed_head_v1(
+                &applied.capability,
+                &published.committed_head_bytes,
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(error) => return Err(FailedCatalogCommittedFinalizationV1 { applied, error }),
+            };
+            if replayed_binding != published.committed_head_binding {
+                return Err(FailedCatalogCommittedFinalizationV1 {
+                    applied,
+                    error: anyhow::anyhow!(
+                        "replayed terminal fenced receipt crossed the classified committed binding"
+                    ),
+                });
+            }
             Ok(bind_committed_catalog_successor_v1(applied, published))
         }
         Err(error) => Err(FailedCatalogCommittedFinalizationV1 { applied, error }),
@@ -4162,6 +4671,8 @@ pub(crate) struct BoundCommittedCatalogSuccessorV1 {
 /// There is intentionally no production constructor in this checkpoint.
 pub(crate) struct TrustedCatalogHighWaterAdvanceReceiptV1 {
     control_binding: CatalogControlAcquisitionBindingV1,
+    writer_fence_authority_revision_fingerprint: [u8; 32],
+    writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
     pending_revision: CatalogControlAuthorityRevisionV1,
     publishing_head_reservation_fingerprint: [u8; 32],
     pending_control_record_fingerprint: [u8; 32],
@@ -4172,6 +4683,8 @@ pub(crate) struct TrustedCatalogHighWaterAdvanceReceiptV1 {
 
 struct CatalogControlReadyAdvanceRequestV1 {
     control_binding: CatalogControlAcquisitionBindingV1,
+    writer_fence_authority_revision_fingerprint: [u8; 32],
+    writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
     pending_revision: CatalogControlAuthorityRevisionV1,
     publishing_head_reservation_fingerprint: [u8; 32],
     pending_control_record_fingerprint: [u8; 32],
@@ -4677,10 +5190,10 @@ pub(crate) fn prepare_catalog_control_transition_v1<'a>(
 /// Bind an externally authenticated `Ready -> PublicationPending` CAS receipt
 /// to the exact proposed successor. Field equality is necessary but not a
 /// production liveness proof; only the future backend may construct `receipt`.
-pub(crate) fn match_catalog_publication_pending_receipt_v1<'a>(
-    transition: PreparedCatalogControlTransitionV1<'a>,
-    receipt: TrustedCatalogPublicationPendingReceiptV1,
-) -> Result<BoundPendingCatalogControlV1<'a>, CatalogPublicationContractErrorV1> {
+fn validate_catalog_publication_pending_receipt_v1(
+    transition: &PreparedCatalogControlTransitionV1<'_>,
+    receipt: &TrustedCatalogPublicationPendingReceiptV1,
+) -> Result<(), CatalogPublicationContractErrorV1> {
     require_held_control_lease_live_v1(&transition.publication.control_guard)?;
     let binding = &transition.publication.control_guard.high_water.binding;
     let expected_publishing_bytes =
@@ -4696,10 +5209,14 @@ pub(crate) fn match_catalog_publication_pending_receipt_v1<'a>(
     );
     let control_fingerprint =
         super::domain_object_id_v1(CATALOG_CONTROL_RECORD_DOMAIN_V1, &expected_control_bytes);
+    let writers = &transition.publication.control_guard.all_writers;
     if receipt.control_binding != *binding
         || receipt.pending_revision != transition.pending_revision
         || receipt.publishing_head_reservation_fingerprint
             != transition.publishing_head_reservation_fingerprint
+        || receipt.writer_fence_authority_revision_fingerprint
+            != writers.authority_revision_fingerprint
+        || receipt.writer_fence_lease_public_fingerprint != writers.lease_public_fingerprint
         || receipt.pending_control_record_fingerprint
             != transition.pending_control_record_fingerprint
         || transition.canonical_publishing_head_bytes != expected_publishing_bytes
@@ -4709,10 +5226,125 @@ pub(crate) fn match_catalog_publication_pending_receipt_v1<'a>(
     {
         return Err(CatalogPublicationContractErrorV1::ControlTransitionMismatch);
     }
+    Ok(())
+}
+
+pub(crate) fn match_catalog_publication_pending_receipt_v1<'a>(
+    transition: PreparedCatalogControlTransitionV1<'a>,
+    receipt: TrustedCatalogPublicationPendingReceiptV1,
+) -> Result<BoundPendingCatalogControlV1<'a>, CatalogPublicationContractErrorV1> {
+    validate_catalog_publication_pending_receipt_v1(&transition, &receipt)?;
     Ok(BoundPendingCatalogControlV1 {
         transition,
         pending_receipt: receipt,
     })
+}
+
+/// Failed authenticated Ready-to-Pending installation retaining the exact
+/// proposal and opaque backend acquisition for exact retry.
+pub(crate) struct FailedCatalogPublicationPendingInstallV1<'a> {
+    transition: PreparedCatalogControlTransitionV1<'a>,
+    error: anyhow::Error,
+}
+
+impl std::fmt::Debug for FailedCatalogPublicationPendingInstallV1<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FailedCatalogPublicationPendingInstallV1")
+            .field("pending_revision", &self.transition.pending_revision)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for FailedCatalogPublicationPendingInstallV1<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if formatter.alternate() {
+            write!(formatter, "{:#}", self.error)
+        } else {
+            std::fmt::Display::fmt(&self.error, formatter)
+        }
+    }
+}
+
+impl std::error::Error for FailedCatalogPublicationPendingInstallV1<'_> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+/// Ask the retained authenticated backend to atomically install the exact
+/// PublicationPending control record that arms this fence epoch.
+///
+/// The opaque backend token never crosses this API. A successful receipt is
+/// regenerated and matched before the proposal can reach catalog HEAD. An
+/// ambiguous backend outcome remains retryable through the retained failure.
+pub(crate) async fn install_catalog_publication_pending_v1<'a>(
+    transition: PreparedCatalogControlTransitionV1<'a>,
+) -> Result<BoundPendingCatalogControlV1<'a>, FailedCatalogPublicationPendingInstallV1<'a>> {
+    let result = async {
+        require_held_control_lease_live_v1(&transition.publication.control_guard)
+            .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+        let writers = &transition.publication.control_guard.all_writers;
+        let request = CatalogControlPendingRequestV1 {
+            control_binding: transition
+                .publication
+                .control_guard
+                .high_water
+                .binding
+                .clone(),
+            pending_revision: transition.pending_revision,
+            publishing_head_reservation_fingerprint: transition
+                .publishing_head_reservation_fingerprint,
+            writer_fence_authority_revision_fingerprint: writers.authority_revision_fingerprint,
+            writer_fence_lease_public_fingerprint: writers.lease_public_fingerprint,
+            canonical_pending_control_record_bytes: transition
+                .canonical_pending_control_record_bytes
+                .clone(),
+            pending_control_record_fingerprint: transition.pending_control_record_fingerprint,
+        };
+        let receipt = transition
+            .publication
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .liveness
+            .compare_and_swap_pending_v1(request)
+            .await
+            .context("installing authenticated catalog PublicationPending control state")?;
+        require_held_control_lease_live_v1(&transition.publication.control_guard)
+            .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
+        Ok::<_, anyhow::Error>(receipt)
+    }
+    .await;
+    match result {
+        Ok(receipt) => {
+            if let Err(error) =
+                validate_catalog_publication_pending_receipt_v1(&transition, &receipt)
+            {
+                return Err(FailedCatalogPublicationPendingInstallV1 {
+                    transition,
+                    error: anyhow::anyhow!("external pending receipt mismatch: {error:?}"),
+                });
+            }
+            Ok(BoundPendingCatalogControlV1 {
+                transition,
+                pending_receipt: receipt,
+            })
+        }
+        Err(error) => Err(FailedCatalogPublicationPendingInstallV1 { transition, error }),
+    }
+}
+
+/// Retry an ambiguous Pending installation with the exact retained proposal.
+pub(crate) async fn recover_failed_catalog_publication_pending_v1<'a>(
+    failure: FailedCatalogPublicationPendingInstallV1<'a>,
+) -> Result<BoundPendingCatalogControlV1<'a>, FailedCatalogPublicationPendingInstallV1<'a>> {
+    let FailedCatalogPublicationPendingInstallV1 {
+        transition,
+        error: _,
+    } = failure;
+    install_catalog_publication_pending_v1(transition).await
 }
 
 fn validate_catalog_high_water_advance_receipt_v1(
@@ -4776,6 +5408,13 @@ fn validate_catalog_high_water_advance_receipt_v1(
         || committed_revision != committed.head_revision
         || mutable_head_etag_v1(&committed.committed_head_binding).is_none()
         || receipt.control_binding != *control_binding
+        || receipt.writer_fence_authority_revision_fingerprint
+            != committed
+                .control_guard
+                .all_writers
+                .authority_revision_fingerprint
+        || receipt.writer_fence_lease_public_fingerprint
+            != committed.control_guard.all_writers.lease_public_fingerprint
         || receipt.pending_revision != committed.pending_revision
         || receipt.publishing_head_reservation_fingerprint
             != committed.publishing_head_reservation_fingerprint
@@ -4869,6 +5508,14 @@ pub(crate) async fn advance_catalog_high_water_v1(
         );
         let preview = TrustedCatalogHighWaterAdvanceReceiptV1 {
             control_binding: committed.control_guard.high_water.binding.clone(),
+            writer_fence_authority_revision_fingerprint: committed
+                .control_guard
+                .all_writers
+                .authority_revision_fingerprint,
+            writer_fence_lease_public_fingerprint: committed
+                .control_guard
+                .all_writers
+                .lease_public_fingerprint,
             pending_revision: committed.pending_revision,
             publishing_head_reservation_fingerprint: committed
                 .publishing_head_reservation_fingerprint,
@@ -4881,6 +5528,14 @@ pub(crate) async fn advance_catalog_high_water_v1(
             .map_err(|error| anyhow::anyhow!("invalid high-water proposal: {error:?}"))?;
         let request = CatalogControlReadyAdvanceRequestV1 {
             control_binding: committed.control_guard.high_water.binding.clone(),
+            writer_fence_authority_revision_fingerprint: committed
+                .control_guard
+                .all_writers
+                .authority_revision_fingerprint,
+            writer_fence_lease_public_fingerprint: committed
+                .control_guard
+                .all_writers
+                .lease_public_fingerprint,
             pending_revision: committed.pending_revision,
             publishing_head_reservation_fingerprint: committed
                 .publishing_head_reservation_fingerprint,
@@ -5128,13 +5783,354 @@ mod tests {
     use crate::registered_source_composition::validated_selected_registered_root_remote_context_for_test_v1;
     use tcfs_core::config::RootSpecV1Config;
 
-    struct TestCatalogControlLeaseLivenessV1 {
-        live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    struct TestCatalogFencePendingV1 {
+        control_binding: CatalogControlAcquisitionBindingV1,
+        pending_revision: CatalogControlAuthorityRevisionV1,
+        pending_control_record_fingerprint: [u8; 32],
+        publishing_head_reservation_fingerprint: [u8; 32],
+        writer_fence_authority_revision_fingerprint: [u8; 32],
+        writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
+        mutation_count: Option<u64>,
+        next_ordinal: u64,
+        receipts: BTreeMap<u64, ([u8; 32], RegisteredRootRemoteObjectBindingV1)>,
     }
 
-    impl CatalogControlLeaseLivenessV1 for TestCatalogControlLeaseLivenessV1 {
+    struct TestCatalogReadyRequestV1 {
+        control_binding: CatalogControlAcquisitionBindingV1,
+        writer_fence_authority_revision_fingerprint: [u8; 32],
+        writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
+        pending_revision: CatalogControlAuthorityRevisionV1,
+        publishing_head_reservation_fingerprint: [u8; 32],
+        pending_control_record_fingerprint: [u8; 32],
+        canonical_pending_control_record_bytes: Vec<u8>,
+        successor: CatalogHighWaterPointV1,
+        ready_revision: CatalogControlAuthorityRevisionV1,
+        canonical_ready_control_record_bytes: Vec<u8>,
+        ready_control_record_fingerprint: [u8; 32],
+    }
+
+    impl TestCatalogReadyRequestV1 {
+        fn from_request(request: &CatalogControlReadyAdvanceRequestV1) -> Self {
+            Self {
+                control_binding: request.control_binding.clone(),
+                writer_fence_authority_revision_fingerprint: request
+                    .writer_fence_authority_revision_fingerprint,
+                writer_fence_lease_public_fingerprint: request
+                    .writer_fence_lease_public_fingerprint,
+                pending_revision: request.pending_revision,
+                publishing_head_reservation_fingerprint: request
+                    .publishing_head_reservation_fingerprint,
+                pending_control_record_fingerprint: request.pending_control_record_fingerprint,
+                canonical_pending_control_record_bytes: request
+                    .canonical_pending_control_record_bytes
+                    .clone(),
+                successor: request.successor,
+                ready_revision: request.ready_revision,
+                canonical_ready_control_record_bytes: request
+                    .canonical_ready_control_record_bytes
+                    .clone(),
+                ready_control_record_fingerprint: request.ready_control_record_fingerprint,
+            }
+        }
+
+        fn matches_request(&self, request: &CatalogControlReadyAdvanceRequestV1) -> bool {
+            self.control_binding == request.control_binding
+                && self.writer_fence_authority_revision_fingerprint
+                    == request.writer_fence_authority_revision_fingerprint
+                && self.writer_fence_lease_public_fingerprint
+                    == request.writer_fence_lease_public_fingerprint
+                && self.pending_revision == request.pending_revision
+                && self.publishing_head_reservation_fingerprint
+                    == request.publishing_head_reservation_fingerprint
+                && self.pending_control_record_fingerprint
+                    == request.pending_control_record_fingerprint
+                && self.canonical_pending_control_record_bytes
+                    == request.canonical_pending_control_record_bytes
+                && self.successor == request.successor
+                && self.ready_revision == request.ready_revision
+                && self.canonical_ready_control_record_bytes
+                    == request.canonical_ready_control_record_bytes
+                && self.ready_control_record_fingerprint == request.ready_control_record_fingerprint
+        }
+    }
+
+    fn test_ready_receipt_v1(
+        request: CatalogControlReadyAdvanceRequestV1,
+    ) -> TrustedCatalogHighWaterAdvanceReceiptV1 {
+        TrustedCatalogHighWaterAdvanceReceiptV1 {
+            control_binding: request.control_binding,
+            writer_fence_authority_revision_fingerprint: request
+                .writer_fence_authority_revision_fingerprint,
+            writer_fence_lease_public_fingerprint: request.writer_fence_lease_public_fingerprint,
+            pending_revision: request.pending_revision,
+            publishing_head_reservation_fingerprint: request
+                .publishing_head_reservation_fingerprint,
+            pending_control_record_fingerprint: request.pending_control_record_fingerprint,
+            successor: request.successor,
+            ready_revision: request.ready_revision,
+            ready_control_record_fingerprint: request.ready_control_record_fingerprint,
+        }
+    }
+
+    #[derive(Default)]
+    struct TestCatalogFenceStateV1 {
+        pending: Option<TestCatalogFencePendingV1>,
+        ready: Option<TestCatalogReadyRequestV1>,
+    }
+
+    struct TestCatalogMonotonicFenceLeaseV1 {
+        live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        revoke_before_next_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        fail_after_next_backend_apply: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        state: std::sync::Arc<tokio::sync::Mutex<TestCatalogFenceStateV1>>,
+    }
+
+    impl CatalogMonotonicFenceLeaseV1 for TestCatalogMonotonicFenceLeaseV1 {
         fn is_live_v1(&self) -> bool {
             self.live.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn compare_and_swap_pending_v1<'a>(
+            &'a self,
+            request: CatalogControlPendingRequestV1,
+        ) -> CatalogControlPendingFutureV1<'a> {
+            Box::pin(async move {
+                anyhow::ensure!(self.is_live_v1(), "test catalog control lease is not live");
+                anyhow::ensure!(
+                    request.pending_revision.generation.get()
+                        == request
+                            .control_binding
+                            .ready_revision
+                            .generation
+                            .get()
+                            .checked_add(1)
+                            .context("test pending control generation overflow")?
+                        && request.pending_revision.fingerprint != [0; 32]
+                        && request.pending_revision.fingerprint
+                            != request.control_binding.ready_revision.fingerprint
+                        && request.publishing_head_reservation_fingerprint != [0; 32]
+                        && request.writer_fence_authority_revision_fingerprint != [0; 32]
+                        && request.writer_fence_lease_public_fingerprint.0 != [0; 32]
+                        && super::super::domain_object_id_v1(
+                            CATALOG_CONTROL_RECORD_DOMAIN_V1,
+                            &request.canonical_pending_control_record_bytes,
+                        ) == request.pending_control_record_fingerprint,
+                    "test pending control request is invalid"
+                );
+                let mut state = self.state.lock().await;
+                anyhow::ensure!(
+                    state.ready.is_none(),
+                    "test catalog control state already advanced to Ready"
+                );
+                let newly_applied = state.pending.is_none();
+                if let Some(pending) = &state.pending {
+                    anyhow::ensure!(
+                        pending.control_binding == request.control_binding
+                            && pending.pending_revision == request.pending_revision
+                            && pending.pending_control_record_fingerprint
+                                == request.pending_control_record_fingerprint
+                            && pending.publishing_head_reservation_fingerprint
+                                == request.publishing_head_reservation_fingerprint
+                            && pending.writer_fence_authority_revision_fingerprint
+                                == request.writer_fence_authority_revision_fingerprint
+                            && pending.writer_fence_lease_public_fingerprint
+                                == request.writer_fence_lease_public_fingerprint,
+                        "test pending control ordinal was reused by another proposal"
+                    );
+                } else {
+                    state.pending = Some(TestCatalogFencePendingV1 {
+                        control_binding: request.control_binding.clone(),
+                        pending_revision: request.pending_revision,
+                        pending_control_record_fingerprint: request
+                            .pending_control_record_fingerprint,
+                        publishing_head_reservation_fingerprint: request
+                            .publishing_head_reservation_fingerprint,
+                        writer_fence_authority_revision_fingerprint: request
+                            .writer_fence_authority_revision_fingerprint,
+                        writer_fence_lease_public_fingerprint: request
+                            .writer_fence_lease_public_fingerprint,
+                        mutation_count: None,
+                        next_ordinal: 0,
+                        receipts: BTreeMap::new(),
+                    });
+                }
+                if newly_applied
+                    && self
+                        .fail_after_next_backend_apply
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    anyhow::bail!(
+                        "simulated test backend failure after applying pending control state"
+                    );
+                }
+                Ok(TrustedCatalogPublicationPendingReceiptV1 {
+                    control_binding: request.control_binding,
+                    pending_revision: request.pending_revision,
+                    publishing_head_reservation_fingerprint: request
+                        .publishing_head_reservation_fingerprint,
+                    writer_fence_authority_revision_fingerprint: request
+                        .writer_fence_authority_revision_fingerprint,
+                    writer_fence_lease_public_fingerprint: request
+                        .writer_fence_lease_public_fingerprint,
+                    pending_control_record_fingerprint: request.pending_control_record_fingerprint,
+                })
+            })
+        }
+
+        fn write_fenced_v1<'a>(
+            &'a self,
+            request: CatalogFencedStorageWriteRequestV1,
+        ) -> CatalogFencedStorageWriteFutureV1<'a> {
+            Box::pin(async move {
+                let mut state = self.state.lock().await;
+                if self
+                    .revoke_before_next_write
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.live.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                anyhow::ensure!(self.is_live_v1(), "test catalog control lease is not live");
+                anyhow::ensure!(
+                    state.ready.is_none()
+                        && catalog_fenced_storage_write_request_fingerprint_v1(
+                            &catalog_fenced_storage_write_request_wire_v1(&request),
+                        )? == request.request_fingerprint
+                        && u64::try_from(request.successor_raw_bytes.len()).ok()
+                            == Some(request.successor_raw_bytes_len.get())
+                        && *blake3::hash(&request.successor_raw_bytes).as_bytes()
+                            == request.successor_raw_blake3,
+                    "test fenced-storage request is invalid"
+                );
+                let pending = state
+                    .pending
+                    .as_mut()
+                    .context("test fenced storage write has no installed pending control state")?;
+                anyhow::ensure!(
+                    pending.control_binding == request.control_binding
+                        && pending.pending_revision == request.pending_revision
+                        && pending.pending_control_record_fingerprint
+                            == request.pending_control_record_fingerprint
+                        && pending.writer_fence_authority_revision_fingerprint
+                            == request.writer_fence_authority_revision_fingerprint
+                        && pending.writer_fence_lease_public_fingerprint
+                            == request.writer_fence_lease_public_fingerprint,
+                    "test fenced-storage request crossed its pending control state"
+                );
+                if let Some((known_fingerprint, known_binding)) =
+                    pending.receipts.get(&request.ordinal)
+                {
+                    anyhow::ensure!(
+                        *known_fingerprint == request.request_fingerprint,
+                        "test fenced-storage ordinal was reused by another request"
+                    );
+                    return Ok(CatalogFencedStorageWriteReceiptV1 {
+                        control_binding: request.control_binding,
+                        pending_revision: request.pending_revision,
+                        pending_control_record_fingerprint: request
+                            .pending_control_record_fingerprint,
+                        ordinal: request.ordinal,
+                        request_fingerprint: request.request_fingerprint,
+                        binding: known_binding.clone(),
+                    });
+                }
+                if let Some(mutation_count) = pending.mutation_count {
+                    anyhow::ensure!(
+                        mutation_count == request.mutation_count,
+                        "test fenced-storage request changed its mutation count"
+                    );
+                } else {
+                    anyhow::ensure!(
+                        request.ordinal == 0
+                            && request.stage == CatalogFencedStorageWriteStageV1::PublishingHead,
+                        "test fenced-storage sequence must start with publishing HEAD"
+                    );
+                    pending.mutation_count = Some(request.mutation_count);
+                }
+                let committed_ordinal = request
+                    .mutation_count
+                    .checked_add(1)
+                    .context("test fenced-storage committed ordinal overflow")?;
+                anyhow::ensure!(
+                    request.ordinal == pending.next_ordinal
+                        && match request.stage {
+                            CatalogFencedStorageWriteStageV1::PublishingHead => {
+                                request.ordinal == 0
+                            }
+                            CatalogFencedStorageWriteStageV1::CommittedHead => {
+                                request.ordinal == committed_ordinal
+                            }
+                            namespace_stage => {
+                                namespace_stage.namespace_kind().is_some()
+                                    && request.ordinal >= 1
+                                    && request.ordinal <= request.mutation_count
+                            }
+                        },
+                    "test fenced-storage request skipped or reordered an ordinal"
+                );
+                let write_result = match &request.condition {
+                    CatalogFencedStorageWriteConditionV1::CreateIfAbsent => {
+                        request
+                            .operator
+                            .write_with(&request.object_key, request.successor_raw_bytes.clone())
+                            .if_not_exists(true)
+                            .await
+                    }
+                    CatalogFencedStorageWriteConditionV1::ReplaceIfMatch { etag } => {
+                        request
+                            .operator
+                            .write_with(&request.object_key, request.successor_raw_bytes.clone())
+                            .if_match(etag)
+                            .await
+                    }
+                };
+                write_result.with_context(|| {
+                    format!(
+                        "test storage fence rejected catalog ordinal {}",
+                        request.ordinal
+                    )
+                })?;
+                let observed = read_raw_object_snapshot_v1(
+                    &request.operator,
+                    &request.object_key,
+                    request.successor_raw_bytes_len.get(),
+                )
+                .await
+                .context("test storage fence rereading exact successor")?;
+                let Some(RawObjectReadV1::Bound(observed)) = observed else {
+                    anyhow::bail!("test storage fence successor is missing or unbound");
+                };
+                let (raw_bytes, raw_blake3, binding) = observed.into_parts();
+                anyhow::ensure!(
+                    raw_bytes.as_slice() == request.successor_raw_bytes.as_ref()
+                        && *raw_blake3.as_bytes() == request.successor_raw_blake3,
+                    "test storage fence successor differs from its request"
+                );
+                let binding = registered_binding_from_raw_v1(binding);
+                pending.receipts.insert(
+                    request.ordinal,
+                    (request.request_fingerprint, binding.clone()),
+                );
+                pending.next_ordinal = pending
+                    .next_ordinal
+                    .checked_add(1)
+                    .context("test fenced-storage ordinal overflow")?;
+                if self
+                    .fail_after_next_backend_apply
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    anyhow::bail!(
+                        "simulated test backend failure after applying fenced storage mutation"
+                    );
+                }
+                Ok(CatalogFencedStorageWriteReceiptV1 {
+                    control_binding: request.control_binding,
+                    pending_revision: request.pending_revision,
+                    pending_control_record_fingerprint: request.pending_control_record_fingerprint,
+                    ordinal: request.ordinal,
+                    request_fingerprint: request.request_fingerprint,
+                    binding,
+                })
+            })
         }
 
         fn compare_and_swap_ready_v1<'a>(
@@ -5154,16 +6150,48 @@ mod tests {
                         ) == request.ready_control_record_fingerprint,
                     "test control CAS request contains an invalid canonical record"
                 );
-                Ok(TrustedCatalogHighWaterAdvanceReceiptV1 {
-                    control_binding: request.control_binding,
-                    pending_revision: request.pending_revision,
-                    publishing_head_reservation_fingerprint: request
-                        .publishing_head_reservation_fingerprint,
-                    pending_control_record_fingerprint: request.pending_control_record_fingerprint,
-                    successor: request.successor,
-                    ready_revision: request.ready_revision,
-                    ready_control_record_fingerprint: request.ready_control_record_fingerprint,
-                })
+                let mut state = self.state.lock().await;
+                if let Some(ready) = &state.ready {
+                    anyhow::ensure!(
+                        ready.matches_request(&request),
+                        "test Ready control ordinal was reused by another proposal"
+                    );
+                    return Ok(test_ready_receipt_v1(request));
+                }
+                let pending = state
+                    .pending
+                    .as_ref()
+                    .context("test Ready advance has no installed pending control state")?;
+                let mutation_count = pending
+                    .mutation_count
+                    .context("test Ready advance has no fenced storage sequence")?;
+                anyhow::ensure!(
+                    pending.control_binding == request.control_binding
+                        && pending.pending_revision == request.pending_revision
+                        && pending.pending_control_record_fingerprint
+                            == request.pending_control_record_fingerprint
+                        && pending.publishing_head_reservation_fingerprint
+                            == request.publishing_head_reservation_fingerprint
+                        && pending.writer_fence_authority_revision_fingerprint
+                            == request.writer_fence_authority_revision_fingerprint
+                        && pending.writer_fence_lease_public_fingerprint
+                            == request.writer_fence_lease_public_fingerprint
+                        && pending.next_ordinal
+                            == mutation_count
+                                .checked_add(2)
+                                .context("test Ready terminal ordinal overflow")?,
+                    "test Ready advance does not follow the complete fenced storage sequence"
+                );
+                state.ready = Some(TestCatalogReadyRequestV1::from_request(&request));
+                if self
+                    .fail_after_next_backend_apply
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    anyhow::bail!(
+                        "simulated test backend failure after applying Ready control state"
+                    );
+                }
+                Ok(test_ready_receipt_v1(request))
             })
         }
     }
@@ -5211,6 +6239,30 @@ mod tests {
     );
     static_assertions::assert_not_impl_any!(
         RetainedCatalogControlLeaseV1: Clone,
+        serde::Serialize,
+        Default
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogFencedStorageWriteRequestV1: Clone,
+        serde::Serialize,
+        Default,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogFencedStorageWriteReceiptV1: Clone,
+        serde::Serialize,
+        Default,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogControlPendingRequestV1: Clone,
+        serde::Serialize,
+        Default
+    );
+    static_assertions::assert_not_impl_any!(
+        CatalogControlReadyAdvanceRequestV1: Clone,
         serde::Serialize,
         Default
     );
@@ -5327,6 +6379,14 @@ mod tests {
         BoundPendingCatalogControlV1<'static>: Clone,
         serde::Serialize,
         Default,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        FailedCatalogPublicationPendingInstallV1<'static>: Clone,
+        serde::Serialize,
+        Default,
+        Into<BoundPendingCatalogControlV1<'static>>,
         Into<crate::reconcile::ReconcilePlan>,
         Into<Vec<crate::reconcile::ReconcileAction>>
     );
@@ -5519,16 +6579,27 @@ mod tests {
             AllNamespaceWritersFencedLeaseV1 {
                 retained_control_lease: {
                     let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    let revoke_before_next_write =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let fail_after_next_backend_apply =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     RetainedCatalogControlLeaseV1 {
                         control_binding: control_binding.clone(),
                         writer_fence_authority_revision_fingerprint: [0x89; 32],
                         writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1(
                             [0x88; 32],
                         ),
-                        liveness: Box::new(TestCatalogControlLeaseLivenessV1 {
+                        liveness: Box::new(TestCatalogMonotonicFenceLeaseV1 {
                             live: live.clone(),
+                            revoke_before_next_write: revoke_before_next_write.clone(),
+                            fail_after_next_backend_apply: fail_after_next_backend_apply.clone(),
+                            state: std::sync::Arc::new(tokio::sync::Mutex::new(
+                                TestCatalogFenceStateV1::default(),
+                            )),
                         }),
                         test_live: live,
+                        test_revoke_before_next_write: revoke_before_next_write,
+                        test_fail_after_next_backend_apply: fail_after_next_backend_apply,
                     }
                 },
                 control_binding,
@@ -5649,6 +6720,16 @@ mod tests {
             pending_revision: transition.pending_revision,
             publishing_head_reservation_fingerprint: transition
                 .publishing_head_reservation_fingerprint,
+            writer_fence_authority_revision_fingerprint: transition
+                .publication
+                .control_guard
+                .all_writers
+                .authority_revision_fingerprint,
+            writer_fence_lease_public_fingerprint: transition
+                .publication
+                .control_guard
+                .all_writers
+                .lease_public_fingerprint,
             pending_control_record_fingerprint: transition.pending_control_record_fingerprint,
         }
     }
@@ -5662,11 +6743,11 @@ mod tests {
         match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap()
     }
 
-    async fn authoritative_bound_pending<'a>(
+    async fn authoritative_control_transition<'a>(
         fixture: &'a SemanticRemoteCatalogFixtureV1,
         corpus: &SemanticallyBoundRemoteCatalogCorpusV1,
         observed: &ObservedPublishedCatalogHeadV1,
-    ) -> BoundPendingCatalogControlV1<'a> {
+    ) -> PreparedCatalogControlTransitionV1<'a> {
         let publication_nonce = [0x44; 32];
         let prerequisites = matched(fixture, observed);
         let successor_bytes = deleted_index_bytes();
@@ -5705,9 +6786,18 @@ mod tests {
             journal,
         )
         .unwrap();
-        let transition = prepare_catalog_control_transition_v1(publication, [0xac; 32]).unwrap();
-        let receipt = pending_receipt(&transition);
-        match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap()
+        prepare_catalog_control_transition_v1(publication, [0xac; 32]).unwrap()
+    }
+
+    async fn authoritative_bound_pending<'a>(
+        fixture: &'a SemanticRemoteCatalogFixtureV1,
+        corpus: &SemanticallyBoundRemoteCatalogCorpusV1,
+        observed: &ObservedPublishedCatalogHeadV1,
+    ) -> BoundPendingCatalogControlV1<'a> {
+        let transition = authoritative_control_transition(fixture, corpus, observed).await;
+        install_catalog_publication_pending_v1(transition)
+            .await
+            .unwrap()
     }
 
     fn committed_successor(
@@ -5754,6 +6844,14 @@ mod tests {
         let ready_bytes = canonical_ready_control_record_bytes_v1(committed, ready_revision);
         TrustedCatalogHighWaterAdvanceReceiptV1 {
             control_binding: committed.control_guard.high_water.binding.clone(),
+            writer_fence_authority_revision_fingerprint: committed
+                .control_guard
+                .all_writers
+                .authority_revision_fingerprint,
+            writer_fence_lease_public_fingerprint: committed
+                .control_guard
+                .all_writers
+                .lease_public_fingerprint,
             pending_revision: committed.pending_revision,
             publishing_head_reservation_fingerprint: committed
                 .publishing_head_reservation_fingerprint,
@@ -5921,13 +7019,30 @@ mod tests {
             .await;
         let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
         let successor_bytes = deleted_index_bytes();
-
-        fixture
-            .operator()
-            .write("roots/index/added.txt", successor_bytes.clone())
-            .await
-            .unwrap();
         let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+        let wire = {
+            let publication = &capability.pending.transition.publication;
+            validate_authoritative_catalog_mutation_journal_bytes_v1(
+                &publication.mutation_journal.raw_bytes,
+                &publication.context,
+                publication.sequence,
+                publication.publication_nonce,
+                publication.parent_head_revision,
+            )
+            .unwrap()
+        };
+        let replayed_first = {
+            let journal = &capability.pending.transition.publication.mutation_journal;
+            apply_one_catalog_namespace_mutation_v1(
+                &capability,
+                1,
+                &wire.mutations[0],
+                &journal.successor_payloads[0],
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(replayed_first.object_key, "roots/index/added.txt");
         let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
             .await
             .unwrap();
@@ -5966,7 +7081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishing_head_cas_is_exact_replay_safe_and_preserves_competitors() {
+    async fn publishing_head_requires_fenced_receipt_and_preserves_competitors() {
         {
             let (fixture, corpus, observed) =
                 observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
@@ -5987,6 +7102,29 @@ mod tests {
                 expected_bytes
             );
             assert!(mutable_head_etag_v1(&capability.publishing_head_binding).is_some());
+            let replay = catalog_fenced_storage_write_request_v1(
+                &capability.pending,
+                CatalogFencedStorageWriteStageV1::PublishingHead,
+                0,
+                "roots/.tcfs-catalog/v1/head".to_owned(),
+                CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
+                    etag: capability
+                        .pending
+                        .transition
+                        .publication
+                        .expected_parent_head_etag
+                        .clone(),
+                },
+                Buffer::from(expected_bytes),
+            )
+            .unwrap();
+            assert_eq!(
+                execute_catalog_fenced_storage_write_v1(&capability.pending, replay)
+                    .await
+                    .unwrap(),
+                capability.publishing_head_binding,
+                "the backend must replay the exact authenticated ordinal receipt"
+            );
         }
 
         {
@@ -6009,10 +7147,20 @@ mod tests {
                 .await
                 .unwrap();
 
-            let capability = install_catalog_publishing_head_v1(pending)
+            let failure = install_catalog_publishing_head_v1(pending)
                 .await
-                .expect("an ambiguous exact replay must recover by bounded reread");
-            assert!(mutable_head_etag_v1(&capability.publishing_head_binding).is_some());
+                .expect_err("raw matching bytes without a fence receipt must not authorize replay");
+            assert!(format!("{failure:#}").contains("test storage fence rejected"));
+            assert_eq!(
+                fixture
+                    .operator()
+                    .read("roots/.tcfs-catalog/v1/head")
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                failure.pending.transition.canonical_publishing_head_bytes,
+                "the rejected raw replay remains visible but cannot mint authority"
+            );
         }
 
         {
@@ -6046,6 +7194,95 @@ mod tests {
                 b"competing head"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn every_backend_transition_recovers_an_apply_before_response_failure() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let transition = authoritative_control_transition(&fixture, &corpus, &observed).await;
+        transition
+            .publication
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_fail_after_next_backend_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = install_catalog_publication_pending_v1(transition)
+            .await
+            .expect_err("pending install must retain an ambiguous applied transition");
+        let pending = recover_failed_catalog_publication_pending_v1(failure)
+            .await
+            .unwrap();
+
+        pending
+            .transition
+            .publication
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_fail_after_next_backend_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = install_catalog_publishing_head_v1(pending)
+            .await
+            .expect_err("publishing HEAD install must retain an ambiguous fenced write");
+        let capability = recover_failed_catalog_publishing_head_install_v1(failure)
+            .await
+            .unwrap();
+
+        capability
+            .pending
+            .transition
+            .publication
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_fail_after_next_backend_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = apply_authoritative_catalog_namespace_mutations_v1(capability)
+            .await
+            .expect_err("namespace application must retain an ambiguous fenced write");
+        let applied = recover_failed_catalog_namespace_mutations_v1(failure)
+            .await
+            .unwrap();
+
+        applied
+            .capability
+            .pending
+            .transition
+            .publication
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_fail_after_next_backend_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = match finalize_catalog_committed_head_v1(applied).await {
+            Err(failure) => failure,
+            Ok(_) => {
+                panic!("committed HEAD finalization must retain an ambiguous fenced write")
+            }
+        };
+        let committed = recover_failed_catalog_committed_finalization_v1(failure)
+            .await
+            .unwrap();
+
+        committed
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_fail_after_next_backend_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = advance_catalog_high_water_v1(committed, [0xad; 32])
+            .await
+            .expect_err("Ready advance must retain an ambiguous applied transition");
+        let advanced = recover_failed_catalog_high_water_advance_v1(failure)
+            .await
+            .unwrap();
+        assert_eq!(advanced.successor.sequence.get(), 2);
+        assert_eq!(advanced.ready_revision.fingerprint, [0xad; 32]);
     }
 
     #[tokio::test]
@@ -6115,8 +7352,9 @@ mod tests {
             prepare_catalog_publication_fence_v1(prerequisites, [0x44; 32], archive, journal)
                 .unwrap();
         let transition = prepare_catalog_control_transition_v1(publication, [0xac; 32]).unwrap();
-        let receipt = pending_receipt(&transition);
-        let pending = match_catalog_publication_pending_receipt_v1(transition, receipt).unwrap();
+        let pending = install_catalog_publication_pending_v1(transition)
+            .await
+            .unwrap();
         let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
         let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
             .await
@@ -6300,37 +7538,31 @@ mod tests {
             .await;
         let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
         let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
-        let (first_kind, first_key, first_bytes, first_blake3) = {
-            let first_payload = &capability
-                .pending
-                .transition
-                .publication
-                .mutation_journal
-                .successor_payloads[0];
-            (
-                first_payload.kind,
-                first_payload.object_key.clone(),
-                first_payload.raw_bytes.current(),
-                first_payload.raw_blake3,
+        let wire = {
+            let publication = &capability.pending.transition.publication;
+            validate_authoritative_catalog_mutation_journal_bytes_v1(
+                &publication.mutation_journal.raw_bytes,
+                &publication.context,
+                publication.sequence,
+                publication.publication_nonce,
+                publication.parent_head_revision,
             )
+            .unwrap()
         };
-        fixture
-            .operator()
-            .write(&first_key, first_bytes.clone())
+        let first_applied = {
+            let journal = &capability.pending.transition.publication.mutation_journal;
+            apply_one_catalog_namespace_mutation_v1(
+                &capability,
+                1,
+                &wire.mutations[0],
+                &journal.successor_payloads[0],
+            )
             .await
-            .unwrap();
-        let first_binding =
-            read_exact_catalog_successor_v1(&capability, first_kind, &first_key, &first_bytes)
-                .await
-                .unwrap();
+            .unwrap()
+        };
         let failure = FailedCatalogNamespaceMutationsV1 {
             capability,
-            applied: vec![AppliedCatalogNamespaceObjectV1 {
-                kind: first_kind,
-                object_key: first_key,
-                raw_blake3: first_blake3,
-                binding: first_binding,
-            }],
+            applied: vec![first_applied],
             error: anyhow::anyhow!("simulated crash after the first canonical mutation"),
         };
         let applied = recover_failed_catalog_namespace_mutations_v1(failure)
@@ -6376,6 +7608,51 @@ mod tests {
         };
         assert_eq!(reread.catalog_sequence().get(), 2);
         assert_eq!(reread.index_object_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn committed_recovery_requires_terminal_fenced_receipt_replay() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+        let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+        let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
+            .await
+            .unwrap();
+        let published = publish_catalog_successor_closure_v1(&applied)
+            .await
+            .unwrap();
+        applied
+            .capability
+            .pending
+            .transition
+            .publication
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_revoke_before_next_write
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = FailedCatalogCommittedFinalizationV1 {
+            applied,
+            error: anyhow::anyhow!("simulated lost terminal fenced-write response"),
+        };
+        let failure = match recover_failed_catalog_committed_finalization_v1(failure).await {
+            Err(failure) => failure,
+            Ok(_) => panic!("raw committed closure must not replace the terminal fenced receipt"),
+        };
+        assert!(format!("{failure:#}").contains("catalog control lease is not live"));
+        assert_eq!(
+            fixture
+                .operator()
+                .read("roots/.tcfs-catalog/v1/head")
+                .await
+                .unwrap()
+                .to_vec(),
+            published.committed_head_bytes
+        );
     }
 
     #[tokio::test]
@@ -6493,7 +7770,7 @@ mod tests {
                 .retained_control_lease
                 .is_live_v1());
             assert!(
-                format!("{error:#}").contains("differs from its authoritative journal"),
+                format!("{error:#}").contains("test storage fence rejected catalog ordinal 1"),
                 "unexpected error: {error:#}"
             );
             assert_eq!(
@@ -6516,6 +7793,134 @@ mod tests {
                 "canonical key ordering must stop before the later replacement"
             );
         }
+
+        {
+            let (fixture, corpus, observed) =
+                observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                    "retained.txt".to_owned(),
+                )])
+                .await;
+            let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+            let exact_successor = deleted_index_bytes();
+            fixture
+                .operator()
+                .write("roots/index/added.txt", exact_successor.clone())
+                .await
+                .unwrap();
+            let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+            let error = apply_authoritative_catalog_namespace_mutations_v1(capability)
+                .await
+                .expect_err(
+                    "matching raw bytes without the fenced ordinal receipt must fail closed",
+                );
+            assert_eq!(error.applied.len(), 0);
+            assert!(
+                format!("{error:#}").contains("test storage fence rejected catalog ordinal 1"),
+                "unexpected error: {error:#}"
+            );
+            assert_eq!(
+                fixture
+                    .operator()
+                    .read("roots/index/added.txt")
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                exact_successor,
+                "raw exact bytes stay visible but cannot mint mutation evidence"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_fence_revocation_at_backend_boundary_has_zero_side_effect() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+        assert!(
+            pending
+                .transition
+                .publication
+                .control_guard
+                .all_writers
+                .retained_control_lease
+                .is_live_v1(),
+            "the advisory precheck must pass before the backend-side revocation hook"
+        );
+        pending
+            .transition
+            .publication
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_revoke_before_next_write
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let failure = install_catalog_publishing_head_v1(pending)
+            .await
+            .expect_err("backend-side revocation must reject before catalog HEAD mutation");
+        assert!(format!("{failure:#}").contains("test catalog control lease is not live"));
+        assert_eq!(
+            fixture
+                .operator()
+                .read("roots/.tcfs-catalog/v1/head")
+                .await
+                .unwrap()
+                .to_vec(),
+            observed.committed_head_bytes,
+            "a precheck/backend race must leave the mutable HEAD byte-exact"
+        );
+        assert!(!fixture
+            .operator()
+            .exists("roots/index/added.txt")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn storage_fence_rejects_crossed_writer_identity_before_io() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let pending = authoritative_bound_pending(&fixture, &corpus, &observed).await;
+        let mut request = catalog_fenced_storage_write_request_v1(
+            &pending,
+            CatalogFencedStorageWriteStageV1::PublishingHead,
+            0,
+            "roots/.tcfs-catalog/v1/head".to_owned(),
+            CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
+                etag: pending
+                    .transition
+                    .publication
+                    .expected_parent_head_etag
+                    .clone(),
+            },
+            Buffer::from(pending.transition.canonical_publishing_head_bytes.clone()),
+        )
+        .unwrap();
+        request.writer_fence_authority_revision_fingerprint = [0x42; 32];
+        request.request_fingerprint = catalog_fenced_storage_write_request_fingerprint_v1(
+            &catalog_fenced_storage_write_request_wire_v1(&request),
+        )
+        .unwrap();
+
+        let error = execute_catalog_fenced_storage_write_v1(&pending, request)
+            .await
+            .expect_err("a different writer-fence identity must not reach storage I/O");
+        assert!(format!("{error:#}").contains("crossed its pending control state"));
+        assert_eq!(
+            fixture
+                .operator()
+                .read("roots/.tcfs-catalog/v1/head")
+                .await
+                .unwrap()
+                .to_vec(),
+            observed.committed_head_bytes
+        );
     }
 
     #[tokio::test]
@@ -7407,6 +8812,16 @@ mod tests {
             pending_revision: transition.pending_revision,
             publishing_head_reservation_fingerprint: transition
                 .publishing_head_reservation_fingerprint,
+            writer_fence_authority_revision_fingerprint: transition
+                .publication
+                .control_guard
+                .all_writers
+                .authority_revision_fingerprint,
+            writer_fence_lease_public_fingerprint: transition
+                .publication
+                .control_guard
+                .all_writers
+                .lease_public_fingerprint,
             pending_control_record_fingerprint: transition.pending_control_record_fingerprint,
         };
         let bound =
