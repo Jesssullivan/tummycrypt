@@ -3133,6 +3133,34 @@ impl std::error::Error for FailedCatalogNamespaceMutationsV1<'_> {
     }
 }
 
+const CATALOG_BUFFER_VALIDATION_CHUNK_BYTES_V1: usize = 64 * 1024;
+
+fn catalog_buffer_blake3_v1(buffer: &Buffer) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for chunk in buffer.chunks(CATALOG_BUFFER_VALIDATION_CHUNK_BYTES_V1) {
+        hasher.update(&chunk.to_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn catalog_buffer_equals_slice_v1(buffer: &Buffer, expected: &[u8]) -> bool {
+    if buffer.len() != expected.len() {
+        return false;
+    }
+    let mut offset = 0;
+    for chunk in buffer.chunks(CATALOG_BUFFER_VALIDATION_CHUNK_BYTES_V1) {
+        let chunk = chunk.to_bytes();
+        let Some(end) = offset.checked_add(chunk.len()) else {
+            return false;
+        };
+        if expected.get(offset..end) != Some(chunk.as_ref()) {
+            return false;
+        }
+        offset = end;
+    }
+    offset == expected.len()
+}
+
 fn catalog_fenced_storage_write_request_fingerprint_v1(
     wire: &CatalogFencedStorageWriteRequestWireV1,
 ) -> AnyhowResult<[u8; 32]> {
@@ -3201,7 +3229,7 @@ fn catalog_fenced_storage_write_request_v1(
             .context("catalog fenced-storage payload length does not fit u64")?,
     )
     .context("catalog fenced-storage payload must not be empty")?;
-    let successor_raw_blake3 = *blake3::hash(&successor_raw_bytes).as_bytes();
+    let successor_raw_blake3 = catalog_buffer_blake3_v1(&successor_raw_bytes);
     let journal_wire = validate_authoritative_catalog_mutation_journal_bytes_v1(
         &journal.raw_bytes,
         &publication.context,
@@ -3226,8 +3254,10 @@ fn catalog_fenced_storage_write_request_v1(
             anyhow::ensure!(
                 ordinal == 0
                     && object_key == head_key
-                    && successor_raw_bytes.as_ref()
-                        == transition.canonical_publishing_head_bytes.as_slice()
+                    && catalog_buffer_equals_slice_v1(
+                        &successor_raw_bytes,
+                        &transition.canonical_publishing_head_bytes,
+                    )
                     && condition
                         == CatalogFencedStorageWriteConditionV1::ReplaceIfMatch {
                             etag: publication.expected_parent_head_etag.clone(),
@@ -3392,7 +3422,7 @@ async fn execute_catalog_fenced_storage_write_v1(
         )? == request.request_fingerprint
             && u64::try_from(request.successor_raw_bytes.len()).ok()
                 == Some(request.successor_raw_bytes_len.get())
-            && *blake3::hash(&request.successor_raw_bytes).as_bytes()
+            && catalog_buffer_blake3_v1(&request.successor_raw_bytes)
                 == request.successor_raw_blake3,
         "catalog fenced-storage request fingerprint or payload identity changed"
     );
@@ -5997,7 +6027,7 @@ mod tests {
                         )? == request.request_fingerprint
                         && u64::try_from(request.successor_raw_bytes.len()).ok()
                             == Some(request.successor_raw_bytes_len.get())
-                        && *blake3::hash(&request.successor_raw_bytes).as_bytes()
+                        && catalog_buffer_blake3_v1(&request.successor_raw_bytes)
                             == request.successor_raw_blake3,
                     "test fenced-storage request is invalid"
                 );
@@ -6101,8 +6131,10 @@ mod tests {
                 };
                 let (raw_bytes, raw_blake3, binding) = observed.into_parts();
                 anyhow::ensure!(
-                    raw_bytes.as_slice() == request.successor_raw_bytes.as_ref()
-                        && *raw_blake3.as_bytes() == request.successor_raw_blake3,
+                    catalog_buffer_equals_slice_v1(
+                        &request.successor_raw_bytes,
+                        raw_bytes.as_slice(),
+                    ) && *raw_blake3.as_bytes() == request.successor_raw_blake3,
                     "test storage fence successor differs from its request"
                 );
                 let binding = registered_binding_from_raw_v1(binding);
