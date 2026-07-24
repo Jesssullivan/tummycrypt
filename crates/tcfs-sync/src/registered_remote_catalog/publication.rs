@@ -23,13 +23,13 @@
 //! so this source path remains unreachable by deployed writers and cannot mint
 //! production authority, produce a plan digest, or authorize an action.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
 
 use anyhow::{Context, Result as AnyhowResult};
-use opendal::Operator;
+use opendal::{Buffer, Operator};
 use serde::{Deserialize, Serialize};
 use tcfs_core::config::{
     RegisteredRootPlanContractFingerprintV1, RegisteredRootPlanContractV1,
@@ -174,6 +174,7 @@ pub(crate) enum CatalogMutationJournalResourceV1 {
     Bytes,
     Mutations,
     KeyBytes,
+    PayloadBytes,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -721,6 +722,26 @@ fn mutation_journal_resource(
     CatalogPublicationContractErrorV1::MutationJournalResource(resource)
 }
 
+fn checked_catalog_mutation_payload_bytes_v1(
+    lengths: impl IntoIterator<Item = u64>,
+) -> Result<u64, CatalogPublicationContractErrorV1> {
+    let total = lengths.into_iter().try_fold(0_u64, |total, length| {
+        total.checked_add(length).ok_or_else(|| {
+            mutation_journal_resource(CatalogMutationJournalResourceV1::PayloadBytes)
+        })
+    })?;
+    if total
+        > RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_catalog_mutation_payload_bytes()
+    {
+        return Err(mutation_journal_resource(
+            CatalogMutationJournalResourceV1::PayloadBytes,
+        ));
+    }
+    Ok(total)
+}
+
 fn binding_has_usable_etag_v1(binding: &RemoteCatalogObjectBindingWireV1) -> bool {
     binding
         .etag
@@ -1147,7 +1168,7 @@ enum TypedCatalogSuccessorSemanticsV1 {
 /// Exact successor bytes parsed into their catalog kind before they can enter
 /// a fact-bound mutation. Fields are private so a raw byte vector cannot
 /// masquerade as a typed successor.
-pub(crate) struct TypedCatalogSuccessorPayloadV1 {
+struct TypedCatalogSuccessorPayloadV1 {
     context: CatalogAuthorityContextV1,
     kind: RemoteCatalogObjectKindV1,
     object_key: String,
@@ -1171,7 +1192,7 @@ impl std::fmt::Debug for TypedCatalogSuccessorPayloadV1 {
 /// Parse one proposed successor through the strict registered-root validator
 /// for its kind. Manifest reference closure is completed only after every
 /// mutation has been applied to the in-memory successor catalog.
-pub(crate) fn type_catalog_successor_payload_v1(
+fn type_catalog_successor_payload_v1(
     corpus: &SemanticallyBoundRemoteCatalogCorpusV1,
     kind: RemoteCatalogObjectKindV1,
     object_key: String,
@@ -1231,7 +1252,7 @@ enum FactBoundCatalogMutationPredecessorV1<'attempt, 'storage> {
 
 /// One final-key mutation whose before fact comes only from the exact semantic
 /// corpus or a same-attempt missing-object witness.
-pub(crate) struct FactBoundCatalogMutationV1<'attempt, 'storage> {
+struct FactBoundCatalogMutationV1<'attempt, 'storage> {
     prerequisites: &'attempt MatchedCatalogPublicationPrerequisitesV1<'storage>,
     predecessor: FactBoundCatalogMutationPredecessorV1<'attempt, 'storage>,
     successor: TypedCatalogSuccessorPayloadV1,
@@ -1249,7 +1270,7 @@ impl std::fmt::Debug for FactBoundCatalogMutationV1<'_, '_> {
 
 /// Derive replacement predecessor identity and binding exclusively from the
 /// semantic corpus. Callers provide only the already-typed successor.
-pub(crate) fn fact_bind_catalog_replacement_v1<'attempt, 'storage>(
+fn fact_bind_catalog_replacement_v1<'attempt, 'storage>(
     prerequisites: &'attempt MatchedCatalogPublicationPrerequisitesV1<'storage>,
     corpus: &SemanticallyBoundRemoteCatalogCorpusV1,
     successor: TypedCatalogSuccessorPayloadV1,
@@ -1278,7 +1299,7 @@ pub(crate) fn fact_bind_catalog_replacement_v1<'attempt, 'storage>(
 }
 
 /// Bind a create to one consumed same-attempt absence witness.
-pub(crate) fn fact_bind_catalog_create_v1<'attempt, 'storage>(
+fn fact_bind_catalog_create_v1<'attempt, 'storage>(
     prerequisites: &'attempt MatchedCatalogPublicationPrerequisitesV1<'storage>,
     corpus: &SemanticallyBoundRemoteCatalogCorpusV1,
     absence: ProvenCatalogObjectAbsenceV1<'attempt, 'storage>,
@@ -1301,6 +1322,148 @@ pub(crate) fn fact_bind_catalog_create_v1<'attempt, 'storage>(
         predecessor: FactBoundCatalogMutationPredecessorV1::Absent(absence),
         successor,
     })
+}
+
+/// Fallible, resource-bounded intake for one authoritative mutation journal.
+///
+/// The private mutation vector is reachable only through the incremental
+/// methods below, so callers cannot hand publication a process-sized batch of
+/// already-retained successor bodies. A rejected addition consumes and drops
+/// only that one candidate body.
+pub(crate) struct AuthoritativeCatalogMutationBatchV1<'attempt, 'storage, 'corpus> {
+    prerequisites: &'attempt MatchedCatalogPublicationPrerequisitesV1<'storage>,
+    corpus: &'corpus SemanticallyBoundRemoteCatalogCorpusV1,
+    keys: BTreeSet<String>,
+    mutation_count: u64,
+    mutation_key_bytes: u64,
+    mutation_payload_bytes: u64,
+    mutations: Vec<FactBoundCatalogMutationV1<'attempt, 'storage>>,
+}
+
+impl std::fmt::Debug for AuthoritativeCatalogMutationBatchV1<'_, '_, '_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthoritativeCatalogMutationBatchV1")
+            .field("mutation_count", &self.mutation_count)
+            .field("mutation_key_bytes", &self.mutation_key_bytes)
+            .field("mutation_payload_bytes", &self.mutation_payload_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn begin_authoritative_catalog_mutation_batch_v1<'attempt, 'storage, 'corpus>(
+    prerequisites: &'attempt MatchedCatalogPublicationPrerequisitesV1<'storage>,
+    corpus: &'corpus SemanticallyBoundRemoteCatalogCorpusV1,
+) -> Result<
+    AuthoritativeCatalogMutationBatchV1<'attempt, 'storage, 'corpus>,
+    CatalogPublicationContractErrorV1,
+> {
+    if !mutation_inputs_match_corpus_v1(prerequisites, corpus) {
+        return Err(CatalogPublicationContractErrorV1::MutationCorpusMismatch);
+    }
+    Ok(AuthoritativeCatalogMutationBatchV1 {
+        prerequisites,
+        corpus,
+        keys: BTreeSet::new(),
+        mutation_count: 0,
+        mutation_key_bytes: 0,
+        mutation_payload_bytes: 0,
+        mutations: Vec::new(),
+    })
+}
+
+impl<'attempt, 'storage> AuthoritativeCatalogMutationBatchV1<'attempt, 'storage, '_> {
+    fn reserve_candidate_v1(
+        &mut self,
+        kind: RemoteCatalogObjectKindV1,
+        object_key: &str,
+        raw_bytes_len: usize,
+    ) -> Result<(u64, u64, u64), CatalogPublicationContractErrorV1> {
+        let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+        let mutation_count = self.mutation_count.checked_add(1).ok_or_else(|| {
+            mutation_journal_resource(CatalogMutationJournalResourceV1::Mutations)
+        })?;
+        if mutation_count > remote.max_catalog_entries_per_page() {
+            return Err(mutation_journal_resource(
+                CatalogMutationJournalResourceV1::Mutations,
+            ));
+        }
+        if self.keys.contains(object_key) {
+            return Err(invalid_mutation_journal(
+                InvalidCatalogMutationJournalReasonV1::Order,
+            ));
+        }
+        let object_key_bytes = u64::try_from(object_key.len())
+            .map_err(|_| mutation_journal_resource(CatalogMutationJournalResourceV1::KeyBytes))?;
+        let mutation_key_bytes = self
+            .mutation_key_bytes
+            .checked_add(object_key_bytes)
+            .ok_or_else(|| mutation_journal_resource(CatalogMutationJournalResourceV1::KeyBytes))?;
+        if mutation_key_bytes > max_catalog_mutation_draft_key_bytes_v1() {
+            return Err(mutation_journal_resource(
+                CatalogMutationJournalResourceV1::KeyBytes,
+            ));
+        }
+        let raw_bytes_len = u64::try_from(raw_bytes_len).map_err(|_| {
+            mutation_journal_resource(CatalogMutationJournalResourceV1::PayloadBytes)
+        })?;
+        if !validate_entry_size_v1(kind, raw_bytes_len) {
+            return Err(CatalogPublicationContractErrorV1::InvalidSuccessorPayload);
+        }
+        let mutation_payload_bytes = checked_catalog_mutation_payload_bytes_v1([
+            self.mutation_payload_bytes,
+            raw_bytes_len,
+        ])?;
+        self.mutations
+            .try_reserve(1)
+            .map_err(|_| mutation_journal_resource(CatalogMutationJournalResourceV1::Mutations))?;
+        Ok((mutation_count, mutation_key_bytes, mutation_payload_bytes))
+    }
+
+    pub(crate) fn try_add_replacement_v1(
+        &mut self,
+        kind: RemoteCatalogObjectKindV1,
+        object_key: String,
+        raw_bytes: Vec<u8>,
+    ) -> Result<(), CatalogPublicationContractErrorV1> {
+        let (mutation_count, mutation_key_bytes, mutation_payload_bytes) =
+            self.reserve_candidate_v1(kind, &object_key, raw_bytes.len())?;
+        let successor =
+            type_catalog_successor_payload_v1(self.corpus, kind, object_key, raw_bytes)?;
+        let mutation =
+            fact_bind_catalog_replacement_v1(self.prerequisites, self.corpus, successor)?;
+        let inserted = self.keys.insert(mutation.successor.object_key.clone());
+        debug_assert!(inserted, "candidate key was checked before insertion");
+        self.mutations.push(mutation);
+        self.mutation_count = mutation_count;
+        self.mutation_key_bytes = mutation_key_bytes;
+        self.mutation_payload_bytes = mutation_payload_bytes;
+        Ok(())
+    }
+
+    pub(crate) fn try_add_create_v1(
+        &mut self,
+        absence: ProvenCatalogObjectAbsenceV1<'attempt, 'storage>,
+        raw_bytes: Vec<u8>,
+    ) -> Result<(), CatalogPublicationContractErrorV1> {
+        let (mutation_count, mutation_key_bytes, mutation_payload_bytes) =
+            self.reserve_candidate_v1(absence.kind, &absence.object_key, raw_bytes.len())?;
+        let successor = type_catalog_successor_payload_v1(
+            self.corpus,
+            absence.kind,
+            absence.object_key.clone(),
+            raw_bytes,
+        )?;
+        let mutation =
+            fact_bind_catalog_create_v1(self.prerequisites, self.corpus, absence, successor)?;
+        let inserted = self.keys.insert(mutation.successor.object_key.clone());
+        debug_assert!(inserted, "candidate key was checked before insertion");
+        self.mutations.push(mutation);
+        self.mutation_count = mutation_count;
+        self.mutation_key_bytes = mutation_key_bytes;
+        self.mutation_payload_bytes = mutation_payload_bytes;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1618,6 +1781,7 @@ struct RemoteCatalogMutationJournalWireV1 {
     parent_head_revision: String,
     mutation_count: u64,
     mutation_key_bytes: u64,
+    mutation_payload_bytes: u64,
     mutations: Vec<RemoteCatalogFactBoundMutationWireV1>,
 }
 
@@ -1625,7 +1789,8 @@ struct BoundCatalogSuccessorPayloadV1 {
     kind: RemoteCatalogObjectKindV1,
     object_key: String,
     object_id: [u8; 32],
-    raw_bytes: Vec<u8>,
+    /// Contiguous shared storage; writer clones are refcount-only.
+    raw_bytes: Buffer,
     raw_bytes_len: NonZeroU64,
     raw_blake3: [u8; 32],
     binding: RegisteredRootRemoteObjectBindingV1,
@@ -1719,6 +1884,16 @@ fn validate_authoritative_catalog_mutation_journal_bytes_v1(
         ));
     }
     if wire.mutation_count != mutation_count {
+        return Err(invalid_mutation_journal(
+            InvalidCatalogMutationJournalReasonV1::Totals,
+        ));
+    }
+    let payload_bytes = checked_catalog_mutation_payload_bytes_v1(
+        wire.mutations
+            .iter()
+            .map(|mutation| mutation.successor_payload.raw_bytes_len),
+    )?;
+    if wire.mutation_payload_bytes != payload_bytes {
         return Err(invalid_mutation_journal(
             InvalidCatalogMutationJournalReasonV1::Totals,
         ));
@@ -2012,11 +2187,18 @@ async fn publish_immutable_catalog_artifact_if_absent_exact_v1(
 /// and publish every exact successor body into the immutable payload
 /// namespace. No live namespace key or mutable HEAD is written here.
 pub(crate) async fn prepare_authoritative_catalog_mutation_journal_v1<'attempt, 'storage>(
-    prerequisites: &'attempt MatchedCatalogPublicationPrerequisitesV1<'storage>,
-    corpus: &SemanticallyBoundRemoteCatalogCorpusV1,
     publication_nonce: [u8; 32],
-    mut mutations: Vec<FactBoundCatalogMutationV1<'attempt, 'storage>>,
+    batch: AuthoritativeCatalogMutationBatchV1<'attempt, 'storage, '_>,
 ) -> AnyhowResult<PreparedAuthoritativeCatalogMutationJournalV1> {
+    let AuthoritativeCatalogMutationBatchV1 {
+        prerequisites,
+        corpus,
+        keys: mutation_keys,
+        mutation_count: bounded_mutation_count,
+        mutation_key_bytes: bounded_mutation_key_bytes,
+        mutation_payload_bytes,
+        mut mutations,
+    } = batch;
     require_held_control_lease_live_v1(&prerequisites.control_guard)
         .map_err(|error| anyhow::anyhow!("catalog control lease is not live: {error:?}"))?;
     anyhow::ensure!(
@@ -2035,11 +2217,31 @@ pub(crate) async fn prepare_authoritative_catalog_mutation_journal_v1<'attempt, 
         .context("catalog sequence overflow")?;
     let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
     anyhow::ensure!(
-        u64::try_from(mutations.len()).ok() <= Some(remote.max_catalog_entries_per_page()),
-        "authoritative mutation count exceeds the catalog page bound"
+        u64::try_from(mutations.len()).ok() == Some(bounded_mutation_count)
+            && mutation_keys.len() == mutations.len()
+            && bounded_mutation_count <= remote.max_catalog_entries_per_page(),
+        "authoritative mutation count changed after bounded intake"
+    );
+    let validated_mutation_payload_bytes = checked_catalog_mutation_payload_bytes_v1(
+        mutations
+            .iter()
+            .map(|mutation| mutation.successor.raw_bytes_len.get()),
+    )
+    .map_err(|error| {
+        anyhow::anyhow!("authoritative mutation payload bytes are invalid: {error:?}")
+    })?;
+    anyhow::ensure!(
+        mutation_payload_bytes == validated_mutation_payload_bytes,
+        "authoritative mutation payload accounting changed after bounded intake"
     );
     mutations
         .sort_unstable_by(|left, right| left.successor.object_key.cmp(&right.successor.object_key));
+    anyhow::ensure!(
+        mutation_keys.iter().map(String::as_str).eq(mutations
+            .iter()
+            .map(|mutation| mutation.successor.object_key.as_str())),
+        "authoritative mutation keys changed after bounded intake"
+    );
     let mut mutation_key_bytes = 0_u64;
     let mut previous_key: Option<&str> = None;
     for mutation in &mutations {
@@ -2094,6 +2296,10 @@ pub(crate) async fn prepare_authoritative_catalog_mutation_journal_v1<'attempt, 
             }
         }
     }
+    anyhow::ensure!(
+        mutation_key_bytes == bounded_mutation_key_bytes,
+        "authoritative mutation key-byte accounting changed after bounded intake"
+    );
 
     validate_complete_successor_semantic_closure_v1(corpus, &mutations)
         .map_err(|error| anyhow::anyhow!("successor semantic closure is invalid: {error:?}"))?;
@@ -2163,63 +2369,75 @@ pub(crate) async fn prepare_authoritative_catalog_mutation_journal_v1<'attempt, 
     successor_payloads
         .try_reserve(mutations.len())
         .context("reserving authoritative successor payload bindings")?;
-    for mutation in &mutations {
+    let mut wire_mutations = Vec::new();
+    wire_mutations
+        .try_reserve(mutations.len())
+        .context("reserving authoritative mutation wire entries")?;
+    for mutation in mutations {
+        let FactBoundCatalogMutationV1 {
+            prerequisites: _,
+            predecessor,
+            successor,
+        } = mutation;
+        let TypedCatalogSuccessorPayloadV1 {
+            context: _,
+            kind,
+            object_key,
+            raw_bytes,
+            raw_bytes_len: expected_raw_bytes_len,
+            raw_blake3,
+            semantics: _,
+        } = successor;
+        let (operation, predecessor) = match predecessor {
+            FactBoundCatalogMutationPredecessorV1::Absent(_) => (
+                RemoteCatalogMutationOperationDraftWireV1::CreateIfAbsent,
+                RemoteCatalogMutationPredecessorDraftWireV1::Absent,
+            ),
+            FactBoundCatalogMutationPredecessorV1::Present(predecessor) => (
+                RemoteCatalogMutationOperationDraftWireV1::ReplaceIfMatch,
+                RemoteCatalogMutationPredecessorDraftWireV1::Present {
+                    raw_bytes_len: predecessor.raw_bytes_len.get(),
+                    raw_blake3: lower_hex(&predecessor.raw_blake3),
+                    binding: binding_wire_v1(&predecessor.binding),
+                },
+            ),
+        };
         let (object_id, raw_bytes_len, binding) =
             publish_immutable_catalog_artifact_if_absent_exact_v1(
                 prerequisites,
                 CATALOG_SUCCESSOR_PAYLOAD_OBJECT_SUFFIX_V1,
                 CATALOG_SUCCESSOR_PAYLOAD_OBJECT_DOMAIN_V1,
-                &mutation.successor.raw_bytes,
-                catalog_named_object_max_bytes_v1(mutation.successor.kind),
+                &raw_bytes,
+                catalog_named_object_max_bytes_v1(kind),
             )
             .await?;
         anyhow::ensure!(
-            raw_bytes_len == mutation.successor.raw_bytes_len,
+            raw_bytes_len == expected_raw_bytes_len,
             "immutable successor payload length does not match its typed bytes"
         );
-        successor_payloads.push(BoundCatalogSuccessorPayloadV1 {
-            kind: mutation.successor.kind,
-            object_key: mutation.successor.object_key.clone(),
+        let payload = BoundCatalogSuccessorPayloadV1 {
+            kind,
+            object_key: object_key.clone(),
             object_id,
-            raw_bytes: mutation.successor.raw_bytes.clone(),
+            raw_bytes: raw_bytes.into(),
             raw_bytes_len,
-            raw_blake3: mutation.successor.raw_blake3,
+            raw_blake3,
             binding,
+        };
+        wire_mutations.push(RemoteCatalogFactBoundMutationWireV1 {
+            kind,
+            object_key,
+            operation,
+            predecessor,
+            successor_payload: RemoteCatalogSuccessorPayloadReferenceWireV1 {
+                object_id: lower_hex(&payload.object_id),
+                raw_bytes_len: payload.raw_bytes_len.get(),
+                raw_blake3: lower_hex(&payload.raw_blake3),
+                binding: binding_wire_v1(&payload.binding),
+            },
         });
+        successor_payloads.push(payload);
     }
-
-    let wire_mutations = mutations
-        .iter()
-        .zip(&successor_payloads)
-        .map(|(mutation, payload)| {
-            let (operation, predecessor) = match &mutation.predecessor {
-                FactBoundCatalogMutationPredecessorV1::Absent(_) => (
-                    RemoteCatalogMutationOperationDraftWireV1::CreateIfAbsent,
-                    RemoteCatalogMutationPredecessorDraftWireV1::Absent,
-                ),
-                FactBoundCatalogMutationPredecessorV1::Present(predecessor) => (
-                    RemoteCatalogMutationOperationDraftWireV1::ReplaceIfMatch,
-                    RemoteCatalogMutationPredecessorDraftWireV1::Present {
-                        raw_bytes_len: predecessor.raw_bytes_len.get(),
-                        raw_blake3: lower_hex(&predecessor.raw_blake3),
-                        binding: binding_wire_v1(&predecessor.binding),
-                    },
-                ),
-            };
-            RemoteCatalogFactBoundMutationWireV1 {
-                kind: mutation.successor.kind,
-                object_key: mutation.successor.object_key.clone(),
-                operation,
-                predecessor,
-                successor_payload: RemoteCatalogSuccessorPayloadReferenceWireV1 {
-                    object_id: lower_hex(&payload.object_id),
-                    raw_bytes_len: payload.raw_bytes_len.get(),
-                    raw_blake3: lower_hex(&payload.raw_blake3),
-                    binding: binding_wire_v1(&payload.binding),
-                },
-            }
-        })
-        .collect::<Vec<_>>();
     let wire = RemoteCatalogMutationJournalWireV1 {
         version: CATALOG_MUTATION_JOURNAL_SCHEMA_VERSION_V1,
         context: prerequisites.context.to_wire(),
@@ -2229,6 +2447,7 @@ pub(crate) async fn prepare_authoritative_catalog_mutation_journal_v1<'attempt, 
         mutation_count: u64::try_from(wire_mutations.len())
             .context("authoritative mutation count does not fit u64")?,
         mutation_key_bytes,
+        mutation_payload_bytes,
         mutations: wire_mutations,
     };
     let raw_bytes =
@@ -2305,12 +2524,13 @@ pub(crate) async fn publish_authoritative_catalog_mutation_journal_v1(
         wire.mutations.len() == prepared.successor_payloads.len()
             && wire.mutations.iter().zip(&prepared.successor_payloads).all(
                 |(mutation, payload)| {
+                    let payload_bytes = payload.raw_bytes.current();
                     mutation.kind == payload.kind
                         && mutation.object_key == payload.object_key
                         && mutation.successor_payload.object_id == lower_hex(&payload.object_id)
-                        && u64::try_from(payload.raw_bytes.len()).ok()
+                        && u64::try_from(payload_bytes.len()).ok()
                             == Some(payload.raw_bytes_len.get())
-                        && *blake3::hash(&payload.raw_bytes).as_bytes() == payload.raw_blake3
+                        && *blake3::hash(&payload_bytes).as_bytes() == payload.raw_blake3
                         && mutation.successor_payload.raw_bytes_len == payload.raw_bytes_len.get()
                         && mutation.successor_payload.raw_blake3 == lower_hex(&payload.raw_blake3)
                         && mutation.successor_payload.binding == binding_wire_v1(&payload.binding)
@@ -2932,6 +3152,7 @@ async fn apply_one_catalog_namespace_mutation_v1(
     mutation: &RemoteCatalogFactBoundMutationWireV1,
     payload: &BoundCatalogSuccessorPayloadV1,
 ) -> AnyhowResult<AppliedCatalogNamespaceObjectV1> {
+    let payload_bytes = payload.raw_bytes.current();
     anyhow::ensure!(
         mutation.kind == payload.kind
             && mutation.object_key == payload.object_key
@@ -2939,13 +3160,13 @@ async fn apply_one_catalog_namespace_mutation_v1(
             && mutation.successor_payload.raw_bytes_len == payload.raw_bytes_len.get()
             && mutation.successor_payload.raw_blake3 == lower_hex(&payload.raw_blake3)
             && mutation.successor_payload.binding == binding_wire_v1(&payload.binding)
-            && u64::try_from(payload.raw_bytes.len()).ok() == Some(payload.raw_bytes_len.get())
-            && *blake3::hash(&payload.raw_bytes).as_bytes() == payload.raw_blake3,
+            && u64::try_from(payload_bytes.len()).ok() == Some(payload.raw_bytes_len.get())
+            && *blake3::hash(&payload_bytes).as_bytes() == payload.raw_blake3,
         "catalog namespace mutation lost its exact immutable successor payload"
     );
     let payload_key = successor_payload_object_key_v1(
         &capability.pending.transition.publication.context,
-        &payload.raw_bytes,
+        &payload_bytes,
     )
     .context("catalog successor payload key exceeds the storage-key bound")?;
     let immutable_payload = read_raw_object_snapshot_v1(
@@ -2965,8 +3186,8 @@ async fn apply_one_catalog_namespace_mutation_v1(
     };
     let (immutable_bytes, immutable_blake3, immutable_binding) = immutable_payload.into_parts();
     anyhow::ensure!(
-        immutable_bytes == payload.raw_bytes
-            && immutable_blake3 == blake3::hash(&payload.raw_bytes)
+        immutable_bytes.as_slice() == payload_bytes.as_ref()
+            && immutable_blake3 == blake3::hash(&payload_bytes)
             && registered_binding_from_raw_v1(immutable_binding) == payload.binding,
         "immutable catalog successor payload changed before namespace mutation: {payload_key}"
     );
@@ -3006,7 +3227,7 @@ async fn apply_one_catalog_namespace_mutation_v1(
         capability,
         mutation.kind,
         &mutation.object_key,
-        &payload.raw_bytes,
+        &payload_bytes,
     )
     .await;
     let binding = match (write_result, rebound) {
@@ -5046,6 +5267,13 @@ mod tests {
         Into<BoundCatalogMutationJournalV1>
     );
     static_assertions::assert_not_impl_any!(
+        AuthoritativeCatalogMutationBatchV1<'static, 'static, 'static>: Clone,
+        serde::Serialize,
+        Default,
+        Into<Vec<FactBoundCatalogMutationV1<'static, 'static>>>,
+        Into<BoundCatalogMutationJournalV1>
+    );
+    static_assertions::assert_not_impl_any!(
         PreparedAuthoritativeCatalogMutationJournalV1: Clone,
         serde::Serialize,
         Default,
@@ -5442,18 +5670,15 @@ mod tests {
         let publication_nonce = [0x44; 32];
         let prerequisites = matched(fixture, observed);
         let successor_bytes = deleted_index_bytes();
-        let replacement = fact_bind_catalog_replacement_v1(
-            &prerequisites,
-            corpus,
-            type_catalog_successor_payload_v1(
-                corpus,
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, corpus).unwrap();
+        batch
+            .try_add_replacement_v1(
                 RemoteCatalogObjectKindV1::Index,
                 "roots/index/retained.txt".to_owned(),
                 successor_bytes.clone(),
             )
-            .unwrap(),
-        )
-        .unwrap();
+            .unwrap();
         let create_key = "roots/index/added.txt".to_owned();
         let absence = prove_catalog_object_absence_v1(
             &prerequisites,
@@ -5463,27 +5688,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let create = fact_bind_catalog_create_v1(
-            &prerequisites,
-            corpus,
-            absence,
-            type_catalog_successor_payload_v1(
-                corpus,
-                RemoteCatalogObjectKindV1::Index,
-                create_key,
-                successor_bytes,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let prepared = prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            corpus,
-            publication_nonce,
-            vec![replacement, create],
-        )
-        .await
-        .unwrap();
+        batch.try_add_create_v1(absence, successor_bytes).unwrap();
+        let prepared = prepare_authoritative_catalog_mutation_journal_v1(publication_nonce, batch)
+            .await
+            .unwrap();
         let journal = publish_authoritative_catalog_mutation_journal_v1(&prerequisites, prepared)
             .await
             .unwrap();
@@ -5636,18 +5844,15 @@ mod tests {
             .await;
         let prerequisites = matched(&fixture, &observed);
         let replacement_bytes = deleted_index_bytes();
-        let replacement = fact_bind_catalog_replacement_v1(
-            &prerequisites,
-            &corpus,
-            type_catalog_successor_payload_v1(
-                &corpus,
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch
+            .try_add_replacement_v1(
                 RemoteCatalogObjectKindV1::Index,
                 "roots/index/retained.txt".to_owned(),
                 replacement_bytes.clone(),
             )
-            .unwrap(),
-        )
-        .unwrap();
+            .unwrap();
         let create_key = "roots/index/added.txt".to_owned();
         let absence = prove_catalog_object_absence_v1(
             &prerequisites,
@@ -5657,28 +5862,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let create = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Index,
-                create_key,
-                replacement_bytes.clone(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        batch
+            .try_add_create_v1(absence, replacement_bytes.clone())
+            .unwrap();
 
-        let prepared = prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x44; 32],
-            vec![replacement, create],
-        )
-        .await
-        .unwrap();
+        let prepared = prepare_authoritative_catalog_mutation_journal_v1([0x44; 32], batch)
+            .await
+            .unwrap();
         let wire =
             serde_json::from_slice::<RemoteCatalogMutationJournalWireV1>(&prepared.raw_bytes)
                 .unwrap();
@@ -5901,53 +6091,20 @@ mod tests {
         )
         .await
         .unwrap();
-        let index = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            index_absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Index,
-                index_key.clone(),
-                committed_index_bytes(&manifest_id),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let reservation = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            reservation_absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Reservation,
-                reservation_key.clone(),
-                reservation_bytes.clone(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let manifest = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            manifest_absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Manifest,
-                manifest_key.clone(),
-                manifest_bytes.clone(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let prepared = prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x44; 32],
-            vec![manifest, reservation, index],
-        )
-        .await
-        .unwrap();
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch
+            .try_add_create_v1(index_absence, committed_index_bytes(&manifest_id))
+            .unwrap();
+        batch
+            .try_add_create_v1(reservation_absence, reservation_bytes.clone())
+            .unwrap();
+        batch
+            .try_add_create_v1(manifest_absence, manifest_bytes.clone())
+            .unwrap();
+        let prepared = prepare_authoritative_catalog_mutation_journal_v1([0x44; 32], batch)
+            .await
+            .unwrap();
         let journal = publish_authoritative_catalog_mutation_journal_v1(&prerequisites, prepared)
             .await
             .unwrap();
@@ -6153,7 +6310,7 @@ mod tests {
             (
                 first_payload.kind,
                 first_payload.object_key.clone(),
-                first_payload.raw_bytes.clone(),
+                first_payload.raw_bytes.current(),
                 first_payload.raw_blake3,
             )
         };
@@ -6366,7 +6523,10 @@ mod tests {
         let (fixture, corpus, observed) = observed_corpus(&[]).await;
         let prerequisites = matched(&fixture, &observed);
         let manifest_bytes = regular_manifest_bytes("new.txt");
+        let manifest_payload_pointer = manifest_bytes.as_ptr();
         let manifest_id = crate::index_entry::manifest_object_id(&manifest_bytes);
+        let index_bytes = committed_index_bytes(&manifest_id);
+        let index_payload_pointer = index_bytes.as_ptr();
         let index_key = "roots/index/new.txt".to_owned();
         let manifest_key = format!("roots/manifests/{manifest_id}");
 
@@ -6386,46 +6546,78 @@ mod tests {
         )
         .await
         .unwrap();
-        let index = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            index_absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Index,
-                index_key,
-                committed_index_bytes(&manifest_id),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let manifest = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            manifest_absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Manifest,
-                manifest_key,
-                manifest_bytes,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let prepared = prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x44; 32],
-            vec![manifest, index],
-        )
-        .await
-        .unwrap();
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch.try_add_create_v1(index_absence, index_bytes).unwrap();
+        batch
+            .try_add_create_v1(manifest_absence, manifest_bytes)
+            .unwrap();
+        let prepared = prepare_authoritative_catalog_mutation_journal_v1([0x44; 32], batch)
+            .await
+            .unwrap();
         let wire =
             serde_json::from_slice::<RemoteCatalogMutationJournalWireV1>(&prepared.raw_bytes)
                 .unwrap();
         assert_eq!(wire.mutation_count, 2);
+        assert_eq!(
+            wire.mutation_payload_bytes,
+            wire.mutations
+                .iter()
+                .map(|mutation| mutation.successor_payload.raw_bytes_len)
+                .sum::<u64>()
+        );
         assert_eq!(wire.mutations[0].object_key, "roots/index/new.txt");
         assert!(wire.mutations[1].object_key.starts_with("roots/manifests/"));
+        assert_eq!(
+            prepared.successor_payloads[0].raw_bytes.current().as_ptr(),
+            index_payload_pointer,
+            "authoritative preparation must move index bytes instead of cloning them"
+        );
+        assert_eq!(
+            prepared.successor_payloads[1].raw_bytes.current().as_ptr(),
+            manifest_payload_pointer,
+            "authoritative preparation must move manifest bytes instead of cloning them"
+        );
+
+        let mut wrong_total = wire;
+        wrong_total.mutation_payload_bytes += 1;
+        let wrong_total_bytes = serde_json::to_vec(&wrong_total).unwrap();
+        assert_eq!(
+            validate_authoritative_catalog_mutation_journal_bytes_v1(
+                &wrong_total_bytes,
+                &prerequisites.context,
+                NonZeroU64::new(2).unwrap(),
+                [0x44; 32],
+                observed.head_revision,
+            )
+            .unwrap_err(),
+            CatalogPublicationContractErrorV1::InvalidMutationJournal(
+                InvalidCatalogMutationJournalReasonV1::Totals
+            )
+        );
+    }
+
+    #[test]
+    fn authoritative_mutation_payload_total_is_bounded_and_overflow_safe() {
+        let maximum = RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_catalog_mutation_payload_bytes();
+        assert_eq!(
+            checked_catalog_mutation_payload_bytes_v1([maximum]),
+            Ok(maximum)
+        );
+        assert_eq!(
+            checked_catalog_mutation_payload_bytes_v1([maximum, 1]),
+            Err(CatalogPublicationContractErrorV1::MutationJournalResource(
+                CatalogMutationJournalResourceV1::PayloadBytes
+            ))
+        );
+        assert_eq!(
+            checked_catalog_mutation_payload_bytes_v1([u64::MAX, 1]),
+            Err(CatalogPublicationContractErrorV1::MutationJournalResource(
+                CatalogMutationJournalResourceV1::PayloadBytes
+            ))
+        );
     }
 
     #[tokio::test]
@@ -6436,36 +6628,137 @@ mod tests {
             )])
             .await;
         let prerequisites = matched(&fixture, &observed);
-        let missing = type_catalog_successor_payload_v1(
-            &corpus,
-            RemoteCatalogObjectKindV1::Index,
-            "roots/index/missing.txt".to_owned(),
-            deleted_index_bytes(),
-        )
-        .unwrap();
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
         assert_eq!(
-            fact_bind_catalog_replacement_v1(&prerequisites, &corpus, missing).unwrap_err(),
+            batch
+                .try_add_replacement_v1(
+                    RemoteCatalogObjectKindV1::Index,
+                    "roots/index/missing.txt".to_owned(),
+                    deleted_index_bytes(),
+                )
+                .unwrap_err(),
             CatalogPublicationContractErrorV1::MutationPredecessorMissing
         );
         assert_eq!(
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Index,
-                "roots/index/retained.txt".to_owned(),
-                b"{}".to_vec(),
-            )
-            .unwrap_err(),
+            batch
+                .try_add_replacement_v1(
+                    RemoteCatalogObjectKindV1::Index,
+                    "roots/index/retained.txt".to_owned(),
+                    b"{}".to_vec(),
+                )
+                .unwrap_err(),
             CatalogPublicationContractErrorV1::InvalidSuccessorPayload
         );
         assert_eq!(
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Reservation,
-                "roots/index/retained.txt".to_owned(),
+            batch
+                .try_add_replacement_v1(
+                    RemoteCatalogObjectKindV1::Reservation,
+                    "roots/index/retained.txt".to_owned(),
+                    deleted_index_bytes(),
+                )
+                .unwrap_err(),
+            CatalogPublicationContractErrorV1::InvalidSuccessorPayload
+        );
+        assert_eq!(batch.mutation_count, 0);
+        assert_eq!(batch.mutation_key_bytes, 0);
+        assert_eq!(batch.mutation_payload_bytes, 0);
+        assert!(batch.keys.is_empty());
+        assert!(batch.mutations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn authoritative_batch_rejects_duplicate_keys_without_advancing_accounting() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let prerequisites = matched(&fixture, &observed);
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        let key = "roots/index/retained.txt".to_owned();
+        batch
+            .try_add_replacement_v1(
+                RemoteCatalogObjectKindV1::Index,
+                key.clone(),
                 deleted_index_bytes(),
             )
-            .unwrap_err(),
-            CatalogPublicationContractErrorV1::InvalidSuccessorPayload
+            .unwrap();
+        let retained_accounting = (
+            batch.mutation_count,
+            batch.mutation_key_bytes,
+            batch.mutation_payload_bytes,
+            batch.keys.len(),
+            batch.mutations.len(),
+        );
+        assert_eq!(
+            batch
+                .try_add_replacement_v1(
+                    RemoteCatalogObjectKindV1::Index,
+                    key,
+                    deleted_index_bytes(),
+                )
+                .unwrap_err(),
+            CatalogPublicationContractErrorV1::InvalidMutationJournal(
+                InvalidCatalogMutationJournalReasonV1::Order
+            )
+        );
+        assert_eq!(
+            (
+                batch.mutation_count,
+                batch.mutation_key_bytes,
+                batch.mutation_payload_bytes,
+                batch.keys.len(),
+                batch.mutations.len(),
+            ),
+            retained_accounting
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_batch_payload_limit_rejection_is_transactional() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let prerequisites = matched(&fixture, &observed);
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        // Exercise the private running-total boundary without retaining a
+        // limit-sized test fixture.
+        batch.mutation_payload_bytes = RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_catalog_mutation_payload_bytes();
+        let retained_accounting = (
+            batch.mutation_count,
+            batch.mutation_key_bytes,
+            batch.mutation_payload_bytes,
+            batch.keys.len(),
+            batch.mutations.len(),
+        );
+        assert_eq!(
+            batch
+                .try_add_replacement_v1(
+                    RemoteCatalogObjectKindV1::Index,
+                    "roots/index/retained.txt".to_owned(),
+                    deleted_index_bytes(),
+                )
+                .unwrap_err(),
+            CatalogPublicationContractErrorV1::MutationJournalResource(
+                CatalogMutationJournalResourceV1::PayloadBytes
+            )
+        );
+        assert_eq!(
+            (
+                batch.mutation_count,
+                batch.mutation_key_bytes,
+                batch.mutation_payload_bytes,
+                batch.keys.len(),
+                batch.mutations.len(),
+            ),
+            retained_accounting
         );
     }
 
@@ -6486,32 +6779,19 @@ mod tests {
         )
         .await
         .unwrap();
-        let create = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Index,
-                key.clone(),
-                deleted_index_bytes(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch
+            .try_add_create_v1(absence, deleted_index_bytes())
+            .unwrap();
         fixture
             .operator()
             .write(&key, deleted_index_bytes())
             .await
             .unwrap();
-        let error = prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x44; 32],
-            vec![create],
-        )
-        .await
-        .unwrap_err();
+        let error = prepare_authoritative_catalog_mutation_journal_v1([0x44; 32], batch)
+            .await
+            .unwrap_err();
         assert!(format!("{error:#}").contains("absence witness is stale"));
     }
 
@@ -6524,26 +6804,20 @@ mod tests {
             )])
             .await;
         let prerequisites = matched(&fixture, &observed);
-        let missing_manifest_index = fact_bind_catalog_replacement_v1(
-            &prerequisites,
-            &corpus,
-            type_catalog_successor_payload_v1(
-                &corpus,
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch
+            .try_add_replacement_v1(
                 RemoteCatalogObjectKindV1::Index,
                 "roots/index/file.txt".to_owned(),
                 committed_index_bytes(&"f".repeat(64)),
             )
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x44; 32],
-            vec![missing_manifest_index],
-        )
-        .await
-        .is_err());
+            .unwrap();
+        assert!(
+            prepare_authoritative_catalog_mutation_journal_v1([0x44; 32], batch)
+                .await
+                .is_err()
+        );
 
         let (fixture, corpus, observed) =
             observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
@@ -6564,27 +6838,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let orphan = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            orphan_absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Manifest,
-                orphan_key,
-                orphan_bytes,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x45; 32],
-            vec![orphan],
-        )
-        .await
-        .is_err());
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch
+            .try_add_create_v1(orphan_absence, orphan_bytes)
+            .unwrap();
+        assert!(
+            prepare_authoritative_catalog_mutation_journal_v1([0x45; 32], batch)
+                .await
+                .is_err()
+        );
 
         let exact_path = "retained.txt";
         let folded_path = crate::index_entry::portable_casefold_path(exact_path).unwrap();
@@ -6604,27 +6867,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let reservation = fact_bind_catalog_create_v1(
-            &prerequisites,
-            &corpus,
-            reservation_absence,
-            type_catalog_successor_payload_v1(
-                &corpus,
-                RemoteCatalogObjectKindV1::Reservation,
-                reservation_key,
-                reservation_bytes,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x46; 32],
-            vec![reservation],
-        )
-        .await
-        .is_err());
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch
+            .try_add_create_v1(reservation_absence, reservation_bytes)
+            .unwrap();
+        assert!(
+            prepare_authoritative_catalog_mutation_journal_v1([0x46; 32], batch)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -6643,26 +6895,18 @@ mod tests {
             .write(&payload_key, b"wrong".to_vec())
             .await
             .unwrap();
-        let replacement = fact_bind_catalog_replacement_v1(
-            &prerequisites,
-            &corpus,
-            type_catalog_successor_payload_v1(
-                &corpus,
+        let mut batch =
+            begin_authoritative_catalog_mutation_batch_v1(&prerequisites, &corpus).unwrap();
+        batch
+            .try_add_replacement_v1(
                 RemoteCatalogObjectKindV1::Index,
                 "roots/index/retained.txt".to_owned(),
                 successor_bytes,
             )
-            .unwrap(),
-        )
-        .unwrap();
-        let error = prepare_authoritative_catalog_mutation_journal_v1(
-            &prerequisites,
-            &corpus,
-            [0x44; 32],
-            vec![replacement],
-        )
-        .await
-        .unwrap_err();
+            .unwrap();
+        let error = prepare_authoritative_catalog_mutation_journal_v1([0x44; 32], batch)
+            .await
+            .unwrap_err();
         assert!(format!("{error:#}").contains("different bytes"));
     }
 

@@ -1825,6 +1825,17 @@ impl RootRemoteContractV1 {
         }
     }
 
+    /// Maximum aggregate successor-body bytes retained by one authoritative
+    /// catalog mutation journal.
+    ///
+    /// Larger reconciles must segment their work across monotonic catalog
+    /// publications instead of retaining one process-sized transaction.
+    pub const fn max_catalog_mutation_payload_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 256 * 1024 * 1024,
+        }
+    }
+
     /// Maximum immutable pages referenced by one catalog root.
     pub const fn max_catalog_pages(self) -> u64 {
         match self {
@@ -2364,6 +2375,7 @@ struct RegisteredRootPlanContractFingerprintFieldsV1 {
     remote_max_catalog_head_object_bytes: u64,
     remote_max_catalog_root_object_bytes: u64,
     remote_max_catalog_page_object_bytes: u64,
+    remote_max_catalog_mutation_payload_bytes: u64,
     remote_max_catalog_pages: u64,
     remote_max_catalog_entries_per_page: u64,
     remote_max_catalog_entries: u64,
@@ -2461,6 +2473,9 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
         remote_max_catalog_head_object_bytes: contract.remote.max_catalog_head_object_bytes(),
         remote_max_catalog_root_object_bytes: contract.remote.max_catalog_root_object_bytes(),
         remote_max_catalog_page_object_bytes: contract.remote.max_catalog_page_object_bytes(),
+        remote_max_catalog_mutation_payload_bytes: contract
+            .remote
+            .max_catalog_mutation_payload_bytes(),
         remote_max_catalog_pages: contract.remote.max_catalog_pages(),
         remote_max_catalog_entries_per_page: contract.remote.max_catalog_entries_per_page(),
         remote_max_catalog_entries: contract.remote.max_catalog_entries(),
@@ -2475,7 +2490,7 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
 ) -> RegisteredRootPlanContractFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.registered-root-plan-contract.b3v1",
-        fields.canonical_names.len() + 44,
+        fields.canonical_names.len() + 45,
     );
     for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
@@ -2653,6 +2668,12 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
             encoder.field(
                 "remote_max_catalog_page_object_bytes",
                 &fields.remote_max_catalog_page_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_mutation_payload_bytes",
+                &fields
+                    .remote_max_catalog_mutation_payload_bytes
+                    .to_be_bytes(),
             );
             encoder.field(
                 "remote_max_catalog_pages",
@@ -3978,6 +3999,10 @@ resolution_policy = "inspect-only"
         assert_eq!(remote.max_catalog_head_object_bytes(), 16 * 1024);
         assert_eq!(remote.max_catalog_root_object_bytes(), 4 * 1024 * 1024);
         assert_eq!(remote.max_catalog_page_object_bytes(), 16 * 1024 * 1024);
+        assert_eq!(
+            remote.max_catalog_mutation_payload_bytes(),
+            256 * 1024 * 1024
+        );
         assert_eq!(remote.max_catalog_pages(), 4096);
         assert_eq!(remote.max_catalog_entries_per_page(), 4096);
         assert_eq!(remote.max_catalog_entries(), 3_000_000);
@@ -4012,7 +4037,7 @@ resolution_policy = "inspect-only"
         );
         assert_eq!(
             fingerprint.to_string(),
-            "b3v1:8767d0b8866f8c319f16e816a1996e2a7b638fe01ba972ed28dd2075345f9b6f"
+            "b3v1:1118477115662bba81df3cd3e8f2250a350e1d65e62150d746448c821ce0c678"
         );
     }
 
@@ -4115,6 +4140,10 @@ resolution_policy = "inspect-only"
         assert_eq!(
             fields.remote_max_catalog_page_object_bytes,
             16 * 1024 * 1024
+        );
+        assert_eq!(
+            fields.remote_max_catalog_mutation_payload_bytes,
+            256 * 1024 * 1024
         );
         assert_eq!(fields.remote_max_catalog_pages, 4096);
         assert_eq!(fields.remote_max_catalog_entries_per_page, 4096);
@@ -4275,6 +4304,7 @@ resolution_policy = "inspect-only"
         assert_remote_resource_is_bound!(remote_max_catalog_head_object_bytes);
         assert_remote_resource_is_bound!(remote_max_catalog_root_object_bytes);
         assert_remote_resource_is_bound!(remote_max_catalog_page_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_mutation_payload_bytes);
         assert_remote_resource_is_bound!(remote_max_catalog_pages);
         assert_remote_resource_is_bound!(remote_max_catalog_entries_per_page);
         assert_remote_resource_is_bound!(remote_max_catalog_entries);
