@@ -29,9 +29,10 @@
 //! bounded cold-process reconstruction from an exact authenticated Pending
 //! record, immutable archive/journal/payload evidence, and a fresh opaque
 //! handle to the same durable backend receipt ledger. Public fingerprints
-//! still cannot reconstruct that authority. Cold acknowledgement after the
-//! backend has already advanced Pending to Ready is deliberately a later
-//! authenticated gateway, not part of this Pending-only checkpoint.
+//! still cannot reconstruct that authority. A nominally separate receipt-only
+//! gateway can acknowledge an exact already-durable `Ready` completion after a
+//! cold restart, but it never reopens Pending or returns a writer lease. Both
+//! gateways remain source-only traits without production implementations.
 //! Production activation also remains gated on pre-Publishing byte-aware page
 //! packing and worst-case output-binding/aggregate-closure reservation; a
 //! late oversize rejection must never strand a live publication. The source
@@ -101,6 +102,8 @@ const READY_CONTROL_REVISION_DOMAIN_V1: &str =
     "tinyland.tcfs.remote-catalog-ready-control-revision.b3v1";
 const PENDING_FENCE_REACQUISITION_REQUEST_DOMAIN_V1: &str =
     "tinyland.tcfs.remote-catalog-pending-fence-reacquisition-request.b3v1";
+const READY_ACKNOWLEDGEMENT_REQUEST_DOMAIN_V1: &str =
+    "tinyland.tcfs.remote-catalog-ready-acknowledgement-request.b3v1";
 const ARCHIVED_HEAD_OBJECT_SUFFIX_V1: &str = ".tcfs-catalog/v1/publications/archived-heads";
 const MUTATION_JOURNAL_OBJECT_SUFFIX_V1: &str = ".tcfs-catalog/v1/publications/mutation-journals";
 const UNTRUSTED_MUTATION_JOURNAL_DRAFT_OBJECT_SUFFIX_V1: &str =
@@ -518,6 +521,31 @@ struct CatalogPendingFenceReacquisitionRequestWireV1 {
     writer_fence_lease_public_fingerprint: String,
 }
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogReadyAcknowledgementRequestWireV1 {
+    version: u32,
+    remote_prefix: String,
+    context: RemoteCatalogContextWireV1,
+    storage_authority_fingerprint: String,
+    control_authority_fingerprint: String,
+    writer_epoch: String,
+    predecessor_ready_control_generation: u64,
+    predecessor_ready_control_revision_fingerprint: String,
+    control_lease_public_fingerprint: String,
+    pending_control_generation: u64,
+    pending_control_revision_fingerprint: String,
+    pending_control_record_fingerprint: String,
+    canonical_pending_control_record_bytes_len: u64,
+    canonical_pending_control_record_blake3: String,
+    successor_catalog_sequence: u64,
+    successor_publication_nonce: String,
+    publishing_head_reservation_fingerprint: String,
+    successor_layout_certificate_fingerprint: String,
+    writer_fence_authority_revision_fingerprint: String,
+    writer_fence_lease_public_fingerprint: String,
+}
+
 /// Untrusted exact-state proposal submitted to the control authority that
 /// already owns the durable Pending fence and ordinal receipt ledger.
 ///
@@ -547,6 +575,42 @@ pub(crate) struct TrustedCatalogPendingFenceReacquisitionV1 {
     retained_control_lease: RetainedCatalogControlLeaseV1,
 }
 
+/// Untrusted receipt-only query for the exact `Ready` completion derived from
+/// one canonical Pending record.
+///
+/// Serialized public fingerprints and caller-held bytes are expectations only.
+/// They cannot create a Ready record, fill a missing receipt ledger, reopen
+/// Pending, or mint a writer lease.
+pub(crate) struct CatalogReadyAcknowledgementRequestV1 {
+    control_binding: CatalogControlAcquisitionBindingV1,
+    pending_revision: CatalogControlAuthorityRevisionV1,
+    publishing_head_reservation_fingerprint: [u8; 32],
+    successor_layout_certificate_fingerprint: [u8; 32],
+    writer_fence_authority_revision_fingerprint: [u8; 32],
+    writer_fence_lease_public_fingerprint: NonSecretLeasePublicFingerprintV1,
+    successor_sequence: NonZeroU64,
+    successor_publication_nonce: [u8; 32],
+    canonical_pending_control_record_bytes: Vec<u8>,
+    pending_control_record_fingerprint: [u8; 32],
+    request_fingerprint: [u8; 32],
+}
+
+/// Opaque backend acknowledgement of one exact already-durable Ready
+/// transition and its existing terminal fenced-write receipt.
+///
+/// This receipt carries no lease or mutation capability. There is deliberately
+/// no production constructor or implementation in this checkpoint.
+pub(crate) struct TrustedCatalogReadyAcknowledgementReceiptV1 {
+    request_fingerprint: [u8; 32],
+    canonical_ready_control_record_bytes: Vec<u8>,
+    ready_revision: CatalogControlAuthorityRevisionV1,
+    ready_control_record_fingerprint: [u8; 32],
+    successor: CatalogHighWaterPointV1,
+    successor_layout_certificate_fingerprint: [u8; 32],
+    committed_head_fenced_request_fingerprint: [u8; 32],
+    committed_head_binding: RegisteredRootRemoteObjectBindingV1,
+}
+
 type CatalogControlPendingFutureV1<'a> = Pin<
     Box<dyn Future<Output = AnyhowResult<TrustedCatalogPublicationPendingReceiptV1>> + Send + 'a>,
 >;
@@ -554,6 +618,9 @@ type CatalogFencedStorageWriteFutureV1<'a> =
     Pin<Box<dyn Future<Output = AnyhowResult<CatalogFencedStorageWriteReceiptV1>> + Send + 'a>>;
 pub(crate) type CatalogPendingFenceReacquisitionFutureV1<'a> = Pin<
     Box<dyn Future<Output = AnyhowResult<TrustedCatalogPendingFenceReacquisitionV1>> + Send + 'a>,
+>;
+pub(crate) type CatalogReadyAcknowledgementFutureV1<'a> = Pin<
+    Box<dyn Future<Output = AnyhowResult<TrustedCatalogReadyAcknowledgementReceiptV1>> + Send + 'a>,
 >;
 
 pub(crate) trait CatalogPendingFenceReacquisitionAuthorityV1: Send + Sync {
@@ -565,6 +632,20 @@ pub(crate) trait CatalogPendingFenceReacquisitionAuthorityV1: Send + Sync {
         &'a self,
         request: CatalogPendingFenceReacquisitionRequestV1,
     ) -> CatalogPendingFenceReacquisitionFutureV1<'a>;
+}
+
+/// Receipt-only access to an already-durable exact Ready completion.
+///
+/// Implementations must authenticate the exact installed Pending bytes, the
+/// resulting canonical Ready record, and the existing contiguous terminal
+/// ledger. They must reject copied state, another backend or prefix, a missing
+/// or crossed receipt, and any field drift without performing storage I/O,
+/// backfilling state, creating an epoch, or returning a writer lease.
+pub(crate) trait CatalogReadyAcknowledgementAuthorityV1: Send + Sync {
+    fn acknowledge_ready_v1<'a>(
+        &'a self,
+        request: CatalogReadyAcknowledgementRequestV1,
+    ) -> CatalogReadyAcknowledgementFutureV1<'a>;
 }
 
 /// Non-cloneable retained backend lease for one exact control acquisition.
@@ -4910,6 +4991,60 @@ fn catalog_pending_fence_reacquisition_request_fingerprint_v1(
     ))
 }
 
+fn catalog_ready_acknowledgement_request_wire_v1(
+    request: &CatalogReadyAcknowledgementRequestV1,
+) -> CatalogReadyAcknowledgementRequestWireV1 {
+    let binding = &request.control_binding;
+    CatalogReadyAcknowledgementRequestWireV1 {
+        version: CATALOG_CONTROL_RECORD_SCHEMA_VERSION_V1,
+        remote_prefix: binding.context.remote_prefix.clone(),
+        context: binding.context.to_wire(),
+        storage_authority_fingerprint: lower_hex(&binding.storage_authority_fingerprint),
+        control_authority_fingerprint: lower_hex(&binding.control_authority_fingerprint),
+        writer_epoch: lower_hex(&binding.bootstrap.writer_epoch),
+        predecessor_ready_control_generation: binding.ready_revision.generation.get(),
+        predecessor_ready_control_revision_fingerprint: lower_hex(
+            &binding.ready_revision.fingerprint,
+        ),
+        control_lease_public_fingerprint: lower_hex(&binding.lease_public_fingerprint.0),
+        pending_control_generation: request.pending_revision.generation.get(),
+        pending_control_revision_fingerprint: lower_hex(&request.pending_revision.fingerprint),
+        pending_control_record_fingerprint: lower_hex(&request.pending_control_record_fingerprint),
+        canonical_pending_control_record_bytes_len: u64::try_from(
+            request.canonical_pending_control_record_bytes.len(),
+        )
+        .unwrap_or(u64::MAX),
+        canonical_pending_control_record_blake3: lower_hex(
+            blake3::hash(&request.canonical_pending_control_record_bytes).as_bytes(),
+        ),
+        successor_catalog_sequence: request.successor_sequence.get(),
+        successor_publication_nonce: lower_hex(&request.successor_publication_nonce),
+        publishing_head_reservation_fingerprint: lower_hex(
+            &request.publishing_head_reservation_fingerprint,
+        ),
+        successor_layout_certificate_fingerprint: lower_hex(
+            &request.successor_layout_certificate_fingerprint,
+        ),
+        writer_fence_authority_revision_fingerprint: lower_hex(
+            &request.writer_fence_authority_revision_fingerprint,
+        ),
+        writer_fence_lease_public_fingerprint: lower_hex(
+            &request.writer_fence_lease_public_fingerprint.0,
+        ),
+    }
+}
+
+fn catalog_ready_acknowledgement_request_fingerprint_v1(
+    request: &CatalogReadyAcknowledgementRequestV1,
+) -> AnyhowResult<[u8; 32]> {
+    let canonical = serde_json::to_vec(&catalog_ready_acknowledgement_request_wire_v1(request))
+        .context("serializing canonical Ready-acknowledgement request")?;
+    Ok(super::domain_object_id_v1(
+        READY_ACKNOWLEDGEMENT_REQUEST_DOMAIN_V1,
+        &canonical,
+    ))
+}
+
 fn catalog_buffer_blake3_v1(buffer: &Buffer) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     for chunk in buffer.chunks(CATALOG_BUFFER_VALIDATION_CHUNK_BYTES_V1) {
@@ -6980,6 +7115,38 @@ impl std::fmt::Debug for AdvancedCatalogHighWaterV1 {
     }
 }
 
+/// Terminal receipt-only proof recovered from an exact durable
+/// `PublicationPending -> Ready` transition and a fresh strict reread of the
+/// committed catalog closure.
+///
+/// This value deliberately retains no lease, backend authority, operator,
+/// planner, action, or publication capability. A later publication must start
+/// with its own fresh exact-current control acquisition.
+pub(crate) struct AcknowledgedCatalogReadyV1 {
+    context: CatalogAuthorityContextV1,
+    bootstrap: CatalogBootstrapIdentityV1,
+    successor: CatalogHighWaterPointV1,
+    storage_authority_fingerprint: [u8; 32],
+    control_authority_fingerprint: [u8; 32],
+    ready_revision: CatalogControlAuthorityRevisionV1,
+    ready_control_record_fingerprint: [u8; 32],
+    pending_control_record_fingerprint: [u8; 32],
+    successor_layout_certificate_fingerprint: [u8; 32],
+    committed_head_fenced_request_fingerprint: [u8; 32],
+    committed_head_binding: RegisteredRootRemoteObjectBindingV1,
+}
+
+impl std::fmt::Debug for AcknowledgedCatalogReadyV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AcknowledgedCatalogReadyV1")
+            .field("remote_prefix", &self.context.remote_prefix)
+            .field("sequence", &self.successor.sequence)
+            .field("control_generation", &self.ready_revision.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum RemoteCatalogPublishingStateWireV1 {
@@ -8199,6 +8366,307 @@ fn parse_canonical_control_record_v1(
     valid.then_some(wire)
 }
 
+/// Acknowledge one exact already-durable Ready completion after a cold
+/// process restart.
+///
+/// The request is derived only from bounded canonical Pending bytes and
+/// contains no lease; those persisted bytes remain untrusted until the
+/// backend authenticates the exact installed Pending, its Ready successor, and
+/// the pre-existing terminal receipt. The caller then rereads and semantically
+/// validates the complete committed catalog closure. Neither stage can reopen
+/// Pending, backfill a receipt, or authorize another write.
+pub(crate) async fn acknowledge_catalog_publication_from_authenticated_ready_v1<'a>(
+    storage_authority: TrustedCatalogStorageAuthorityV1<'a>,
+    selected: &ValidatedSelectedRegisteredRootRemoteContextV1,
+    canonical_pending_control_record_bytes: Vec<u8>,
+    acknowledgement_authority: &dyn CatalogReadyAcknowledgementAuthorityV1,
+) -> AnyhowResult<AcknowledgedCatalogReadyV1> {
+    let pending_wire =
+        parse_canonical_control_record_v1(&canonical_pending_control_record_bytes, selected)
+            .context(
+                "catalog Ready acknowledgement requires one bounded canonical Pending record",
+            )?;
+    let CatalogControlStateWireV1::PublicationPending { pending } = &pending_wire.control_state
+    else {
+        anyhow::bail!("catalog Ready acknowledgement requires PublicationPending input");
+    };
+
+    let context = CatalogAuthorityContextV1::from_selected(selected);
+    let storage_authority_fingerprint =
+        super::parse_lower_hex_32(&pending_wire.storage_authority_fingerprint)
+            .context("catalog Pending storage authority fingerprint is invalid")?;
+    let control_authority_fingerprint =
+        super::parse_lower_hex_32(&pending_wire.control_authority_fingerprint)
+            .context("catalog Pending control authority fingerprint is invalid")?;
+    anyhow::ensure!(
+        storage_authority.authority_fingerprint == storage_authority_fingerprint
+            && storage_authority
+                .conditional_write_receipt
+                .authorizes(storage_authority.operator, &context.remote_prefix)?,
+        "catalog Ready acknowledgement crossed its authenticated storage authority"
+    );
+    let authenticated_output_binding_wire_bytes =
+        validate_catalog_publication_output_binding_contract_v1(
+            &storage_authority,
+            &context.remote_prefix,
+        )
+        .context("catalog Ready acknowledgement lacks an authenticated output-binding contract")?;
+    anyhow::ensure!(
+        authenticated_output_binding_wire_bytes.get()
+            == pending.successor_layout.output_binding_wire_bytes
+            && storage_authority
+                .publication_output_binding_contract
+                .fingerprint
+                == super::parse_lower_hex_32(
+                    &pending.successor_layout.output_binding_contract_fingerprint,
+                )
+                .context("catalog Pending output-binding contract fingerprint is invalid")?,
+        "catalog Ready acknowledgement crossed the persisted output-binding contract"
+    );
+
+    let bootstrap = CatalogBootstrapIdentityV1 {
+        head_revision: super::parse_lower_hex_32(&pending_wire.bootstrap.head_revision)
+            .context("catalog Pending bootstrap HEAD revision is invalid")?,
+        publication_nonce: super::parse_lower_hex_32(&pending_wire.bootstrap.publication_nonce)
+            .context("catalog Pending bootstrap nonce is invalid")?,
+        complete_corpus_attestation: super::parse_lower_hex_32(
+            &pending_wire.bootstrap.complete_corpus_attestation,
+        )
+        .context("catalog Pending bootstrap attestation is invalid")?,
+        writer_epoch: super::parse_lower_hex_32(&pending_wire.bootstrap.writer_epoch)
+            .context("catalog Pending writer epoch is invalid")?,
+    };
+    let parent = CatalogHighWaterPointV1 {
+        sequence: NonZeroU64::new(pending.parent.catalog_sequence)
+            .context("catalog Pending parent sequence cannot be zero")?,
+        head_revision: super::parse_lower_hex_32(&pending.parent.head_revision)
+            .context("catalog Pending parent HEAD revision is invalid")?,
+        publication_nonce: super::parse_lower_hex_32(&pending.parent.publication_nonce)
+            .context("catalog Pending parent nonce is invalid")?,
+    };
+    let predecessor_ready_revision = CatalogControlAuthorityRevisionV1 {
+        generation: NonZeroU64::new(pending.ready_control_generation)
+            .context("catalog Pending predecessor Ready generation cannot be zero")?,
+        fingerprint: super::parse_lower_hex_32(&pending.ready_control_revision_fingerprint)
+            .context("catalog Pending predecessor Ready revision is invalid")?,
+    };
+    let pending_revision = CatalogControlAuthorityRevisionV1 {
+        generation: NonZeroU64::new(pending_wire.control_generation)
+            .context("catalog Pending generation cannot be zero")?,
+        fingerprint: super::parse_lower_hex_32(&pending_wire.control_revision_fingerprint)
+            .context("catalog Pending revision is invalid")?,
+    };
+    let control_binding = CatalogControlAcquisitionBindingV1 {
+        context: context.clone(),
+        bootstrap: bootstrap.clone(),
+        current: parent,
+        storage_authority_fingerprint,
+        control_authority_fingerprint,
+        ready_revision: predecessor_ready_revision,
+        lease_public_fingerprint: NonSecretLeasePublicFingerprintV1(
+            super::parse_lower_hex_32(&pending_wire.lease_public_fingerprint)
+                .context("catalog Pending control lease fingerprint is invalid")?,
+        ),
+    };
+    let publishing_head_reservation_fingerprint =
+        super::parse_lower_hex_32(&pending.publishing_head_reservation_fingerprint)
+            .context("catalog Pending publishing-HEAD reservation is invalid")?;
+    let successor_layout_certificate_fingerprint =
+        super::parse_lower_hex_32(&pending.successor_layout.certificate_fingerprint)
+            .context("catalog Pending successor-layout certificate is invalid")?;
+    let writer_fence_authority_revision_fingerprint =
+        super::parse_lower_hex_32(&pending.writer_fence_authority_revision_fingerprint)
+            .context("catalog Pending writer-fence authority revision is invalid")?;
+    let writer_fence_lease_public_fingerprint = NonSecretLeasePublicFingerprintV1(
+        super::parse_lower_hex_32(&pending.writer_fence_lease_public_fingerprint)
+            .context("catalog Pending writer-fence lease fingerprint is invalid")?,
+    );
+    let successor_sequence = NonZeroU64::new(pending.successor_catalog_sequence)
+        .context("catalog Pending successor sequence cannot be zero")?;
+    let successor_publication_nonce =
+        super::parse_lower_hex_32(&pending.successor_publication_nonce)
+            .context("catalog Pending successor nonce is invalid")?;
+    let pending_control_record_fingerprint = super::domain_object_id_v1(
+        CATALOG_CONTROL_RECORD_DOMAIN_V1,
+        &canonical_pending_control_record_bytes,
+    );
+
+    let mut request = CatalogReadyAcknowledgementRequestV1 {
+        control_binding: control_binding.clone(),
+        pending_revision,
+        publishing_head_reservation_fingerprint,
+        successor_layout_certificate_fingerprint,
+        writer_fence_authority_revision_fingerprint,
+        writer_fence_lease_public_fingerprint,
+        successor_sequence,
+        successor_publication_nonce,
+        canonical_pending_control_record_bytes,
+        pending_control_record_fingerprint,
+        request_fingerprint: [0; 32],
+    };
+    request.request_fingerprint = catalog_ready_acknowledgement_request_fingerprint_v1(&request)?;
+    anyhow::ensure!(
+        request.request_fingerprint != [0; 32],
+        "catalog Ready-acknowledgement request fingerprint cannot be zero"
+    );
+    let expected_request_fingerprint = request.request_fingerprint;
+    let receipt = acknowledgement_authority
+        .acknowledge_ready_v1(request)
+        .await
+        .context("authenticating exact durable catalog Ready completion")?;
+
+    let ready_wire =
+        parse_canonical_control_record_v1(&receipt.canonical_ready_control_record_bytes, selected)
+            .context("Ready acknowledgement returned an invalid canonical control record")?;
+    let CatalogControlStateWireV1::Ready {
+        current,
+        completed_publication: Some(completed),
+    } = &ready_wire.control_state
+    else {
+        anyhow::bail!("Ready acknowledgement returned no exact completion provenance");
+    };
+    let ready_revision = CatalogControlAuthorityRevisionV1 {
+        generation: NonZeroU64::new(ready_wire.control_generation)
+            .context("acknowledged Ready generation cannot be zero")?,
+        fingerprint: super::parse_lower_hex_32(&ready_wire.control_revision_fingerprint)
+            .context("acknowledged Ready revision is invalid")?,
+    };
+    let successor = CatalogHighWaterPointV1 {
+        sequence: NonZeroU64::new(current.catalog_sequence)
+            .context("acknowledged Ready successor sequence cannot be zero")?,
+        head_revision: super::parse_lower_hex_32(&current.head_revision)
+            .context("acknowledged Ready HEAD revision is invalid")?,
+        publication_nonce: super::parse_lower_hex_32(&current.publication_nonce)
+            .context("acknowledged Ready nonce is invalid")?,
+    };
+    let completed_pending_revision = CatalogControlAuthorityRevisionV1 {
+        generation: NonZeroU64::new(completed.pending_control_generation)
+            .context("Ready completion Pending generation cannot be zero")?,
+        fingerprint: super::parse_lower_hex_32(&completed.pending_control_revision_fingerprint)
+            .context("Ready completion Pending revision is invalid")?,
+    };
+    let completed_pending_control_record_fingerprint =
+        super::parse_lower_hex_32(&completed.pending_control_record_fingerprint)
+            .context("Ready completion Pending record fingerprint is invalid")?;
+    let completed_publishing_head_reservation_fingerprint =
+        super::parse_lower_hex_32(&completed.publishing_head_reservation_fingerprint)
+            .context("Ready completion publishing-HEAD reservation is invalid")?;
+    let completed_successor_layout_certificate_fingerprint =
+        super::parse_lower_hex_32(&completed.successor_layout_certificate_fingerprint)
+            .context("Ready completion successor-layout certificate is invalid")?;
+    let completed_writer_fence_authority_revision_fingerprint =
+        super::parse_lower_hex_32(&completed.writer_fence_authority_revision_fingerprint)
+            .context("Ready completion writer-fence authority revision is invalid")?;
+    let completed_writer_fence_lease_public_fingerprint = NonSecretLeasePublicFingerprintV1(
+        super::parse_lower_hex_32(&completed.writer_fence_lease_public_fingerprint)
+            .context("Ready completion writer-fence lease fingerprint is invalid")?,
+    );
+    let completed_head_fenced_request_fingerprint =
+        super::parse_lower_hex_32(&completed.committed_head_fenced_request_fingerprint)
+            .context("Ready completion terminal request fingerprint is invalid")?;
+    let completed_head_binding =
+        super::validate_binding_wire_v1(&completed.committed_head_storage_binding)
+            .context("Ready completion committed-HEAD binding is invalid")?;
+    mutable_head_etag_v1(&completed_head_binding)
+        .context("Ready completion committed-HEAD binding has no usable ETag")?;
+    let ready_control_record_fingerprint = super::domain_object_id_v1(
+        CATALOG_CONTROL_RECORD_DOMAIN_V1,
+        &receipt.canonical_ready_control_record_bytes,
+    );
+
+    anyhow::ensure!(
+        ready_wire.remote_prefix == pending_wire.remote_prefix
+            && ready_wire.context == pending_wire.context
+            && ready_wire.control_contract_fingerprint == pending_wire.control_contract_fingerprint
+            && ready_wire.control_authority_fingerprint
+                == pending_wire.control_authority_fingerprint
+            && ready_wire.storage_authority_fingerprint
+                == pending_wire.storage_authority_fingerprint
+            && ready_wire.lease_public_fingerprint == pending_wire.lease_public_fingerprint
+            && ready_wire.bootstrap == pending_wire.bootstrap
+            && ready_wire.writer_epoch == pending_wire.writer_epoch
+            && ready_revision.generation.get()
+                == pending_revision
+                    .generation
+                    .get()
+                    .checked_add(1)
+                    .context("catalog Ready generation overflow")?
+            && ready_revision.fingerprint
+                == ready_control_revision_fingerprint_from_wire_v1(&ready_wire)
+                    .context("catalog Ready revision cannot be rederived")?
+            && ready_revision.fingerprint != control_binding.ready_revision.fingerprint
+            && completed_pending_revision == pending_revision
+            && completed_pending_control_record_fingerprint == pending_control_record_fingerprint
+            && completed_publishing_head_reservation_fingerprint
+                == publishing_head_reservation_fingerprint
+            && completed_successor_layout_certificate_fingerprint
+                == successor_layout_certificate_fingerprint
+            && completed_writer_fence_authority_revision_fingerprint
+                == writer_fence_authority_revision_fingerprint
+            && completed_writer_fence_lease_public_fingerprint
+                == writer_fence_lease_public_fingerprint
+            && successor.sequence == successor_sequence
+            && successor.publication_nonce == successor_publication_nonce
+            && successor.head_revision != control_binding.current.head_revision,
+        "authenticated catalog Ready completion crossed its exact Pending predecessor"
+    );
+    anyhow::ensure!(
+        receipt.request_fingerprint == expected_request_fingerprint
+            && receipt.ready_revision == ready_revision
+            && receipt.ready_control_record_fingerprint == ready_control_record_fingerprint
+            && receipt.ready_control_record_fingerprint != pending_control_record_fingerprint
+            && receipt.successor == successor
+            && receipt.successor_layout_certificate_fingerprint
+                == successor_layout_certificate_fingerprint
+            && receipt.committed_head_fenced_request_fingerprint
+                == completed_head_fenced_request_fingerprint
+            && receipt.committed_head_binding == completed_head_binding,
+        "catalog Ready acknowledgement receipt crossed its authenticated completion"
+    );
+
+    let corpus = match super::read_semantically_bound_remote_catalog_corpus_v1(
+        storage_authority.operator,
+        selected,
+        storage_authority.conditional_write_receipt,
+    )
+    .await
+    .context("strictly rereading acknowledged committed catalog closure")?
+    {
+        super::StrictSemanticallyBoundRemoteCatalogReadV1::Verified(corpus) => corpus,
+        super::StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+            anyhow::bail!(
+                "acknowledged catalog Ready has no complete current semantic closure: {incomplete:?}"
+            )
+        }
+    };
+    let observed = observe_published_catalog_head_v1(&corpus).map_err(|error| {
+        anyhow::anyhow!("acknowledged committed catalog HEAD is invalid: {error:?}")
+    })?;
+    anyhow::ensure!(
+        observed.context == context
+            && observed.sequence == successor.sequence
+            && observed.publication_nonce == successor.publication_nonce
+            && observed.parent_head_revision == Some(control_binding.current.head_revision)
+            && observed.head_revision == successor.head_revision
+            && observed.current_head_binding == completed_head_binding,
+        "strict current catalog closure differs from the authenticated Ready completion"
+    );
+
+    Ok(AcknowledgedCatalogReadyV1 {
+        context,
+        bootstrap,
+        successor,
+        storage_authority_fingerprint,
+        control_authority_fingerprint,
+        ready_revision,
+        ready_control_record_fingerprint,
+        pending_control_record_fingerprint,
+        successor_layout_certificate_fingerprint,
+        committed_head_fenced_request_fingerprint: completed_head_fenced_request_fingerprint,
+        committed_head_binding: completed_head_binding,
+    })
+}
+
 /// Reconstruct one exact Pending publication after a process restart.
 ///
 /// Persisted bytes contribute only bounded, untrusted facts. Immutable
@@ -9076,6 +9544,10 @@ mod tests {
         ready: Option<TestCatalogReadyRequestV1>,
         calls: Vec<TestCatalogFenceCallV1>,
         reacquisition_mutation: Option<TestCatalogReacquisitionMutationV1>,
+        fenced_write_attempts: u64,
+        fenced_replay_attempts: u64,
+        ready_acknowledgement_calls: u64,
+        ready_acknowledgement_mutation: Option<TestCatalogReacquisitionMutationV1>,
     }
 
     struct TestCatalogMonotonicFenceLeaseV1 {
@@ -9090,6 +9562,27 @@ mod tests {
         revoke_before_next_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
         fail_after_next_backend_apply: std::sync::Arc<std::sync::atomic::AtomicBool>,
         state: std::sync::Arc<tokio::sync::Mutex<TestCatalogFenceStateV1>>,
+    }
+
+    struct TestCatalogReadyAcknowledgementAuthorityV1 {
+        state: std::sync::Arc<tokio::sync::Mutex<TestCatalogFenceStateV1>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestCatalogReadyAcknowledgementReceiptMutationV1 {
+        RequestFingerprint,
+        ReadyRecordBytes,
+        ReadyRevision,
+        ReadyRecordFingerprint,
+        Successor,
+        SuccessorLayoutCertificateFingerprint,
+        CommittedHeadRequestFingerprint,
+        CommittedHeadBinding,
+    }
+
+    struct TestMutatingCatalogReadyAcknowledgementAuthorityV1 {
+        state: std::sync::Arc<tokio::sync::Mutex<TestCatalogFenceStateV1>>,
+        mutation: TestCatalogReadyAcknowledgementReceiptMutationV1,
     }
 
     impl TestCatalogPendingFenceReacquisitionAuthorityV1 {
@@ -9207,6 +9700,217 @@ mod tests {
                         test_reacquisition_authority: self.clone_authority(),
                     },
                 })
+            })
+        }
+    }
+
+    impl CatalogReadyAcknowledgementAuthorityV1 for TestCatalogReadyAcknowledgementAuthorityV1 {
+        fn acknowledge_ready_v1<'a>(
+            &'a self,
+            request: CatalogReadyAcknowledgementRequestV1,
+        ) -> CatalogReadyAcknowledgementFutureV1<'a> {
+            Box::pin(async move {
+                anyhow::ensure!(
+                    catalog_ready_acknowledgement_request_fingerprint_v1(&request)?
+                        == request.request_fingerprint
+                        && super::super::domain_object_id_v1(
+                            CATALOG_CONTROL_RECORD_DOMAIN_V1,
+                            &request.canonical_pending_control_record_bytes,
+                        ) == request.pending_control_record_fingerprint
+                        && pending_layout_fingerprint_from_bytes_v1(
+                            &request.canonical_pending_control_record_bytes,
+                        ) == Some(request.successor_layout_certificate_fingerprint),
+                    "test Ready-acknowledgement request is invalid"
+                );
+                let mut state = self.state.lock().await;
+                let (
+                    canonical_ready_control_record_bytes,
+                    ready_revision,
+                    ready_control_record_fingerprint,
+                    successor,
+                    terminal_request_fingerprint,
+                    terminal_binding,
+                ) = {
+                    let pending = state
+                        .pending
+                        .as_ref()
+                        .context("test Ready acknowledgement has no durable Pending epoch")?;
+                    let ready = state
+                        .ready
+                        .as_ref()
+                        .context("test Ready acknowledgement has no durable Ready completion")?;
+                    let mutation_count = pending
+                        .mutation_count
+                        .context("test Ready acknowledgement has no fenced storage sequence")?;
+                    let terminal_ordinal = mutation_count
+                        .checked_add(1)
+                        .context("test Ready acknowledgement terminal ordinal overflow")?;
+                    anyhow::ensure!(
+                        pending.next_ordinal
+                            == mutation_count
+                                .checked_add(2)
+                                .context("test Ready acknowledgement terminal ordinal overflow")?
+                            && usize::try_from(pending.next_ordinal).ok()
+                                == Some(pending.receipts.len())
+                            && pending.receipts.keys().copied().eq(0..pending.next_ordinal),
+                        "test Ready acknowledgement lacks the complete fenced storage sequence"
+                    );
+                    anyhow::ensure!(
+                        state.predecessor_ready.is_none()
+                            && pending.control_binding == request.control_binding
+                            && pending.pending_revision == request.pending_revision
+                            && pending.pending_control_record_fingerprint
+                                == request.pending_control_record_fingerprint
+                            && pending.canonical_pending_control_record_bytes
+                                == request.canonical_pending_control_record_bytes
+                            && pending.publishing_head_reservation_fingerprint
+                                == request.publishing_head_reservation_fingerprint
+                            && pending.successor_layout_certificate_fingerprint
+                                == request.successor_layout_certificate_fingerprint
+                            && pending.writer_fence_authority_revision_fingerprint
+                                == request.writer_fence_authority_revision_fingerprint
+                            && pending.writer_fence_lease_public_fingerprint
+                                == request.writer_fence_lease_public_fingerprint
+                            && ready.control_binding == request.control_binding
+                            && ready.pending_revision == request.pending_revision
+                            && ready.pending_control_record_fingerprint
+                                == request.pending_control_record_fingerprint
+                            && ready.canonical_pending_control_record_bytes
+                                == request.canonical_pending_control_record_bytes
+                            && ready.publishing_head_reservation_fingerprint
+                                == request.publishing_head_reservation_fingerprint
+                            && ready.successor_layout_certificate_fingerprint
+                                == request.successor_layout_certificate_fingerprint
+                            && ready.writer_fence_authority_revision_fingerprint
+                                == request.writer_fence_authority_revision_fingerprint
+                            && ready.writer_fence_lease_public_fingerprint
+                                == request.writer_fence_lease_public_fingerprint
+                            && ready.successor.sequence == request.successor_sequence
+                            && ready.successor.publication_nonce
+                                == request.successor_publication_nonce,
+                        "test Ready acknowledgement crossed its exact durable transition"
+                    );
+                    let (terminal_request_fingerprint, terminal_binding) = pending
+                        .receipts
+                        .get(&terminal_ordinal)
+                        .context("test Ready acknowledgement has no durable terminal receipt")?;
+                    let ready_wire = serde_json::from_slice::<CatalogControlRecordWireV1>(
+                        &ready.canonical_ready_control_record_bytes,
+                    )
+                    .context("test Ready acknowledgement record is not canonical control wire")?;
+                    anyhow::ensure!(
+                        serde_json::to_vec(&ready_wire)?.as_slice()
+                            == ready.canonical_ready_control_record_bytes.as_slice()
+                            && super::super::domain_object_id_v1(
+                                CATALOG_CONTROL_RECORD_DOMAIN_V1,
+                                &ready.canonical_ready_control_record_bytes,
+                            ) == ready.ready_control_record_fingerprint
+                            && NonZeroU64::new(ready_wire.control_generation)
+                                == Some(ready.ready_revision.generation)
+                            && super::super::parse_lower_hex_32(
+                                &ready_wire.control_revision_fingerprint,
+                            ) == Some(ready.ready_revision.fingerprint)
+                            && ready_control_revision_fingerprint_from_wire_v1(&ready_wire)
+                                == Some(ready.ready_revision.fingerprint),
+                        "test Ready acknowledgement durable record identity is invalid"
+                    );
+                    let CatalogControlStateWireV1::Ready {
+                        current,
+                        completed_publication: Some(completed),
+                    } = &ready_wire.control_state
+                    else {
+                        anyhow::bail!("test Ready acknowledgement has no completion provenance");
+                    };
+                    anyhow::ensure!(
+                        current.catalog_sequence == ready.successor.sequence.get()
+                            && current.head_revision == lower_hex(&ready.successor.head_revision)
+                            && current.publication_nonce
+                                == lower_hex(&ready.successor.publication_nonce)
+                            && completed.committed_head_fenced_request_fingerprint
+                                == lower_hex(terminal_request_fingerprint)
+                            && completed.committed_head_storage_binding
+                                == binding_wire_v1(terminal_binding)
+                            && completed.successor_layout_certificate_fingerprint
+                                == lower_hex(&request.successor_layout_certificate_fingerprint),
+                        "test Ready acknowledgement crossed its durable terminal receipt"
+                    );
+                    (
+                        ready.canonical_ready_control_record_bytes.clone(),
+                        ready.ready_revision,
+                        ready.ready_control_record_fingerprint,
+                        ready.successor,
+                        *terminal_request_fingerprint,
+                        terminal_binding.clone(),
+                    )
+                };
+                state.ready_acknowledgement_calls = state
+                    .ready_acknowledgement_calls
+                    .checked_add(1)
+                    .context("test Ready acknowledgement counter overflow")?;
+                let acknowledgement_mutation = state.ready_acknowledgement_mutation.take();
+                drop(state);
+                if let Some(mutation) = acknowledgement_mutation {
+                    mutation
+                        .operator
+                        .write(&mutation.object_key, mutation.raw_bytes)
+                        .await
+                        .context("test mutating catalog artifact during Ready acknowledgement")?;
+                }
+                Ok(TrustedCatalogReadyAcknowledgementReceiptV1 {
+                    request_fingerprint: request.request_fingerprint,
+                    canonical_ready_control_record_bytes,
+                    ready_revision,
+                    ready_control_record_fingerprint,
+                    successor,
+                    successor_layout_certificate_fingerprint: request
+                        .successor_layout_certificate_fingerprint,
+                    committed_head_fenced_request_fingerprint: terminal_request_fingerprint,
+                    committed_head_binding: terminal_binding,
+                })
+            })
+        }
+    }
+
+    impl CatalogReadyAcknowledgementAuthorityV1 for TestMutatingCatalogReadyAcknowledgementAuthorityV1 {
+        fn acknowledge_ready_v1<'a>(
+            &'a self,
+            request: CatalogReadyAcknowledgementRequestV1,
+        ) -> CatalogReadyAcknowledgementFutureV1<'a> {
+            Box::pin(async move {
+                let authority = TestCatalogReadyAcknowledgementAuthorityV1 {
+                    state: self.state.clone(),
+                };
+                let mut receipt = authority.acknowledge_ready_v1(request).await?;
+                match self.mutation {
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::RequestFingerprint => {
+                        receipt.request_fingerprint = [0x71; 32];
+                    }
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::ReadyRecordBytes => {
+                        receipt.canonical_ready_control_record_bytes.push(b' ');
+                    }
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::ReadyRevision => {
+                        receipt.ready_revision.fingerprint = [0x72; 32];
+                    }
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::ReadyRecordFingerprint => {
+                        receipt.ready_control_record_fingerprint = [0x73; 32];
+                    }
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::Successor => {
+                        receipt.successor.head_revision = [0x74; 32];
+                    }
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::SuccessorLayoutCertificateFingerprint => {
+                        receipt.successor_layout_certificate_fingerprint = [0x75; 32];
+                    }
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::CommittedHeadRequestFingerprint => {
+                        receipt.committed_head_fenced_request_fingerprint = [0x76; 32];
+                    }
+                    TestCatalogReadyAcknowledgementReceiptMutationV1::CommittedHeadBinding => {
+                        receipt.committed_head_binding =
+                            RegisteredRootRemoteObjectBindingV1::Etag {
+                                etag: "crossed-acknowledgement-etag".to_owned(),
+                            };
+                    }
+                }
+                Ok(receipt)
             })
         }
     }
@@ -9330,6 +10034,10 @@ mod tests {
         ) -> CatalogFencedStorageWriteFutureV1<'a> {
             Box::pin(async move {
                 let mut state = self.state.lock().await;
+                state.fenced_write_attempts = state
+                    .fenced_write_attempts
+                    .checked_add(1)
+                    .context("test fenced-write attempt counter overflow")?;
                 if self
                     .revoke_before_next_write
                     .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -9490,6 +10198,11 @@ mod tests {
             request: CatalogFencedStorageWriteRequestV1,
         ) -> CatalogFencedStorageWriteFutureV1<'a> {
             Box::pin(async move {
+                let mut state = self.state.lock().await;
+                state.fenced_replay_attempts = state
+                    .fenced_replay_attempts
+                    .checked_add(1)
+                    .context("test fenced-replay attempt counter overflow")?;
                 anyhow::ensure!(self.is_live_v1(), "test catalog control lease is not live");
                 anyhow::ensure!(
                     catalog_fenced_storage_write_request_fingerprint_v1(
@@ -9501,7 +10214,6 @@ mod tests {
                             == request.successor_raw_blake3,
                     "test fenced-storage receipt replay request is invalid"
                 );
-                let mut state = self.state.lock().await;
                 anyhow::ensure!(
                     state.ready.is_none(),
                     "test catalog fence already advanced beyond Pending"
@@ -9723,6 +10435,29 @@ mod tests {
         Into<Vec<crate::reconcile::ReconcileAction>>
     );
     static_assertions::assert_not_impl_any!(
+        CatalogReadyAcknowledgementRequestV1:
+        Clone,
+        serde::Serialize,
+        Default,
+        Into<RetainedCatalogControlLeaseV1>,
+        Into<TrustedCatalogReadyAcknowledgementReceiptV1>,
+        Into<AcknowledgedCatalogReadyV1>,
+        Into<BoundPendingCatalogControlV1<'static>>,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        TrustedCatalogReadyAcknowledgementReceiptV1:
+        Clone,
+        serde::Serialize,
+        Default,
+        Into<RetainedCatalogControlLeaseV1>,
+        Into<HeldReadyCatalogControlGuardV1>,
+        Into<AdvancedCatalogHighWaterV1>,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
         CatalogControlReadyAdvanceRequestV1: Clone,
         serde::Serialize,
         Default
@@ -9741,6 +10476,8 @@ mod tests {
         Into<TrustedCatalogPublicationPendingReceiptV1>,
         Into<TrustedCatalogPendingFenceReacquisitionV1>,
         Into<TrustedCatalogHighWaterAdvanceReceiptV1>,
+        Into<TrustedCatalogReadyAcknowledgementReceiptV1>,
+        Into<AcknowledgedCatalogReadyV1>,
         Into<BoundPendingCatalogControlV1<'static>>,
         Into<BoundCommittedCatalogSuccessorV1>
     );
@@ -9750,6 +10487,8 @@ mod tests {
         Into<HeldReadyCatalogControlGuardV1>,
         Into<TrustedCatalogPublicationPendingReceiptV1>,
         Into<TrustedCatalogHighWaterAdvanceReceiptV1>,
+        Into<TrustedCatalogReadyAcknowledgementReceiptV1>,
+        Into<AcknowledgedCatalogReadyV1>,
         Into<BoundPendingCatalogControlV1<'static>>,
         Into<BoundCommittedCatalogSuccessorV1>
     );
@@ -9947,6 +10686,19 @@ mod tests {
         Default,
         Into<TrustedCatalogHighWaterGuardV1>,
         Into<HeldReadyCatalogControlGuardV1>,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>
+    );
+    static_assertions::assert_not_impl_any!(
+        AcknowledgedCatalogReadyV1:
+        Clone,
+        serde::Serialize,
+        Default,
+        Into<RetainedCatalogControlLeaseV1>,
+        Into<TrustedCatalogHighWaterGuardV1>,
+        Into<HeldReadyCatalogControlGuardV1>,
+        Into<AdvancedCatalogHighWaterV1>,
+        Into<BoundPendingCatalogControlV1<'static>>,
         Into<crate::reconcile::ReconcilePlan>,
         Into<Vec<crate::reconcile::ReconcileAction>>
     );
@@ -10547,6 +11299,59 @@ mod tests {
             state,
             receipts,
         )
+    }
+
+    async fn cold_ready_acknowledgement_fixture() -> (
+        SemanticRemoteCatalogFixtureV1,
+        Vec<u8>,
+        std::sync::Arc<tokio::sync::Mutex<TestCatalogFenceStateV1>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (fixture, persisted_pending, reacquisition_authority, state, _) =
+            cold_committed_recovery_fixture().await;
+        let reconstructed = reconstruct_catalog_publication_from_authenticated_pending_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending.clone(),
+            reacquisition_authority.as_ref(),
+        )
+        .await
+        .unwrap();
+        let committed = match resume_reconstructed_catalog_publication_v1(reconstructed)
+            .await
+            .unwrap()
+        {
+            ReconstructedCatalogPublicationV1::Committed(committed) => *committed,
+            ReconstructedCatalogPublicationV1::Applied(_) => {
+                panic!("complete durable terminal evidence must recover committed authority")
+            }
+        };
+        let live = committed
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_live
+            .clone();
+        committed
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_fail_after_next_backend_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = advance_catalog_high_water_v1(committed)
+            .await
+            .expect_err("Ready must become durable before its simulated response failure");
+        drop(failure);
+        live.store(false, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut state = state.lock().await;
+            assert!(state.ready.is_some());
+            state.calls.clear();
+            state.fenced_write_attempts = 0;
+            state.fenced_replay_attempts = 0;
+            state.ready_acknowledgement_calls = 0;
+        }
+        (fixture, persisted_pending, state, live)
     }
 
     async fn authoritative_bound_pending<'a>(
@@ -12045,6 +12850,303 @@ mod tests {
         let state = state.lock().await;
         assert!(state.calls.is_empty());
         assert!(state.ready.is_some());
+    }
+
+    #[tokio::test]
+    async fn cold_ready_acknowledgement_is_terminal_receipt_only_and_replayable() {
+        let (fixture, persisted_pending, state, live) = cold_ready_acknowledgement_fixture().await;
+        let authority = TestCatalogReadyAcknowledgementAuthorityV1 {
+            state: state.clone(),
+        };
+        assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+
+        let first = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending.clone(),
+            &authority,
+        )
+        .await
+        .unwrap();
+        let second = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending,
+            &authority,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.context, second.context);
+        assert_eq!(first.bootstrap, second.bootstrap);
+        assert_eq!(first.successor, second.successor);
+        assert_eq!(first.successor.sequence.get(), 2);
+        assert_eq!(first.ready_revision, second.ready_revision);
+        assert_eq!(first.ready_revision.generation.get(), 9);
+        assert_eq!(
+            first.ready_control_record_fingerprint,
+            second.ready_control_record_fingerprint
+        );
+        assert_eq!(
+            first.pending_control_record_fingerprint,
+            second.pending_control_record_fingerprint
+        );
+        assert_eq!(
+            first.successor_layout_certificate_fingerprint,
+            second.successor_layout_certificate_fingerprint
+        );
+        assert_eq!(
+            first.committed_head_fenced_request_fingerprint,
+            second.committed_head_fenced_request_fingerprint
+        );
+        assert_eq!(first.committed_head_binding, second.committed_head_binding);
+        assert_eq!(first.storage_authority_fingerprint, [0x99; 32]);
+        assert_eq!(first.control_authority_fingerprint, [0x9a; 32]);
+        let state = state.lock().await;
+        assert_eq!(state.ready_acknowledgement_calls, 2);
+        assert_eq!(state.fenced_write_attempts, 0);
+        assert_eq!(state.fenced_replay_attempts, 0);
+        assert!(state.calls.is_empty());
+        assert!(state.ready.is_some());
+    }
+
+    #[tokio::test]
+    async fn ready_acknowledgement_accepts_only_exact_record_and_receipt_fields() {
+        let (fixture, persisted_pending, state, _) = cold_ready_acknowledgement_fixture().await;
+        for mutation in [
+            TestCatalogReadyAcknowledgementReceiptMutationV1::RequestFingerprint,
+            TestCatalogReadyAcknowledgementReceiptMutationV1::ReadyRecordBytes,
+            TestCatalogReadyAcknowledgementReceiptMutationV1::ReadyRevision,
+            TestCatalogReadyAcknowledgementReceiptMutationV1::ReadyRecordFingerprint,
+            TestCatalogReadyAcknowledgementReceiptMutationV1::Successor,
+            TestCatalogReadyAcknowledgementReceiptMutationV1::SuccessorLayoutCertificateFingerprint,
+            TestCatalogReadyAcknowledgementReceiptMutationV1::CommittedHeadRequestFingerprint,
+            TestCatalogReadyAcknowledgementReceiptMutationV1::CommittedHeadBinding,
+        ] {
+            let authority = TestMutatingCatalogReadyAcknowledgementAuthorityV1 {
+                state: state.clone(),
+                mutation,
+            };
+            acknowledge_catalog_publication_from_authenticated_ready_v1(
+                trusted_storage(&fixture),
+                &test_selected(),
+                persisted_pending.clone(),
+                &authority,
+            )
+            .await
+            .expect_err("crossed Ready record or receipt fields must fail closed");
+        }
+        let state = state.lock().await;
+        assert_eq!(state.ready_acknowledgement_calls, 8);
+        assert_eq!(state.fenced_write_attempts, 0);
+        assert_eq!(state.fenced_replay_attempts, 0);
+        assert!(state.calls.is_empty());
+        assert!(state.ready.is_some());
+    }
+
+    #[tokio::test]
+    async fn ready_acknowledgement_never_uses_ready_bytes_to_reopen_input_state() {
+        let (fixture, _, state, _) = cold_ready_acknowledgement_fixture().await;
+        let canonical_ready_bytes = state
+            .lock()
+            .await
+            .ready
+            .as_ref()
+            .unwrap()
+            .canonical_ready_control_record_bytes
+            .clone();
+        let authority = TestCatalogReadyAcknowledgementAuthorityV1 {
+            state: state.clone(),
+        };
+
+        let error = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            canonical_ready_bytes,
+            &authority,
+        )
+        .await
+        .expect_err("Ready bytes must never substitute for the exact Pending input");
+        assert!(format!("{error:#}").contains("requires PublicationPending input"));
+        let state = state.lock().await;
+        assert_eq!(state.ready_acknowledgement_calls, 0);
+        assert_eq!(state.fenced_write_attempts, 0);
+        assert_eq!(state.fenced_replay_attempts, 0);
+        assert!(state.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_acknowledgement_rejects_missing_or_crossed_terminal_ledger() {
+        let (fixture, persisted_pending, state, _) = cold_ready_acknowledgement_fixture().await;
+        let authority = TestCatalogReadyAcknowledgementAuthorityV1 {
+            state: state.clone(),
+        };
+        let (terminal_ordinal, terminal_receipt) = {
+            let mut state = state.lock().await;
+            let pending = state.pending.as_mut().unwrap();
+            let terminal_ordinal = pending.mutation_count.unwrap() + 1;
+            let terminal_receipt = pending.receipts.remove(&terminal_ordinal).unwrap();
+            (terminal_ordinal, terminal_receipt)
+        };
+
+        let error = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending.clone(),
+            &authority,
+        )
+        .await
+        .expect_err("a missing durable terminal receipt must fail closed");
+        assert!(format!("{error:#}").contains("complete fenced storage sequence"));
+        {
+            let mut state = state.lock().await;
+            let pending = state.pending.as_mut().unwrap();
+            pending
+                .receipts
+                .insert(terminal_ordinal, terminal_receipt.clone());
+            pending.receipts.get_mut(&terminal_ordinal).unwrap().0 = [0x7d; 32];
+        }
+        let error = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending.clone(),
+            &authority,
+        )
+        .await
+        .expect_err("a crossed terminal request fingerprint must fail closed");
+        assert!(format!("{error:#}").contains("durable terminal receipt"));
+        {
+            let mut state = state.lock().await;
+            let pending = state.pending.as_mut().unwrap();
+            pending
+                .receipts
+                .insert(terminal_ordinal, terminal_receipt.clone());
+            pending.receipts.get_mut(&terminal_ordinal).unwrap().1 =
+                RegisteredRootRemoteObjectBindingV1::Etag {
+                    etag: "crossed-terminal-etag".to_owned(),
+                };
+        }
+        let error = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending,
+            &authority,
+        )
+        .await
+        .expect_err("a crossed terminal storage binding must fail closed");
+        assert!(format!("{error:#}").contains("durable terminal receipt"));
+        let state = state.lock().await;
+        assert_eq!(state.ready_acknowledgement_calls, 0);
+        assert_eq!(state.fenced_write_attempts, 0);
+        assert_eq!(state.fenced_replay_attempts, 0);
+        assert!(state.calls.is_empty());
+        assert!(state.ready.is_some());
+    }
+
+    #[tokio::test]
+    async fn ready_acknowledgement_strictly_rereads_closure_after_backend_confirmation() {
+        let (fixture, persisted_pending, state, _) = cold_ready_acknowledgement_fixture().await;
+        {
+            let mut state = state.lock().await;
+            state.ready_acknowledgement_mutation = Some(TestCatalogReacquisitionMutationV1 {
+                operator: fixture.operator().clone(),
+                object_key: "roots/index/retained.txt".to_owned(),
+                raw_bytes: b"corrupted after Ready receipt".to_vec(),
+            });
+        }
+        let authority = TestCatalogReadyAcknowledgementAuthorityV1 {
+            state: state.clone(),
+        };
+
+        let error = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending,
+            &authority,
+        )
+        .await
+        .expect_err("post-receipt closure drift must prevent Ready acknowledgement");
+        let display = format!("{error:#}");
+        assert!(
+            display.contains("strictly rereading acknowledged committed catalog closure")
+                || display.contains("no complete current semantic closure")
+                || display.contains("strict current catalog closure"),
+            "unexpected strict-reread error: {display}"
+        );
+        let state = state.lock().await;
+        assert_eq!(state.ready_acknowledgement_calls, 1);
+        assert_eq!(state.fenced_write_attempts, 0);
+        assert_eq!(state.fenced_replay_attempts, 0);
+        assert!(state.calls.is_empty());
+        assert!(state.ready.is_some());
+    }
+
+    #[tokio::test]
+    async fn empty_publication_ready_acknowledgement_requires_exact_two_receipt_ledger() {
+        let (fixture, corpus, observed) =
+            observed_corpus(&[SemanticRemoteCatalogFixtureRowV1::DeletedFile(
+                "retained.txt".to_owned(),
+            )])
+            .await;
+        let (transition, state) =
+            empty_authoritative_control_transition_with_state(&fixture, &corpus, &observed).await;
+        let pending = install_catalog_publication_pending_v1(transition)
+            .await
+            .unwrap();
+        let persisted_pending = pending
+            .transition
+            .canonical_pending_control_record_bytes
+            .clone();
+        let capability = install_catalog_publishing_head_v1(pending).await.unwrap();
+        let applied = apply_authoritative_catalog_namespace_mutations_v1(capability)
+            .await
+            .unwrap();
+        let committed = finalize_catalog_committed_head_v1(applied).await.unwrap();
+        let live = committed
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_live
+            .clone();
+        committed
+            .control_guard
+            .all_writers
+            .retained_control_lease
+            .test_fail_after_next_backend_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = advance_catalog_high_water_v1(committed)
+            .await
+            .expect_err("empty Ready must become durable before response loss");
+        drop(failure);
+        live.store(false, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut state = state.lock().await;
+            let pending = state.pending.as_ref().unwrap();
+            assert_eq!(pending.mutation_count, Some(0));
+            assert_eq!(pending.next_ordinal, 2);
+            assert!(pending.receipts.keys().copied().eq(0..2));
+            state.calls.clear();
+            state.fenced_write_attempts = 0;
+            state.fenced_replay_attempts = 0;
+        }
+        let authority = TestCatalogReadyAcknowledgementAuthorityV1 {
+            state: state.clone(),
+        };
+
+        let acknowledged = acknowledge_catalog_publication_from_authenticated_ready_v1(
+            trusted_storage(&fixture),
+            &test_selected(),
+            persisted_pending,
+            &authority,
+        )
+        .await
+        .unwrap();
+        assert_eq!(acknowledged.successor.sequence.get(), 2);
+        let state = state.lock().await;
+        assert_eq!(state.ready_acknowledgement_calls, 1);
+        assert_eq!(state.fenced_write_attempts, 0);
+        assert_eq!(state.fenced_replay_attempts, 0);
+        assert!(state.calls.is_empty());
     }
 
     #[tokio::test]
