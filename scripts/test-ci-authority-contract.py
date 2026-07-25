@@ -53,6 +53,36 @@ PUBLIC_READ_SITES = {
     (".github/workflows/nix-ci.yml", "nix-linux"): "tcfs-nix-linux",
     (".github/workflows/ci-live-storage.yml", "fleet-live"): ("tcfs-live-storage"),
 }
+LIVE_STORAGE_PATHS = [
+    "crates/**",
+    "tests/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "docker-compose.yml",
+    "config/**",
+    ".github/workflows/ci-live-storage.yml",
+    "scripts/test-ci-authority-contract.py",
+    "config/ci-authority-policy.json",
+]
+PROTECTED_TRIGGER_CONTRACTS: dict[str, dict[str, Any]] = {
+    ".github/workflows/ci.yml": {
+        "push": {"branches": ["main", "dev", "sid/**", "1-*"]},
+        "pull_request": None,
+    },
+    ".github/workflows/ci-live-storage.yml": {
+        "pull_request": {"paths": LIVE_STORAGE_PATHS},
+        "push": {
+            "branches": ["main"],
+            "paths": LIVE_STORAGE_PATHS,
+        },
+        "workflow_dispatch": None,
+    },
+    ".github/workflows/nix-ci.yml": {
+        "push": {"branches": ["main", "dev"]},
+        "pull_request": None,
+        "workflow_dispatch": None,
+    },
+}
 
 
 class ContractError(ValueError):
@@ -211,6 +241,25 @@ def workflow_triggers(document: dict[str, Any]) -> list[str]:
     if not all(isinstance(trigger, str) for trigger in triggers):
         raise ContractError("every workflow trigger must be a string key")
     return list(triggers)
+
+
+def validate_protected_triggers(
+    document: dict[str, Any],
+    contract: dict[str, Any],
+) -> None:
+    path = contract.get("path")
+    if contract.get("pull_request_all_bases") is not True:
+        raise ContractError(f"{path} lacks the reviewed all-PR-base contract")
+
+    triggers = document.get("on")
+    expected = PROTECTED_TRIGGER_CONTRACTS.get(path)
+    if expected is None:
+        raise ContractError(f"{path} lacks a source-owned protected trigger contract")
+    if triggers != expected:
+        raise ContractError(
+            f"{path} protected trigger contract drifted "
+            f"(actual={triggers!r}, expected={expected!r})"
+        )
 
 
 def validate_permissions(document: dict[str, Any]) -> None:
@@ -437,6 +486,7 @@ def validate_protected_workflow(
     policy: dict[str, Any],
 ) -> None:
     validate_topology(document, contract)
+    validate_protected_triggers(document, contract)
     validate_permissions(document)
     path = contract["path"]
     expected_jobs = contract["jobs"]
@@ -695,6 +745,43 @@ class CiAuthorityContractTest(unittest.TestCase):
         ]
         for unsafe in variants:
             self.assert_protected_rejected(path, unsafe)
+
+    def test_protected_trigger_contract_rejects_narrowing_and_expansion(self) -> None:
+        for path in sorted(self.contracts):
+            document, parsed_source = load_workflow(self.root / path)
+            pull_request_variants = [
+                {"branches": ["main"]},
+                {"branches-ignore": ["dev"]},
+                {"types": ["closed"]},
+                {"paths": ["README.md"]},
+                {"paths-ignore": ["**"]},
+            ]
+            unsafe_documents: list[dict[str, Any]] = []
+            for pull_request in pull_request_variants:
+                unsafe = copy.deepcopy(document)
+                unsafe["on"]["pull_request"] = pull_request
+                unsafe_documents.append(unsafe)
+            for trigger, value in (
+                ("pull_request_target", None),
+                ("schedule", [{"cron": "0 0 * * *"}]),
+            ):
+                unsafe = copy.deepcopy(document)
+                unsafe["on"][trigger] = value
+                unsafe_documents.append(unsafe)
+
+            for unsafe in unsafe_documents:
+                contract = copy.deepcopy(self.contracts[path])
+                contract["topology_sha256"] = topology_sha256(unsafe)
+                with self.assertRaisesRegex(
+                    ContractError,
+                    "protected trigger contract drifted",
+                ):
+                    validate_protected_workflow(
+                        unsafe,
+                        parsed_source,
+                        contract,
+                        self.policy,
+                    )
 
     def test_escaped_uses_and_runs_on_keys_are_rejected(self) -> None:
         path = ".github/workflows/ci.yml"

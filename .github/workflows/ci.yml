@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main, dev, "sid/**", "1-*"]
+  # Stacked PRs require the same exact-head authority as main-bound PRs.
   pull_request:
-    branches: [main, dev]
 
 permissions:
   contents: read

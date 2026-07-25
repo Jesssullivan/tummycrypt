@@ -6,8 +6,8 @@ name: Nix CI
 on:
   push:
     branches: [main, dev]
+  # Stacked PRs require the same exact-head authority as main-bound PRs.
   pull_request:
-    branches: [main, dev]
   workflow_dispatch:
 
 permissions:

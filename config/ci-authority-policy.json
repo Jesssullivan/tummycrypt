@@ -23,8 +23,9 @@
       "held_jobs": {
         "darwin-authority-held": "TIN-2998"
       },
+      "pull_request_all_bases": true,
       "front_door": "nix-job",
-      "topology_sha256": "b3ac6ee0b7d459b845f15425cd2dcbdc93ed56b55d5528e7abd6060629553d1a"
+      "topology_sha256": "ec523770d2806d967dfb64af00191c7f68bb6242fc2239c4e5bd626bd78acd49"
     },
     {
       "path": ".github/workflows/ci-live-storage.yml",
@@ -32,6 +33,7 @@
         "fleet-live": "tinyland-dind"
       },
       "held_jobs": {},
+      "pull_request_all_bases": true,
       "front_door": "nix-job",
       "topology_sha256": "074e1789a31482a3a4abad5f06daf1919200be8be1712ba5898405cae0bf685a"
     },
@@ -44,8 +46,9 @@
       "held_jobs": {
         "nix-darwin-authority-held": "TIN-2998"
       },
+      "pull_request_all_bases": true,
       "front_door": "nix-job",
-      "topology_sha256": "7d0ff6c0cf8b5b2579982fc33083b9bc24b1c31f83db0dc1a8c747e3b165beba"
+      "topology_sha256": "f9549d2e0f06e98b752e279f7777b6c7394faff6f760cb87fac5b638d0372e39"
     }
   ],
   "disabled_legacy_workflows": [
