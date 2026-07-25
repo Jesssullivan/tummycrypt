@@ -1872,6 +1872,18 @@ impl RootRemoteContractV1 {
         }
     }
 
+    /// Maximum canonical wire bytes in one complete output binding returned
+    /// by the catalog publication writer.
+    ///
+    /// This is stricter than the independent per-token reader bound so a
+    /// successor layout can reserve every possible writer output before
+    /// publishing begins.
+    pub const fn max_catalog_publication_output_binding_wire_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
     /// Maximum aggregate canonical bytes read for the immutable catalog root
     /// and all pages. The mutable HEAD is charged separately.
     pub const fn max_catalog_closure_object_bytes(self) -> u64 {
@@ -2381,6 +2393,7 @@ struct RegisteredRootPlanContractFingerprintFieldsV1 {
     remote_max_catalog_entries: u64,
     remote_max_catalog_entry_key_bytes: u64,
     remote_max_catalog_binding_bytes: u64,
+    remote_max_catalog_publication_output_binding_wire_bytes: u64,
     remote_max_catalog_closure_object_bytes: u64,
 }
 
@@ -2481,6 +2494,9 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
         remote_max_catalog_entries: contract.remote.max_catalog_entries(),
         remote_max_catalog_entry_key_bytes: contract.remote.max_catalog_entry_key_bytes(),
         remote_max_catalog_binding_bytes: contract.remote.max_catalog_binding_bytes(),
+        remote_max_catalog_publication_output_binding_wire_bytes: contract
+            .remote
+            .max_catalog_publication_output_binding_wire_bytes(),
         remote_max_catalog_closure_object_bytes: contract.remote.max_catalog_closure_object_bytes(),
     }
 }
@@ -2490,7 +2506,7 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
 ) -> RegisteredRootPlanContractFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.registered-root-plan-contract.b3v1",
-        fields.canonical_names.len() + 45,
+        fields.canonical_names.len() + 46,
     );
     for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
@@ -2694,6 +2710,12 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
             encoder.field(
                 "remote_max_catalog_binding_bytes",
                 &fields.remote_max_catalog_binding_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_publication_output_binding_wire_bytes",
+                &fields
+                    .remote_max_catalog_publication_output_binding_wire_bytes
+                    .to_be_bytes(),
             );
             encoder.field(
                 "remote_max_catalog_closure_object_bytes",
@@ -4009,6 +4031,10 @@ resolution_policy = "inspect-only"
         assert_eq!(remote.max_catalog_entry_key_bytes(), 512 * 1024 * 1024);
         assert_eq!(remote.max_catalog_binding_bytes(), 512 * 1024 * 1024);
         assert_eq!(
+            remote.max_catalog_publication_output_binding_wire_bytes(),
+            4096
+        );
+        assert_eq!(
             remote.max_catalog_closure_object_bytes(),
             4 * 1024 * 1024 * 1024
         );
@@ -4037,7 +4063,7 @@ resolution_policy = "inspect-only"
         );
         assert_eq!(
             fingerprint.to_string(),
-            "b3v1:1118477115662bba81df3cd3e8f2250a350e1d65e62150d746448c821ce0c678"
+            "b3v1:69df92f3ac201ff81149ab69a0a6cbab4d1774dd07eae5e2d228877aa83a748f"
         );
     }
 
@@ -4150,6 +4176,10 @@ resolution_policy = "inspect-only"
         assert_eq!(fields.remote_max_catalog_entries, 3_000_000);
         assert_eq!(fields.remote_max_catalog_entry_key_bytes, 512 * 1024 * 1024);
         assert_eq!(fields.remote_max_catalog_binding_bytes, 512 * 1024 * 1024);
+        assert_eq!(
+            fields.remote_max_catalog_publication_output_binding_wire_bytes,
+            4096
+        );
         assert_eq!(
             fields.remote_max_catalog_closure_object_bytes,
             4 * 1024 * 1024 * 1024
@@ -4310,6 +4340,7 @@ resolution_policy = "inspect-only"
         assert_remote_resource_is_bound!(remote_max_catalog_entries);
         assert_remote_resource_is_bound!(remote_max_catalog_entry_key_bytes);
         assert_remote_resource_is_bound!(remote_max_catalog_binding_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_publication_output_binding_wire_bytes);
         assert_remote_resource_is_bound!(remote_max_catalog_closure_object_bytes);
     }
 
