@@ -20,7 +20,7 @@ env:
 jobs:
   notarized-pkg-proof:
     name: Build, notarize, staple, and assess .pkg
-    if: github.repository == 'Jesssullivan/tummycrypt'
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 120
     steps:

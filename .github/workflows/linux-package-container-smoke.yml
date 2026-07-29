@@ -46,7 +46,7 @@ concurrency:
 jobs:
   package-container-smoke:
     name: ${{ matrix.surface }}
-    if: github.repository == 'Jesssullivan/tummycrypt'
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:

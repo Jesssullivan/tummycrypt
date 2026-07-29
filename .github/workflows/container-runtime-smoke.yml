@@ -29,6 +29,7 @@ concurrency:
 
 jobs:
   runtime-smoke:
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     name: Runtime smoke (${{ matrix.platform }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20

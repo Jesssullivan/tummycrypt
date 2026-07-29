@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   check-links:
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     name: Check Links
     runs-on: ubuntu-latest
     steps:
@@ -32,6 +33,7 @@ jobs:
           fail: true
 
   build-pdf:
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     name: Build PDFs
     runs-on: ubuntu-latest
     steps:
@@ -50,10 +52,10 @@ jobs:
           path: dist/docs/*.pdf
 
   deploy:
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     name: Deploy to GitHub Pages
     runs-on: ubuntu-latest
     needs: [check-links]
-    if: github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

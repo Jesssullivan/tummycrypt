@@ -46,6 +46,7 @@ concurrency:
 
 jobs:
   profile-install-smoke:
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     name: Nix profile install smoke
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 60

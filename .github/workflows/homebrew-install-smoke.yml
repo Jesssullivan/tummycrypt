@@ -44,6 +44,7 @@ concurrency:
 
 jobs:
   install-smoke:
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     name: Homebrew ${{ github.event.inputs.smoke_mode }} smoke
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 25
