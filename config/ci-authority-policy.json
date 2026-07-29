@@ -1,8 +1,12 @@
 {
-  "version": 1,
+  "version": 2,
   "issue": "TIN-2538",
   "gloriousflywheel_revision": "693574567f9b879486782f1fb7f432c54a2fe294",
   "checkout_revision": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+  "attic_public_read": {
+    "public_key": "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=",
+    "local_dev_substituter": "https://nix-cache.tinyland.dev/main"
+  },
   "live_proof_hold": {
     "issue": "TIN-3120",
     "reason": "the Jess personal-owner listener and multi-capability binding are absent; GitHub-hosted capacity is never a fallback"
@@ -21,11 +25,15 @@
         "darwin-authority-held": "tinyland-nix"
       },
       "held_jobs": {
-        "darwin-authority-held": "TIN-2998"
+        "darwin-authority-held": "TIN-2538"
+      },
+      "command_sha256": {
+        "linux-source": "546b4ac02cfa6ba83f9ee4a00e17151a735b4d97181278d9b8471fc8d2ed63a0",
+        "windows-cross": "0c86cd94cb1103feb1aed49db318ba6c6ebc245b76cd64ac19386e1e74dbd134"
       },
       "pull_request_all_bases": true,
       "front_door": "nix-job",
-      "topology_sha256": "ec523770d2806d967dfb64af00191c7f68bb6242fc2239c4e5bd626bd78acd49"
+      "topology_sha256": "ff30faa218f7a345fe235cd08db3b9241183251dcad43ee404dc4170f9d589eb"
     },
     {
       "path": ".github/workflows/ci-live-storage.yml",
@@ -33,9 +41,12 @@
         "fleet-live": "tinyland-dind"
       },
       "held_jobs": {},
+      "command_sha256": {
+        "fleet-live": "fe546799062e78d9e0be2917ed947fc1f1d8eb152823a7c9cebdfd873ed5acdf"
+      },
       "pull_request_all_bases": true,
       "front_door": "nix-job",
-      "topology_sha256": "074e1789a31482a3a4abad5f06daf1919200be8be1712ba5898405cae0bf685a"
+      "topology_sha256": "b84b88750d51728ad2c620b2354e758541cbf6c19c3019e8dfc69aff3c9bddea"
     },
     {
       "path": ".github/workflows/nix-ci.yml",
@@ -44,11 +55,14 @@
         "nix-darwin-authority-held": "tinyland-nix"
       },
       "held_jobs": {
-        "nix-darwin-authority-held": "TIN-2998"
+        "nix-darwin-authority-held": "TIN-2538"
+      },
+      "command_sha256": {
+        "nix-linux": "9404929c63d5eb925b8421a4f12855bf290338b55982db628e0262d5e32f9d15"
       },
       "pull_request_all_bases": true,
       "front_door": "nix-job",
-      "topology_sha256": "f9549d2e0f06e98b752e279f7777b6c7394faff6f760cb87fac5b638d0372e39"
+      "topology_sha256": "14557f9d87699aaef03981652af0f97d002d26157e7a6ac4131d1ff35bed9062"
     }
   ],
   "disabled_legacy_workflows": [
@@ -56,78 +70,259 @@
       "path": ".github/workflows/container-runtime-smoke.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "6553b96d17d0d0fe1398755915321a0dec6c6a819fda7345069b0844a88304a0"
+      "job_parity": {
+        "runtime-smoke": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Cross-platform runtime smoke has no sanctioned GF replacement yet."
+        }
+      },
+      "topology_sha256": "49b9ac3a38fdeda16208976643744b80bea7f91b1dd339194ef1c68f4db0ad8c"
     },
     {
       "path": ".github/workflows/docs.yml",
       "owner": "TIN-2538",
       "triggers": ["push", "pull_request", "workflow_dispatch"],
-      "topology_sha256": "d6d955a2af4e130c5e275738169c7b64a571501cb013e239c4545fc5cc71106e"
+      "job_parity": {
+        "check-links": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2538",
+          "reason": "Link checking has not been migrated to a sanctioned GF proof job."
+        },
+        "build-pdf": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2538",
+          "reason": "PDF publication input has not been migrated to a sanctioned GF proof job."
+        },
+        "deploy": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2538",
+          "reason": "Pages deployment remains held until its source build runs only on sanctioned GF compute."
+        }
+      },
+      "topology_sha256": "b63e7ffdd43f3a8cf14e12fd2c36fea1f7985c8e71319acdc4bfd24ae1c6cbb2"
     },
     {
       "path": ".github/workflows/homebrew-install-smoke.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "ad242cd50c5404859d90e743cf1050d202c68bd9077f00f60e3faae07cec4bf6"
+      "job_parity": {
+        "install-smoke": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1425",
+          "reason": "Packaged first-run and upgrade smoke lacks a sanctioned GF replacement."
+        }
+      },
+      "topology_sha256": "13d38c818239eaed39f5728d1c7c65a06c56fabbba5753ce4a95b9e0bd1f99c8"
     },
     {
       "path": ".github/workflows/linux-package-container-smoke.yml",
       "owner": "TIN-2538",
       "triggers": ["pull_request", "workflow_dispatch"],
-      "topology_sha256": "6fe6fc413c9e4e35e39de26c62d06bce965a0bf7d6ca30c5a1c4bf8f426289d5"
+      "job_parity": {
+        "package-container-smoke": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1425",
+          "reason": "Linux package install and upgrade smoke lacks a sanctioned GF DinD replacement."
+        }
+      },
+      "topology_sha256": "563acb5906eadebf5ca49bf94866a98378b030bf0410304fb8cbc65f581fb5ba"
     },
     {
       "path": ".github/workflows/linux-postinstall-smoke.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "686e918b85b24af7f26970378b1379dc6ded8f7f1e13c7fbde89969614a3e156"
+      "job_parity": {
+        "package-postinstall": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1425",
+          "reason": "Linux post-install first-run smoke lacks a sanctioned GF replacement."
+        }
+      },
+      "topology_sha256": "1abc0b22ce7ae2f0ebac62938e77c1598b1c6b544c766d7bcec27ca53b733c0a"
     },
     {
       "path": ".github/workflows/macos-fileprovider-pkg-notarization-proof.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "06e45748ac285d6d16d9011f10085609850e9d3cb4b5780625c5eb6f7fbceec3"
+      "job_parity": {
+        "notarized-pkg-proof": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1547",
+          "reason": "Notarized FileProvider package proof is not bound to the commissioned GF Darwin path."
+        }
+      },
+      "topology_sha256": "7ce138d23843201e7352dccc2eb617df3088665bff8fef11d0f3f67fec84b6f0"
     },
     {
       "path": ".github/workflows/macos-fileprovider-testing-mode-pkg.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "b57dbf2e61e2a320ec9209a90d47dabf1f3db12f46a9dbabbf5be472a2a3f901"
+      "job_parity": {
+        "build-testing-mode-pkg": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1547",
+          "reason": "Testing-mode FileProvider package proof is not bound to the commissioned GF Darwin path."
+        }
+      },
+      "topology_sha256": "f97ea3e60ce478917feed49ce0306b045f1abc9a615b673f300b8579e192869f"
     },
     {
       "path": ".github/workflows/macos-postinstall-smoke.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "ddce25f9c5f5b6265a7122b3ad38a04be29207073ce9d17711b9247d3102d947"
+      "job_parity": {
+        "pkg-postinstall": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1547",
+          "reason": "Installed FileProvider post-install smoke is not bound to the commissioned GF Darwin path."
+        }
+      },
+      "topology_sha256": "02ba288edbfae893a16fd75646313b7928d3a86f5a3a0aedb840e620b534a6e6"
     },
     {
       "path": ".github/workflows/nix-profile-install-smoke.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "a8cfae7d6a7f488cfd0b3aa81d55c5f4e3ca824d9dfdeb07a278ea8df3572d77"
+      "job_parity": {
+        "profile-install-smoke": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1425",
+          "reason": "Nix profile first-run smoke lacks a sanctioned GF replacement."
+        }
+      },
+      "topology_sha256": "04e888b14cf5b2678f904a8d5e9b883ce2dc43bd90252425c3a1c2bc15aa657f"
     },
     {
       "path": ".github/workflows/release.yml",
       "owner": "TIN-2538",
       "triggers": ["push", "workflow_dispatch"],
-      "topology_sha256": "3fbf7f2e159f084591e8841b0056a5ac2aef13a9f99fedf9ecce19c9b277acad"
+      "job_parity": {
+        "plan": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Release planning has not been migrated to a sanctioned GF proof job."
+        },
+        "build-binaries": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Cross-platform release binaries lack complete sanctioned GF parity."
+        },
+        "build-image": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Release image publication lacks a sanctioned GF replacement."
+        },
+        "nix-build": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Release Nix builds lack complete sanctioned GF parity."
+        },
+        "generate-installers": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Installer generation lacks complete sanctioned GF parity."
+        },
+        "build-fileprovider": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1547",
+          "reason": "FileProvider release build is not bound to the commissioned GF Darwin path."
+        },
+        "build-pkg": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1547",
+          "reason": "macOS package release build is not bound to the commissioned GF Darwin path."
+        },
+        "create-release": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Release publication remains held until every required artifact has sanctioned GF proof."
+        },
+        "update-homebrew": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-2875",
+          "reason": "Homebrew publication remains held behind the sanctioned release contract."
+        }
+      },
+      "topology_sha256": "eb9cac3037e606705e74bc56c7a25d79ee63fce7a63e30d91b47aa9a9fc8aa36"
     },
     {
       "path": ".github/workflows/storage-large-restore-canary.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "05be76ed05cd025a1adaad7e94809905e8b9e2af52a08b854101585d17fe1326"
+      "job_parity": {
+        "large-restore": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1622",
+          "reason": "Large-restore storage proof lacks a sanctioned GF replacement."
+        }
+      },
+      "topology_sha256": "0a898072d133338bcd322427f9cf3b4c34e84a13169c625ba6aaa2aa25ae0960"
     },
     {
       "path": ".github/workflows/storage-posture-canary.yml",
       "owner": "TIN-2538",
       "triggers": ["workflow_dispatch"],
-      "topology_sha256": "7e5bf0304a248e5783371a5607cc4c44f09bf749c2c797489b8ab87b319e92a1"
+      "job_parity": {
+        "storage-canary": {
+          "disposition": "held",
+          "owner": "TIN-2538",
+          "replacement": null,
+          "blocked_by": "TIN-1546",
+          "reason": "Production storage posture proof lacks a sanctioned GF replacement."
+        }
+      },
+      "topology_sha256": "62f92270f57aba19e6790a54c55eccb62f32244108830dcc69de6eee90b5889c"
     }
   ],
   "blocked_prerequisites": {
     "multi_capability_personal_owner_binding": "TIN-3120",
-    "native_darwin_worker": "TIN-2998",
+    "native_darwin_tcfs_integration": "TIN-2538",
     "native_windows_runtime_and_installer": "TIN-1569"
+  },
+  "completed_provenance": {
+    "native_darwin_worker_commissioned": "TIN-2998"
   }
 }

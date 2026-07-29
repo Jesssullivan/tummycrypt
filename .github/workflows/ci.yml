@@ -26,6 +26,7 @@ env:
 jobs:
   linux-source:
     name: Linux source authority (GloriousFlywheel)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: tinyland-nix
     timeout-minutes: 90
     steps:
@@ -49,9 +50,10 @@ jobs:
         env:
           GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ATTIC_TOKEN: ""
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         with:
           attic-enabled: "true"
-          attic-public-key: ${{ vars.ATTIC_PUBLIC_KEY || '' }}
+          attic-public-key: "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
           attic-public-read-only: "true"
           attic-public-read-site: tcfs-linux-source
           push-cache: "false"
@@ -63,6 +65,7 @@ jobs:
             test -n "${ATTIC_SERVER:-}"
             test "${ATTIC_CACHE:-}" = main
             test -n "${ATTIC_PUBLIC_KEY:-}"
+            test "${ATTIC_PUBLIC_KEY:-}" = "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
             test -n "${BAZEL_REMOTE_CACHE:-}"
             test "${GF_BAZEL_SUBSTRATE_MODE:-}" = shared-cache-backed
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
@@ -71,13 +74,8 @@ jobs:
             nix config show extra-substituters |
               tr ' ' '\n' |
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
-
-      - name: Build, lint, test, and scan in the repo toolchain
-        env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-        run: |
-          # shellcheck disable=SC2016 # Expanded by the inner repo-toolchain shell.
-          nix develop --accept-flake-config .#default --command bash -euo pipefail -c '
+            # shellcheck disable=SC2016 # Expanded by the inner repo-toolchain shell.
+            nix develop .#default --command bash -euo pipefail -c '
             python3 scripts/test-ci-authority-contract.py
             cargo check --workspace --locked
             cargo fmt --all -- --check
@@ -99,10 +97,11 @@ jobs:
             else
               gitleaks git --config .gitleaks.toml --redact
             fi
-          '
+            '
 
   windows-cross:
     name: Windows CFAPI cross-check (source-only)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: tinyland-nix
     timeout-minutes: 45
     steps:
@@ -128,7 +127,7 @@ jobs:
           ATTIC_TOKEN: ""
         with:
           attic-enabled: "true"
-          attic-public-key: ${{ vars.ATTIC_PUBLIC_KEY || '' }}
+          attic-public-key: "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
           attic-public-read-only: "true"
           attic-public-read-site: tcfs-windows-cross
           push-cache: "false"
@@ -140,6 +139,7 @@ jobs:
             test -n "${ATTIC_SERVER:-}"
             test "${ATTIC_CACHE:-}" = main
             test -n "${ATTIC_PUBLIC_KEY:-}"
+            test "${ATTIC_PUBLIC_KEY:-}" = "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
             test -n "${BAZEL_REMOTE_CACHE:-}"
             test "${GF_BAZEL_SUBSTRATE_MODE:-}" = shared-cache-backed
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
@@ -148,10 +148,7 @@ jobs:
             nix config show extra-substituters |
               tr ' ' '\n' |
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
-
-      - name: Type-check the Windows CFAPI surface from sanctioned Linux compute
-        run: |
-          nix develop --accept-flake-config .#default --command \
+            nix develop .#default --command \
             cargo check -p tcfs-cloudfilter \
               --target x86_64-pc-windows-gnu \
               --all-targets \
@@ -159,10 +156,11 @@ jobs:
 
   darwin-authority-held:
     name: HELD - native Darwin and iOS authority
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: tinyland-nix
     timeout-minutes: 5
     steps:
       - name: Hold until the authorized GF Darwin worker is proved
         run: |
-          echo "::error title=Darwin authority held::TIN-2998 has not yet proved an authorized native Apple Silicon GF worker. Linux cross-compilation is not a substitute for FileProvider or iOS native proof."
+          echo "::error title=Darwin authority held::TIN-2998 commissioned the bounded GF Apple Silicon worker, but TIN-2538 has not yet bound and proved TCFS-specific native FileProvider or iOS execution on that sanctioned path. Linux cross-compilation is not a substitute."
           exit 1

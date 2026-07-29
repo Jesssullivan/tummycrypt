@@ -25,6 +25,7 @@ concurrency:
 jobs:
   nix-linux:
     name: Nix Linux source authority (GloriousFlywheel)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: tinyland-nix
     timeout-minutes: 90
     steps:
@@ -50,7 +51,7 @@ jobs:
           ATTIC_TOKEN: ""
         with:
           attic-enabled: "true"
-          attic-public-key: ${{ vars.ATTIC_PUBLIC_KEY || '' }}
+          attic-public-key: "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
           attic-public-read-only: "true"
           attic-public-read-site: tcfs-nix-linux
           push-cache: "false"
@@ -62,6 +63,7 @@ jobs:
             test -n "${ATTIC_SERVER:-}"
             test "${ATTIC_CACHE:-}" = main
             test -n "${ATTIC_PUBLIC_KEY:-}"
+            test "${ATTIC_PUBLIC_KEY:-}" = "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
             test -n "${BAZEL_REMOTE_CACHE:-}"
             test "${GF_BAZEL_SUBSTRATE_MODE:-}" = shared-cache-backed
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
@@ -70,17 +72,18 @@ jobs:
             nix config show extra-substituters |
               tr ' ' '\n' |
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
-            nix flake check --accept-flake-config
+            nix flake check
             for package in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
-              nix build --accept-flake-config --fallback ".#${package}"
+              nix build --fallback ".#${package}"
             done
 
   nix-darwin-authority-held:
     name: HELD - native aarch64-darwin Nix authority
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: tinyland-nix
     timeout-minutes: 5
     steps:
       - name: Hold until the authorized GF Darwin worker is proved
         run: |
-          echo "::error title=Darwin Nix authority held::TIN-2998 has not yet proved an authorized native Apple Silicon GF worker. Linux evaluation or cross-compilation cannot publish a Darwin closure."
+          echo "::error title=Darwin Nix authority held::TIN-2998 commissioned the bounded GF Apple Silicon worker, but TIN-2538 has not yet bound and proved TCFS-specific aarch64-darwin Nix execution on that sanctioned path. Linux evaluation or cross-compilation cannot publish a Darwin closure."
           exit 1

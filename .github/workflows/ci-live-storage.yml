@@ -55,6 +55,7 @@ env:
 jobs:
   fleet-live:
     name: fleet_live on GloriousFlywheel DinD
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: tinyland-dind
     timeout-minutes: 35
 
@@ -81,7 +82,7 @@ jobs:
           ATTIC_TOKEN: ""
         with:
           attic-enabled: "true"
-          attic-public-key: ${{ vars.ATTIC_PUBLIC_KEY || '' }}
+          attic-public-key: "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
           attic-public-read-only: "true"
           attic-public-read-site: tcfs-live-storage
           push-cache: "false"
@@ -94,6 +95,7 @@ jobs:
             test -n "${ATTIC_SERVER:-}"
             test "${ATTIC_CACHE:-}" = main
             test -n "${ATTIC_PUBLIC_KEY:-}"
+            test "${ATTIC_PUBLIC_KEY:-}" = "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
             test -n "${BAZEL_REMOTE_CACHE:-}"
             test "${GF_BAZEL_SUBSTRATE_MODE:-}" = shared-cache-backed
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
@@ -104,102 +106,81 @@ jobs:
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
             docker version
             docker info
-
-      - name: Write immutable CI compose override
-        run: |
-          set -euo pipefail
-          mkdir -p .github/compose-overrides
-          cat > .github/compose-overrides/ci.yml <<'EOF'
-          services:
-            seaweed-master-1:
-              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
-            seaweed-master-2:
-              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
-            seaweed-master-3:
-              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
-            seaweed-volume:
-              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
-              command: >
-                volume
-                -mserver=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
-                -port=8080
-                -dir=/data
-                -dataCenter=dc1
-                -rack=dc1-rack1
-                -max=32
-                -ip=seaweed-volume
-                -ip.bind=0.0.0.0
-            seaweed-filer:
-              image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
-            nats:
-              image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
-              command: >
-                --name tcfs-nats
-                --jetstream
-                --store_dir /data
-                --http_port 8222
-          EOF
-
-      - name: Bring up compose-managed SeaweedFS and NATS
-        run: |
-          set -euo pipefail
-          docker compose -f docker-compose.yml -f .github/compose-overrides/ci.yml up -d \
-            seaweed-master-1 seaweed-master-2 seaweed-master-3 \
-            seaweed-volume seaweed-filer \
-            nats
-
-      - name: Wait for SeaweedFS S3 endpoint
-        timeout-minutes: 3
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 60); do
-            CODE="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "${TCFS_S3_ENDPOINT}/" || echo "000")"
-            case "$CODE" in
-              200|301|302|307|403|404)
-                echo "SeaweedFS S3 ready (HTTP $CODE)"
-                exit 0
-                ;;
-            esac
-            echo "waiting for SeaweedFS S3 (attempt $i/60, last code: $CODE)..."
-            sleep 2 &
-            wait $!
-          done
-          echo "::error::SeaweedFS S3 did not become reachable at ${TCFS_S3_ENDPOINT}" >&2
-          docker compose logs seaweed-filer | tail -80 || true
-          exit 1
-
-      - name: Wait for NATS
-        timeout-minutes: 1
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            if curl -sf "http://127.0.0.1:8222/healthz" >/dev/null; then
-              echo "NATS ready"
-              exit 0
-            fi
-            echo "waiting for NATS ($i/30)..."
-            sleep 1 &
-            wait $!
-          done
-          echo "::error::NATS did not become healthy" >&2
-          docker compose logs nats | tail -80 || true
-          exit 1
-
-      - name: Create S3 bucket
-        run: |
-          set -euo pipefail
-          nix develop --accept-flake-config .#default --command \
+            mkdir -p .github/compose-overrides
+            cat > .github/compose-overrides/ci.yml <<'EOF'
+            services:
+              seaweed-master-1:
+                image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
+              seaweed-master-2:
+                image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
+              seaweed-master-3:
+                image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
+              seaweed-volume:
+                image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
+                command: >
+                  volume
+                  -mserver=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
+                  -port=8080
+                  -dir=/data
+                  -dataCenter=dc1
+                  -rack=dc1-rack1
+                  -max=32
+                  -ip=seaweed-volume
+                  -ip.bind=0.0.0.0
+              seaweed-filer:
+                image: chrislusf/seaweedfs:4.40@sha256:52194fba4fecd0083c842158b3a902ba6e04a63619b2b0efcd08007bdb6a4602
+              nats:
+                image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+                command: >
+                  --name tcfs-nats
+                  --jetstream
+                  --store_dir /data
+                  --http_port 8222
+            EOF
+            docker compose -f docker-compose.yml -f .github/compose-overrides/ci.yml up -d \
+              seaweed-master-1 seaweed-master-2 seaweed-master-3 \
+              seaweed-volume seaweed-filer \
+              nats
+            for i in $(seq 1 60); do
+              CODE="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "${TCFS_S3_ENDPOINT}/" || echo "000")"
+              case "$CODE" in
+                200|301|302|307|403|404)
+                  echo "SeaweedFS S3 ready (HTTP $CODE)"
+                  break
+                  ;;
+              esac
+              if [ "$i" -eq 60 ]; then
+                echo "::error::SeaweedFS S3 did not become reachable at ${TCFS_S3_ENDPOINT}" >&2
+                docker compose logs seaweed-filer | tail -80 || true
+                exit 1
+              fi
+              echo "waiting for SeaweedFS S3 (attempt $i/60, last code: $CODE)..."
+              sleep 2 &
+              wait $!
+            done
+            for i in $(seq 1 30); do
+              if curl -sf "http://127.0.0.1:8222/healthz" >/dev/null; then
+                echo "NATS ready"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "::error::NATS did not become healthy" >&2
+                docker compose logs nats | tail -80 || true
+                exit 1
+              fi
+              echo "waiting for NATS ($i/30)..."
+              sleep 1 &
+              wait $!
+            done
+            nix develop .#default --command \
             aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
                 s3api create-bucket --bucket "${TCFS_S3_BUCKET}" \
                 --region us-east-1 2>&1 \
-            | tee /tmp/bucket-create.log || true
-          nix develop --accept-flake-config .#default --command \
+              | tee /tmp/bucket-create.log || true
+            nix develop .#default --command \
             aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
                 s3api head-bucket --bucket "${TCFS_S3_BUCKET}"
-
-      - name: Run fleet_live tests
-        run: |
-          nix develop --accept-flake-config .#default --command \
+            nix develop .#default --command \
             cargo test -p tcfs-e2e --test fleet_live --locked -- --nocapture
 
       - name: Print compose logs on failure
