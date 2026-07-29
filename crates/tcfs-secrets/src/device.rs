@@ -435,6 +435,31 @@ impl DeviceRegistry {
         }
     }
 
+    /// Revoke a device by its UUID (`device_id`).
+    ///
+    /// Same semantics as [`DeviceRegistry::revoke`], but keyed on the stable
+    /// identifier instead of the display name. Names are NOT unique in a
+    /// registry (duplicate/ghost entries are real — see
+    /// `docs/ops/ghost-device-revocation-safety-2026-07-02.md`), so any operator
+    /// path that has already resolved an unambiguous device MUST revoke by id to
+    /// avoid revoking a same-named sibling. Returns `false` when no device
+    /// carries that id (including the empty-id legacy case, which callers must
+    /// handle by name).
+    pub fn revoke_by_id(&mut self, device_id: &str) -> bool {
+        if device_id.is_empty() {
+            return false;
+        }
+        if let Some(device) = self.devices.iter_mut().find(|d| d.device_id == device_id) {
+            device.revoked = true;
+            if device.revoked_at.is_none() {
+                device.revoked_at = Some(now_unix());
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Find a device by name
     pub fn find(&self, name: &str) -> Option<&DeviceIdentity> {
         self.devices.iter().find(|d| d.name == name)
@@ -734,6 +759,42 @@ mod tests {
         // revoke() stamps revoked_at (TIN-1417 B4).
         assert!(reg.find("old-phone").unwrap().revoked_at.is_some());
         assert!(!reg.revoke("nonexistent"));
+    }
+
+    /// TIN-1417: revoking by id must hit exactly the addressed device, even when
+    /// a same-named ghost sibling exists (the real neo registry shape).
+    #[test]
+    fn revoke_by_id_targets_exactly_one_duplicate_named_device() {
+        let device = |id: &str| DeviceIdentity {
+            name: "local-fileprovider".into(),
+            device_id: id.into(),
+            public_key: real_pubkey(),
+            signing_key_hash: String::new(),
+            description: None,
+            enrolled_at: 1000,
+            revoked: false,
+            revoked_at: None,
+            enrolled_by: None,
+            signing_pubkey: None,
+            last_nats_seq: 0,
+        };
+        let mut reg = DeviceRegistry::default();
+        reg.add(device("d6d65d8d"));
+        reg.add(device("f1d980ab"));
+
+        assert!(reg.revoke_by_id("f1d980ab"));
+        assert_eq!(reg.active_devices().count(), 1);
+        assert_eq!(
+            reg.active_devices().next().unwrap().device_id,
+            "d6d65d8d",
+            "revoke_by_id must not touch the same-named sibling"
+        );
+        assert!(reg.find_by_id("f1d980ab").unwrap().revoked_at.is_some());
+
+        // Unknown and empty ids are no-ops, never a name fallback.
+        assert!(!reg.revoke_by_id("ff818f17"));
+        assert!(!reg.revoke_by_id(""));
+        assert_eq!(reg.active_devices().count(), 1);
     }
 
     #[test]

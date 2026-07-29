@@ -59,6 +59,7 @@ development instruction source.
 ## Security and recovery
 
 - [Per-device crypto migration](ops/per-device-crypto-migration-2026-06-06.md)
+- [Shared-master fleet migration runbook](ops/shared-master-fleet-migration-runbook-2026-07-28.md)
 - [Per-device identity design](ops/per-device-crypto-identity-design-2026-05-18.md)
 - [Raw .git corruption analysis](ops/dotgit-as-files-conflict-corruption-2026-06-08.md)
 - [Ghost-device revocation safety](ops/ghost-device-revocation-safety-2026-07-02.md)
