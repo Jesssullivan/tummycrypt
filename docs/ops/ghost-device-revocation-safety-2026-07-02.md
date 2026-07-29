@@ -24,9 +24,14 @@ FileProvider bring-up lanes and have no corresponding physical device.
 - `cmd_device_revoke` (`crates/tcfs-cli/src/main.rs:4275`): marks `revoked=true` +
   `revoked_at` in the **local** registry, re-signs the envelope
   (`save_registry_signed_or_warn`, TIN-1417 B4), prints a loud forward-secrecy warning.
-- It does **NOT** sync to the remote registry. Propagation is a separate step:
-  `tcfs device enroll --sync-remote` merges the verified remote and republishes the signed
-  merged registry to `<prefix>/tcfs-meta/devices.json` (`main.rs:4380–4414`).
+- It did **NOT** sync to the remote registry at the time of this analysis. Propagation was a
+  separate step: `tcfs device enroll --sync-remote` merges the verified remote and republishes
+  the signed merged registry to `<prefix>/tcfs-meta/devices.json` (`main.rs:4380–4414`).
+  **Superseded 2026-07-28 (TIN-1417):** `tcfs device revoke --sync-remote` now does the
+  revoke and the signed republish in one step, with the same B4 trust enforcement, and says
+  "LOCAL ONLY" loudly when the flag is absent. `--dry-run` previews the target and roll-call
+  impact first. See
+  [`shared-master-fleet-migration-runbook-2026-07-28.md`](shared-master-fleet-migration-runbook-2026-07-28.md).
 - Merge is **revocation-sticky**: `merge_device_entry` only ever flips `revoked`
   false→true (`if … && incoming.revoked`), so a peer whose copy still lists the ghosts as
   active cannot resurrect them; unsigned-remote laundering is refused

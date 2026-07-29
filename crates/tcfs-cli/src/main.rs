@@ -549,10 +549,36 @@ enum DeviceAction {
     },
     /// List enrolled devices
     List,
-    /// Revoke a device by name
+    /// Revoke a device (by name, device id, or unique id prefix)
+    ///
+    /// Revocation is STICKY across the fleet: the registry merge only ever flips
+    /// `revoked` false -> true, so a peer can never resurrect a revoked device.
+    /// Treat this as a one-way operation and preview it with `--dry-run` first.
     Revoke {
-        /// Device name to revoke
-        name: String,
+        /// Device name, full device id, or an unambiguous device-id prefix
+        device: String,
+        /// Preview the effect (target, roll-call impact, propagation) and exit
+        /// without mutating any registry, local or remote
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required for non-interactive use
+        /// (scripts, CI, ssh without a TTY).
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Propagate the revocation to the canonical remote registry
+        /// (`{prefix}/tcfs-meta/devices.json`). Without this the revocation is
+        /// LOCAL ONLY and no peer will ever learn about it.
+        #[arg(long)]
+        sync_remote: bool,
+        /// TIN-1417 B4 migration escape hatch: explicitly accept and re-sign an
+        /// UNSIGNED (legacy) remote registry during `--sync-remote`. Same
+        /// laundering guard as `device enroll --accept-unsigned-remote`.
+        #[arg(long, requires = "sync_remote")]
+        accept_unsigned_remote: bool,
+        /// Allow revoking the identity this host itself is enrolled as. Without
+        /// this the command refuses, because it would strand this host.
+        #[arg(long)]
+        allow_self: bool,
     },
     /// Show this device's identity and status
     Status,
@@ -908,7 +934,27 @@ async fn main() -> Result<()> {
                 .await
             }
             DeviceAction::List => cmd_device_list(),
-            DeviceAction::Revoke { name } => cmd_device_revoke(&config, &name),
+            DeviceAction::Revoke {
+                device,
+                dry_run,
+                yes,
+                sync_remote,
+                accept_unsigned_remote,
+                allow_self,
+            } => {
+                cmd_device_revoke(
+                    &config,
+                    &device,
+                    RevokeOptions {
+                        dry_run,
+                        yes,
+                        sync_remote,
+                        accept_unsigned_remote,
+                        allow_self,
+                    },
+                )
+                .await
+            }
             DeviceAction::Status => cmd_device_status(),
             DeviceAction::Invite { expiry_hours, qr } => {
                 cmd_device_invite(&config, expiry_hours, qr).await
@@ -5561,58 +5607,411 @@ fn cmd_device_list() -> Result<()> {
     println!("Enrolled devices ({}):", registry.devices.len());
     for device in &registry.devices {
         let status = if device.revoked { "REVOKED" } else { "active" };
-        let id_short = if device.device_id.len() > 8 {
-            &device.device_id[..8]
-        } else {
-            &device.device_id
-        };
         println!(
             "  {} [{}] id={} — enrolled {} — {}",
-            device.name, status, id_short, device.enrolled_at, device.public_key
+            device.name,
+            status,
+            short_device_id(&device.device_id),
+            device.enrolled_at,
+            device.public_key
         );
     }
 
     Ok(())
 }
 
+/// Abbreviated device id as printed by `tcfs device list` — the string an
+/// operator actually copies when they target a device.
+fn short_device_id(device_id: &str) -> &str {
+    if device_id.len() > 8 {
+        &device_id[..8]
+    } else {
+        device_id
+    }
+}
+
 // ── `tcfs device revoke` ─────────────────────────────────────────────────────
 
-fn cmd_device_revoke(config: &tcfs_core::config::TcfsConfig, name: &str) -> Result<()> {
+/// Operator-facing options for `tcfs device revoke` (TIN-1417).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RevokeOptions {
+    dry_run: bool,
+    yes: bool,
+    sync_remote: bool,
+    accept_unsigned_remote: bool,
+    allow_self: bool,
+}
+
+/// Everything the operator needs to see BEFORE a revoke mutates anything.
+///
+/// Computed by [`plan_device_revoke`] against an unmutated registry so
+/// `--dry-run` and the real path print identical facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RevokePlan {
+    name: String,
+    device_id: String,
+    public_key: String,
+    /// The device is already revoked; applying is a no-op locally (still worth
+    /// running with `--sync-remote` to finish a half-propagated revocation).
+    already_revoked: bool,
+    /// This host is enrolled as the targeted device (same identity `tcfs device
+    /// status` reports), so revoking it would strand this host.
+    is_self: bool,
+    /// Active devices remaining after this revoke.
+    remaining_active: usize,
+    /// How many of those carry a real age recipient.
+    remaining_capable: usize,
+    /// Remaining active devices that would still block the `per_device`
+    /// contract flip (no real age recipient).
+    remaining_incapable: Vec<String>,
+}
+
+impl RevokePlan {
+    /// True when the post-revoke fleet satisfies the roll-call gate, i.e. the
+    /// `per_device` contract flip is not blocked by a missing recipient.
+    fn roll_call_ready_after(&self) -> bool {
+        self.remaining_active > 0
+            && self.remaining_capable == self.remaining_active
+            && self.remaining_incapable.is_empty()
+    }
+}
+
+/// Resolve an operator-supplied device selector to exactly one registry index.
+///
+/// Accepts, in priority order: an exact device NAME, an exact `device_id`, or an
+/// unambiguous `device_id` PREFIX of at least 4 chars (what `tcfs device list`
+/// prints). Names are not unique in a registry — duplicate/ghost entries are
+/// real (`docs/ops/ghost-device-revocation-safety-2026-07-02.md`) — so an
+/// ambiguous selector is a hard error listing the candidates rather than a
+/// silent first-match.
+fn resolve_device_selector(
+    registry: &tcfs_secrets::device::DeviceRegistry,
+    selector: &str,
+) -> Result<usize> {
+    let candidates = |matches: Vec<usize>| -> String {
+        matches
+            .iter()
+            .map(|&i| {
+                let d = &registry.devices[i];
+                format!("{} (id={})", d.name, short_device_id(&d.device_id))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let by_name: Vec<usize> = registry
+        .devices
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.name == selector)
+        .map(|(i, _)| i)
+        .collect();
+    let name_matches = by_name.len();
+    match name_matches {
+        1 => return Ok(by_name[0]),
+        0 => {}
+        _ => anyhow::bail!(
+            "device name '{selector}' is ambiguous ({name_matches} entries: {}). Re-run with the \
+             device id shown by 'tcfs device list'.",
+            candidates(by_name)
+        ),
+    }
+
+    if let Some(i) = registry
+        .devices
+        .iter()
+        .position(|d| !d.device_id.is_empty() && d.device_id == selector)
+    {
+        return Ok(i);
+    }
+
+    if selector.len() >= 4 {
+        let by_prefix: Vec<usize> = registry
+            .devices
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| !d.device_id.is_empty() && d.device_id.starts_with(selector))
+            .map(|(i, _)| i)
+            .collect();
+        let prefix_matches = by_prefix.len();
+        match prefix_matches {
+            1 => return Ok(by_prefix[0]),
+            0 => {}
+            _ => anyhow::bail!(
+                "device id prefix '{selector}' is ambiguous ({prefix_matches} matches: {}). \
+                 Use the full id.",
+                candidates(by_prefix)
+            ),
+        }
+    }
+
+    anyhow::bail!(
+        "no device matches '{selector}' (tried name, device id, and id prefix). \
+         Run 'tcfs device list' to see enrolled devices."
+    )
+}
+
+/// Build the [`RevokePlan`] for a selector without mutating anything.
+///
+/// `is_local` decides self-revocation: the caller passes a predicate that knows
+/// which registry entry this host is enrolled as.
+fn plan_device_revoke(
+    registry: &tcfs_secrets::device::DeviceRegistry,
+    selector: &str,
+    is_local: impl Fn(&tcfs_secrets::device::DeviceIdentity) -> bool,
+) -> Result<RevokePlan> {
+    let index = resolve_device_selector(registry, selector)?;
+    let target = &registry.devices[index];
+
+    let mut remaining_active = 0usize;
+    let mut remaining_capable = 0usize;
+    let mut remaining_incapable = Vec::new();
+    for (i, device) in registry.devices.iter().enumerate() {
+        if i == index || device.revoked {
+            continue;
+        }
+        remaining_active += 1;
+        if tcfs_secrets::device::is_real_age_public_key(&device.public_key) {
+            remaining_capable += 1;
+        } else {
+            remaining_incapable.push(device.name.clone());
+        }
+    }
+
+    Ok(RevokePlan {
+        name: target.name.clone(),
+        device_id: target.device_id.clone(),
+        public_key: target.public_key.clone(),
+        already_revoked: target.revoked,
+        is_self: is_local(target),
+        remaining_active,
+        remaining_capable,
+        remaining_incapable,
+    })
+}
+
+/// Print the plan. Identical output for `--dry-run` and the real path, so a
+/// preview is a faithful rehearsal.
+fn print_revoke_plan(
+    plan: &RevokePlan,
+    config: &tcfs_core::config::TcfsConfig,
+    opts: RevokeOptions,
+) {
+    println!("Revoke target:");
+    println!("  name:        {}", plan.name);
+    println!(
+        "  device_id:   {}",
+        if plan.device_id.is_empty() {
+            "(none — legacy entry, will be matched by name)".to_string()
+        } else {
+            plan.device_id.clone()
+        }
+    );
+    println!("  public_key:  {}", plan.public_key);
+    println!(
+        "  state:       {}",
+        if plan.already_revoked {
+            "ALREADY REVOKED"
+        } else {
+            "active"
+        }
+    );
+    if plan.is_self {
+        println!("  self:        YES — this host is enrolled as this device");
+    }
+
+    println!("Fleet after revoke:");
+    println!(
+        "  active devices:  {} ({} with a real age recipient)",
+        plan.remaining_active, plan.remaining_capable
+    );
+    if !plan.remaining_incapable.is_empty() {
+        println!(
+            "  roll-call blockers (no real age recipient): {}",
+            plan.remaining_incapable.join(", ")
+        );
+    }
+    println!(
+        "  per_device roll-call: {}",
+        if plan.roll_call_ready_after() {
+            "READY (contract flip is not blocked by recipient capability)"
+        } else if plan.remaining_active == 0 {
+            "NOT READY — zero active devices left; writers fall back to master-only"
+        } else {
+            "NOT READY — an active device lacks a real age recipient"
+        }
+    );
+
+    println!(
+        "  wrap_mode:       {:?} (revocation denies NEW content only under per_device)",
+        config.crypto.wrap_mode
+    );
+    let remote = format!(
+        "{}/tcfs-meta/devices.json",
+        config.storage.resolved_prefix().trim_end_matches('/')
+    );
+    println!(
+        "  propagation:     {}",
+        if opts.sync_remote {
+            format!("republish signed registry to {remote}")
+        } else {
+            "LOCAL ONLY (no remote publish; pass --sync-remote)".to_string()
+        }
+    );
+}
+
+/// Interactive confirmation. Revocation is sticky fleet-wide (the merge only
+/// flips `revoked` false -> true), so it gets a real prompt unless `--yes`.
+fn confirm_revoke(plan: &RevokePlan, yes: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "refusing to revoke '{}' without confirmation on a non-interactive stdin. \
+             Re-run with --yes to confirm, or --dry-run to preview.",
+            plan.name
+        );
+    }
+    print!(
+        "Revoke '{}' (id={})? This is STICKY fleet-wide and cannot be undone by a peer. [y/N] ",
+        plan.name,
+        short_device_id(&plan.device_id)
+    );
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading confirmation from stdin")?;
+    if !matches!(line.trim(), "y" | "Y" | "yes" | "Yes" | "YES") {
+        anyhow::bail!("aborted: '{}' was NOT revoked", plan.name);
+    }
+    Ok(())
+}
+
+async fn cmd_device_revoke(
+    config: &tcfs_core::config::TcfsConfig,
+    selector: &str,
+    opts: RevokeOptions,
+) -> Result<()> {
     let registry_path = tcfs_secrets::device::default_registry_path();
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
 
-    // Capture the public key for the forward-secrecy notice before mutating.
-    let recipient = registry.find(name).map(|d| d.public_key.clone());
+    // Self = the identity this host is ENROLLED as, i.e. exactly what
+    // `tcfs device status` reports. Deliberately NOT "any device whose secret
+    // half happens to sit in this registry directory": a host that minted
+    // throwaway identities locally (the FileProvider bring-up ghosts) holds
+    // their secrets too, and those must stay revocable without an override.
+    let hostname = tcfs_secrets::device::default_device_name();
+    let plan = plan_device_revoke(&registry, selector, |device| device.name == hostname)?;
 
-    if registry.revoke(name) {
+    print_revoke_plan(&plan, config, opts);
+
+    if plan.is_self && !opts.allow_self {
+        anyhow::bail!(
+            "refusing to revoke '{}': this host is enrolled as that device, so revoking it \
+             strands this host (it drops out of every recipient set built afterwards). \
+             Re-run with --allow-self if that is genuinely what you want.",
+            plan.name
+        );
+    }
+
+    if opts.dry_run {
+        println!();
+        println!("DRY RUN: nothing was changed (local registry and remote are untouched).");
+        return Ok(());
+    }
+
+    if plan.already_revoked {
+        println!();
+        println!(
+            "Device '{}' is already revoked locally; no local change needed.",
+            plan.name
+        );
+        if !opts.sync_remote {
+            println!(
+                "  If the fleet has not converged, re-run with --sync-remote to republish it."
+            );
+            return Ok(());
+        }
+    } else {
+        confirm_revoke(&plan, opts.yes)?;
+
         // TIN-1899: recipient-set REMOVAL is the DEFAULT, cheap, immediate action.
-        // `revoke()` drops the device from `active_devices()`, so every recipient
+        // Revoking drops the device from `active_devices()`, so every recipient
         // set built afterwards (CLI/daemon/FileProvider via load_verified) excludes
         // it: NO new content is wrapped to the revoked device. We re-sign so the
         // signed envelope records `revoked + revoked_at` and the removal is
         // trustworthy (TIN-1417 B4).
-        save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
-        println!("Revoked device: {name}");
-        println!("  Dropped from the recipient set (immediate): no NEW content will be wrapped to this device.");
-        if let Some(recipient) = recipient {
-            println!("  Removed age recipient: {recipient}");
-        }
-
-        // LOUD forward-secrecy warning: recipient-set removal alone does NOT
-        // re-key content the device could already read.
-        eprintln!();
-        eprintln!(
-            "  WARNING (forward secrecy): the revoked device RETAINS read access to content it \
-             already pulled AND to any content that has not yet been re-keyed (its old FileKey \
-             wraps and cached chunks are unchanged)."
+        //
+        // Revoke by ID whenever we have one: names are not unique, and the
+        // selector may well have been an id in the first place.
+        let revoked = if plan.device_id.is_empty() {
+            registry.revoke(&plan.name)
+        } else {
+            registry.revoke_by_id(&plan.device_id)
+        };
+        anyhow::ensure!(
+            revoked,
+            "device '{}' disappeared from the registry while revoking",
+            plan.name
         );
-        eprintln!(
-            "  To achieve forward secrecy, re-key the affected content (expensive):\n      \
-             tcfs key rotate <prefix> --rotate-keys\n  This generates fresh FileKeys, re-encrypts \
-             content under new addresses, and re-wraps ONLY to the current recipient set."
+        save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
+
+        println!();
+        println!(
+            "Revoked device: {} (id={})",
+            plan.name,
+            short_device_id(&plan.device_id)
+        );
+        println!("  Dropped from the recipient set (immediate): no NEW content will be wrapped to this device.");
+        println!("  Removed age recipient: {}", plan.public_key);
+        println!("  Registry: {}", registry_path.display());
+    }
+
+    if opts.sync_remote {
+        let remote = sync_registry_with_remote(
+            config,
+            &mut registry,
+            &registry_path,
+            opts.accept_unsigned_remote,
+        )
+        .await?;
+        println!("  Propagated: {remote}");
+        println!(
+            "  Converge peers with: tcfs device enroll --sync-remote  (revocation is sticky, \
+             so a stale peer cannot resurrect it)"
         );
     } else {
-        anyhow::bail!("Device '{name}' not found");
+        println!();
+        println!(
+            "  LOCAL ONLY: the canonical fleet registry has NOT been updated. No peer knows \
+             about this revocation yet."
+        );
+        println!("  Propagate with: tcfs device revoke {selector} --sync-remote --yes");
+    }
+
+    // LOUD forward-secrecy warning: recipient-set removal alone does NOT
+    // re-key content the device could already read.
+    eprintln!();
+    eprintln!(
+        "  WARNING (forward secrecy): the revoked device RETAINS read access to content it \
+         already pulled AND to any content that has not yet been re-keyed (its old FileKey \
+         wraps and cached chunks are unchanged)."
+    );
+    eprintln!(
+        "  To achieve forward secrecy, re-key the affected content (expensive):\n      \
+         tcfs key rotate <prefix> --rotate-keys\n  This generates fresh FileKeys, re-encrypts \
+         content under new addresses, and re-wraps ONLY to the current recipient set."
+    );
+    if config.crypto.wrap_mode == tcfs_core::config::WrapMode::Master {
+        eprintln!(
+            "  NOTE: crypto.wrap_mode = master, so this revocation has NO cryptographic effect \
+             today — every holder of the master key still decrypts everything. It is registry \
+             hygiene plus a roll-call precondition for the dual -> per_device migration \
+             (docs/ops/per-device-crypto-migration-2026-06-06.md)."
+        );
     }
 
     Ok(())
@@ -5675,48 +6074,13 @@ async fn cmd_device_enroll(
     save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
 
     if sync_remote {
-        let op = build_operator(config).await?;
-        let meta_prefix = config.storage.resolved_prefix();
-        // TIN-1417 B4: verify the remote registry before merging. The remote object
-        // store is the primary tamper surface, so a signature-PRESENT-but-invalid
-        // remote is hard-rejected by `load_remote_verified`. An UNSIGNED (legacy)
-        // remote verifies as `UnsignedLegacy` and its trust MUST be bound here: if
-        // we merged it and then re-signed the result with our real master, an
-        // attacker who stripped the signature and injected a recipient would have
-        // their entry LAUNDERED into a validly-signed registry. So we refuse to
-        // merge an unsigned remote unless the operator explicitly opts in with
-        // `--accept-unsigned-remote` (loud warning below).
-        let remote = match master_key_for_registry_signing(config) {
-            Some(mk) => {
-                let (remote, trust) = tcfs_secrets::device::DeviceRegistry::load_remote_verified(
-                    &op,
-                    meta_prefix,
-                    mk.as_bytes(),
-                )
-                .await?;
-                enforce_remote_merge_trust(trust, accept_unsigned_remote)?;
-                remote
-            }
-            None => {
-                // No master key available: we cannot verify the remote at all, and
-                // we will write the merged result UNSIGNED anyway (no laundering
-                // into a signed registry is possible). Preserve legacy behaviour.
-                tcfs_secrets::device::DeviceRegistry::load_remote(&op, meta_prefix).await?
-            }
-        };
-        merge_device_registry(&mut registry, &remote)?;
-        match master_key_for_registry_signing(config) {
-            Some(mk) => {
-                registry
-                    .sync_to_remote_signed(&op, meta_prefix, mk.as_bytes())
-                    .await?
-            }
-            None => {
-                tcfs_secrets::device::DeviceRegistry::sync_to_remote(&registry, &op, meta_prefix)
-                    .await?
-            }
-        }
-        save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
+        sync_registry_with_remote(
+            config,
+            &mut registry,
+            &registry_path,
+            accept_unsigned_remote,
+        )
+        .await?;
     }
 
     if enrolled_or_repaired {
@@ -5745,6 +6109,70 @@ async fn cmd_device_enroll(
     }
 
     Ok(())
+}
+
+/// Converge the local device registry with the canonical remote one and
+/// republish the signed result to `{prefix}/tcfs-meta/devices.json`.
+///
+/// Shared by `device enroll --sync-remote` and `device revoke --sync-remote` so
+/// both paths get identical trust handling: the remote is signature-verified
+/// before it is merged, an UNSIGNED (legacy) remote is refused unless the
+/// operator explicitly accepts it (see [`enforce_remote_merge_trust`]), and the
+/// merged result is re-signed with the master key when one is available.
+///
+/// Returns the remote object path that was published, for operator output.
+async fn sync_registry_with_remote(
+    config: &tcfs_core::config::TcfsConfig,
+    registry: &mut tcfs_secrets::device::DeviceRegistry,
+    registry_path: &Path,
+    accept_unsigned_remote: bool,
+) -> Result<String> {
+    let op = build_operator(config).await?;
+    let meta_prefix = config.storage.resolved_prefix();
+    // TIN-1417 B4: verify the remote registry before merging. The remote object
+    // store is the primary tamper surface, so a signature-PRESENT-but-invalid
+    // remote is hard-rejected by `load_remote_verified`. An UNSIGNED (legacy)
+    // remote verifies as `UnsignedLegacy` and its trust MUST be bound here: if
+    // we merged it and then re-signed the result with our real master, an
+    // attacker who stripped the signature and injected a recipient would have
+    // their entry LAUNDERED into a validly-signed registry. So we refuse to
+    // merge an unsigned remote unless the operator explicitly opts in with
+    // `--accept-unsigned-remote` (loud warning below).
+    let remote = match master_key_for_registry_signing(config) {
+        Some(mk) => {
+            let (remote, trust) = tcfs_secrets::device::DeviceRegistry::load_remote_verified(
+                &op,
+                meta_prefix,
+                mk.as_bytes(),
+            )
+            .await?;
+            enforce_remote_merge_trust(trust, accept_unsigned_remote)?;
+            remote
+        }
+        None => {
+            // No master key available: we cannot verify the remote at all, and
+            // we will write the merged result UNSIGNED anyway (no laundering
+            // into a signed registry is possible). Preserve legacy behaviour.
+            tcfs_secrets::device::DeviceRegistry::load_remote(&op, meta_prefix).await?
+        }
+    };
+    merge_device_registry(registry, &remote)?;
+    match master_key_for_registry_signing(config) {
+        Some(mk) => {
+            registry
+                .sync_to_remote_signed(&op, meta_prefix, mk.as_bytes())
+                .await?
+        }
+        None => {
+            tcfs_secrets::device::DeviceRegistry::sync_to_remote(registry, &op, meta_prefix).await?
+        }
+    }
+    save_registry_signed_or_warn(registry, registry_path, config)?;
+
+    Ok(format!(
+        "{}/tcfs-meta/devices.json",
+        meta_prefix.trim_end_matches('/')
+    ))
 }
 
 /// TIN-1417 B4 — close the unsigned-remote LAUNDERING bypass on the enroll
@@ -13200,5 +13628,272 @@ enabled = false
             !sentinel.exists(),
             "git_head_oneline must not execute the repository-configured gpg.program"
         );
+    }
+
+    // ── TIN-1417: `tcfs device revoke` operator UX ───────────────────────────
+
+    fn revoke_test_device(
+        name: &str,
+        device_id: &str,
+        public_key: &str,
+        revoked: bool,
+    ) -> tcfs_secrets::device::DeviceIdentity {
+        tcfs_secrets::device::DeviceIdentity {
+            name: name.to_string(),
+            device_id: device_id.to_string(),
+            public_key: public_key.to_string(),
+            signing_key_hash: String::new(),
+            description: None,
+            enrolled_at: 1000,
+            revoked,
+            revoked_at: None,
+            enrolled_by: None,
+            signing_pubkey: None,
+            last_nats_seq: 0,
+        }
+    }
+
+    /// A syntactically real age recipient (bech32 `age1...`), so
+    /// `is_real_age_public_key` treats the device as per-device-capable.
+    fn revoke_test_recipient() -> String {
+        tcfs_secrets::device::generate_local_device_key().public_key
+    }
+
+    fn revoke_test_registry() -> tcfs_secrets::device::DeviceRegistry {
+        let mut registry = tcfs_secrets::device::DeviceRegistry::default();
+        registry.add(revoke_test_device(
+            "neo",
+            "aaaa1111-0000-0000-0000-000000000001",
+            &revoke_test_recipient(),
+            false,
+        ));
+        registry.add(revoke_test_device(
+            "honey",
+            "bbbb2222-0000-0000-0000-000000000002",
+            &revoke_test_recipient(),
+            false,
+        ));
+        registry
+    }
+
+    #[test]
+    fn cli_parses_device_revoke_flags() {
+        let parsed = Cli::try_parse_from([
+            "tcfs",
+            "device",
+            "revoke",
+            "d6d65d8d",
+            "--dry-run",
+            "--yes",
+            "--sync-remote",
+            "--accept-unsigned-remote",
+            "--allow-self",
+        ])
+        .expect("full revoke flag set must parse");
+        match parsed.command {
+            Commands::Device {
+                action:
+                    DeviceAction::Revoke {
+                        device,
+                        dry_run,
+                        yes,
+                        sync_remote,
+                        accept_unsigned_remote,
+                        allow_self,
+                    },
+            } => {
+                assert_eq!(device, "d6d65d8d");
+                assert!(dry_run && yes && sync_remote && accept_unsigned_remote && allow_self);
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+
+        // Bare form still works and defaults to the safe posture: no remote
+        // publish, no auto-confirm, no self-revocation.
+        let bare = Cli::try_parse_from(["tcfs", "device", "revoke", "old-phone"]).unwrap();
+        match bare.command {
+            Commands::Device {
+                action:
+                    DeviceAction::Revoke {
+                        device,
+                        dry_run,
+                        yes,
+                        sync_remote,
+                        accept_unsigned_remote,
+                        allow_self,
+                    },
+            } => {
+                assert_eq!(device, "old-phone");
+                assert!(!dry_run && !yes && !sync_remote && !accept_unsigned_remote && !allow_self);
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    /// The unsigned-remote escape hatch must never be usable on its own: it only
+    /// means anything while merging a remote registry.
+    #[test]
+    fn cli_rejects_accept_unsigned_remote_without_sync_remote() {
+        assert!(Cli::try_parse_from([
+            "tcfs",
+            "device",
+            "revoke",
+            "old-phone",
+            "--accept-unsigned-remote",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn revoke_selector_resolves_name_id_and_prefix() {
+        let registry = revoke_test_registry();
+
+        assert_eq!(resolve_device_selector(&registry, "honey").unwrap(), 1);
+        assert_eq!(
+            resolve_device_selector(&registry, "bbbb2222-0000-0000-0000-000000000002").unwrap(),
+            1
+        );
+        // The 8-char form printed by `tcfs device list`.
+        assert_eq!(resolve_device_selector(&registry, "bbbb2222").unwrap(), 1);
+    }
+
+    #[test]
+    fn revoke_selector_rejects_unknown_short_and_ambiguous_input() {
+        let registry = revoke_test_registry();
+
+        let unknown = resolve_device_selector(&registry, "nope")
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("no device matches"), "{unknown}");
+
+        // Too short to be a prefix match; must not silently pick a device.
+        assert!(resolve_device_selector(&registry, "bb").is_err());
+
+        let mut ambiguous_prefix = revoke_test_registry();
+        ambiguous_prefix.add(revoke_test_device(
+            "honey-old",
+            "bbbb2222-0000-0000-0000-000000000099",
+            &revoke_test_recipient(),
+            false,
+        ));
+        let err = resolve_device_selector(&ambiguous_prefix, "bbbb2222")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+
+        // Duplicate NAMES are real (ghost FileProvider identities); an ambiguous
+        // name must be an error, never a first-match.
+        let mut duplicate_names = tcfs_secrets::device::DeviceRegistry::default();
+        duplicate_names.add(revoke_test_device(
+            "local-fileprovider",
+            "d6d65d8d-0000-0000-0000-000000000001",
+            &revoke_test_recipient(),
+            false,
+        ));
+        duplicate_names.add(revoke_test_device(
+            "local-fileprovider",
+            "f1d980ab-0000-0000-0000-000000000002",
+            &revoke_test_recipient(),
+            false,
+        ));
+        let err = resolve_device_selector(&duplicate_names, "local-fileprovider")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        // ...but each is still addressable by id prefix.
+        assert_eq!(
+            resolve_device_selector(&duplicate_names, "f1d980ab").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn revoke_plan_reports_roll_call_impact_and_self_target() {
+        let registry = revoke_test_registry();
+
+        let plan = plan_device_revoke(&registry, "honey", |d| d.name == "neo").unwrap();
+        assert_eq!(plan.name, "honey");
+        assert!(!plan.already_revoked);
+        assert!(!plan.is_self);
+        assert_eq!(plan.remaining_active, 1);
+        assert_eq!(plan.remaining_capable, 1);
+        assert!(plan.remaining_incapable.is_empty());
+        assert!(plan.roll_call_ready_after());
+
+        // Targeting the local host is flagged so the caller can refuse.
+        let self_plan = plan_device_revoke(&registry, "neo", |d| d.name == "neo").unwrap();
+        assert!(self_plan.is_self);
+    }
+
+    #[test]
+    fn revoke_plan_flags_remaining_roll_call_blocker() {
+        let mut registry = revoke_test_registry();
+        // A legacy placeholder entry: active but not per-device-capable.
+        registry.add(revoke_test_device(
+            "legacy-laptop",
+            "cccc3333-0000-0000-0000-000000000003",
+            "age1-device-deadbeef",
+            false,
+        ));
+
+        let plan = plan_device_revoke(&registry, "honey", |_| false).unwrap();
+        assert_eq!(plan.remaining_active, 2);
+        assert_eq!(plan.remaining_capable, 1);
+        assert_eq!(plan.remaining_incapable, vec!["legacy-laptop".to_string()]);
+        assert!(
+            !plan.roll_call_ready_after(),
+            "an active placeholder device must still block the per_device contract flip"
+        );
+
+        // Revoking the blocker itself is what makes the roll-call satisfiable.
+        let unblock = plan_device_revoke(&registry, "cccc3333", |_| false).unwrap();
+        assert_eq!(unblock.name, "legacy-laptop");
+        assert!(unblock.roll_call_ready_after());
+    }
+
+    /// Revoking the last active device leaves an empty recipient set; the plan
+    /// must say so rather than reporting a "ready" roll-call.
+    #[test]
+    fn revoke_plan_last_active_device_is_not_roll_call_ready() {
+        let mut registry = tcfs_secrets::device::DeviceRegistry::default();
+        registry.add(revoke_test_device(
+            "only",
+            "dddd4444-0000-0000-0000-000000000004",
+            &revoke_test_recipient(),
+            false,
+        ));
+
+        let plan = plan_device_revoke(&registry, "only", |_| false).unwrap();
+        assert_eq!(plan.remaining_active, 0);
+        assert!(!plan.roll_call_ready_after());
+    }
+
+    /// An already-revoked target resolves fine and is reported as a no-op, so
+    /// finishing a half-propagated revocation stays idempotent.
+    #[test]
+    fn revoke_plan_is_idempotent_for_already_revoked_device() {
+        let mut registry = revoke_test_registry();
+        assert!(registry.revoke_by_id("bbbb2222-0000-0000-0000-000000000002"));
+
+        let plan = plan_device_revoke(&registry, "honey", |_| false).unwrap();
+        assert!(plan.already_revoked);
+        assert_eq!(
+            plan.remaining_active, 1,
+            "already-revoked device is not counted twice"
+        );
+    }
+
+    /// `--yes` is required when stdin is not a TTY (cron, ssh, CI), so a script
+    /// can never silently consume an interactive prompt.
+    #[test]
+    fn confirm_revoke_requires_yes_when_non_interactive() {
+        let plan = plan_device_revoke(&revoke_test_registry(), "honey", |_| false).unwrap();
+        assert!(confirm_revoke(&plan, true).is_ok());
+
+        // Under `cargo test` stdin is not a terminal.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            let err = confirm_revoke(&plan, false).unwrap_err().to_string();
+            assert!(err.contains("--yes"), "{err}");
+        }
     }
 }

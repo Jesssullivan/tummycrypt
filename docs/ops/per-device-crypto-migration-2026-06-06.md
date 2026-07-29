@@ -18,6 +18,15 @@ below as the current per-device wrapping plan, but treat `tcfs key rotate
 <prefix>` as a rebuild gate, not an available operator remedy, until `TIN-2551`
 lands with fresh tests and review.
 
+2026-07-28 companion: the operator-facing execution surface for this plan — per
+step commands, hard preconditions, verification, abort, and a re-derivable status
+ledger of which steps have actually landed — now lives in
+[`shared-master-fleet-migration-runbook-2026-07-28.md`](shared-master-fleet-migration-runbook-2026-07-28.md).
+This document remains the authority for the SEQUENCING and its rationale; the
+runbook is the authority for how to execute a step. Fleet state at that date is
+unchanged: every host is still `wrap_mode = master` and the next action in the
+sequence is Step 3 (a disposable-prefix `dual` canary).
+
 Grounding: every primitive, phase, and revocation claim here derives from
 `docs/ops/per-device-crypto-identity-design-2026-05-18.md` (the "design doc"
 below). Where this plan adds operational structure not in the design doc — an

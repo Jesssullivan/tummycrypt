@@ -13,6 +13,24 @@ intent rather than the current supported/proven surface.
 
 ### Added
 
+- `tcfs device revoke` gained an operator-grade UX (TIN-1417): `--dry-run`
+  previews the resolved target, post-revoke roll-call impact, effective
+  `crypto.wrap_mode`, and propagation target without mutating anything;
+  `--sync-remote` publishes the revocation to the canonical signed fleet
+  registry in the same step (previously a separate `device enroll --sync-remote`
+  that was easy to forget, leaving a revocation no peer ever saw). A device may
+  now be addressed by name, full device id, or the 8-character id prefix printed
+  by `tcfs device list`, and an ambiguous selector is a hard error listing the
+  candidates instead of a silent first match. Revocation is applied by device id
+  when one exists, so a same-named ghost sibling is never collaterally revoked.
+- Operator runbook for migrating a shared-master fleet to per-device wrapping
+  (`docs/ops/shared-master-fleet-migration-runbook-2026-07-28.md`): per-step
+  commands, hard preconditions, verification, abort, and a status ledger for the
+  ratified `master -> dual -> roll-call -> per_device` sequence. Documents the
+  FileProvider backend-capability precondition the roll-call gate cannot see —
+  the `direct`/`uniffi` (iOS) backends only unwrap under the master key and fail
+  closed on a per-device v3 manifest, so they must be accounted for before any
+  contract flip. Doc-only: no fleet state and no config default changes.
 - Daemon-trusted stable-root routing for isolated conflict caches: clients can
   inspect a named root and run the bounded Git keep-both dry-run/execute flow
   without supplying a state path or storage prefix. Registered roots inherit
@@ -29,6 +47,18 @@ intent rather than the current supported/proven surface.
 
 ### Security
 
+- `tcfs device revoke` now confirms before mutating, and refuses to proceed on a
+  non-interactive stdin without `--yes`, because revocation is sticky
+  fleet-wide: the registry merge only ever flips `revoked` false to true and no
+  peer can reverse it. It also refuses by default to revoke the identity the
+  running host is itself enrolled as (`--allow-self` to override), and its
+  `--sync-remote` path reuses the same TIN-1417 B4 trust enforcement as enroll —
+  a signature-present-but-invalid remote registry is hard-rejected and an
+  unsigned legacy remote is refused unless `--accept-unsigned-remote` is passed,
+  so an attacker-injected recipient cannot be laundered into a signed registry.
+  The existing forward-secrecy warning is unchanged, and under
+  `crypto.wrap_mode = master` the command now states plainly that a revoke has
+  no cryptographic effect at all.
 - V1 inventory never reinterprets the legacy conflict-only root registry,
   creates a state-lock inode, repairs or recovers a cache, exposes an MCP tool,
   or grants reconcile/mutation authority. It filters unauthorized prefixes
