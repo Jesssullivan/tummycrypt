@@ -46,6 +46,9 @@ development instruction source.
 - [Versioned root registry/status ADR](design/versioned-root-registry-status-b0a-2026-07-19.md)
   — B0a authorized immutable V1 inventory; no reconcile, mutation, MCP, or
   live deployment.
+- [Stable root lifecycle ADR (TIN-1556)](design/stable-root-lifecycle-tin1556-2026-07-28.md)
+  — proposed B-phase adopt/remove/driver/profile/uniform-roam-root design;
+  design spike only, no implementation or live claim.
 - [Divergent Git keep-both design](design/git-divergent-keep-both-2026-07-02.md)
 - [Git repository dogfood canary](ops/git-repo-canary-dogfood.md)
 - [Repo-roam acceptance](ops/git-roam-daily-driver-acceptance-2026-06-08.md)
