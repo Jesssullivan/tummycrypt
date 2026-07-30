@@ -155,12 +155,26 @@ The recorded escalation — **a uniform absolute prefix, identical on every
 host** — is adopted here as the binding convention for agent-session and
 roam-first roots:
 
-- A reserved conventional prefix (proposal: `/tcfs/<root_id>`, with
-  `~/tcfs/<root_id>` as the non-root-privilege fallback — **operator
-  question Q1**) at which the `RootBindingV1.local_root` is *identical on
-  every host*, so slug, registry key, and embedded cwd all match with zero
-  rewriting. In-place transcript rewriting stays rejected — it would break
-  the byte-exact convergence invariant roam enrollment depends on.
+- **Ruled 2026-07-29 (Q1):** the canonical identity remains `root_id` — no
+  path is ever the protocol (reaffirming TIN-2853). Host paths are
+  *platform projections* recorded in `RootBindingV1`. The default Unix
+  projection is `/tcfs/<root_id>`: a root-owned boundary directory with
+  user-owned children — exactly the ancestry shape the landed B0
+  validation already accepts — so slug, registry key, and embedded cwd
+  all match with zero rewriting on every host that carries the boundary.
+  `~/tcfs/<root_id>` is the documented fallback projection where root
+  provisioning is unavailable; FileProvider/CFAPI clients use their
+  mandated containers. In-place transcript rewriting stays rejected — it
+  would break the byte-exact convergence invariant roam enrollment
+  depends on.
+- Boundary provisioning is one line per platform (`tmpfiles.d` on Linux,
+  `synthetic.conf` on macOS — the `/nix` mechanism already proven on the
+  darwin fleet), rendered by lab and deploy-gated behind the live freeze.
+  An optional `~/tcfs → /tcfs` symlink is the same-OS compat bridge for
+  legacy embedded paths; legacy `~/tcfs` roots are grandfathered until
+  re-adopted through the D1 transaction. Cross-OS session healing is
+  expected to be a no-op for default-projection roots; a mapping layer
+  remains only for fallback-projection and mandated-container hosts.
 - Uniform-prefix bindings are a *convention on top of* the binding contract,
   not a change to it: hosts that cannot honor the prefix stay `UNBOUND` and
   fail closed.
@@ -227,21 +241,27 @@ defers the rest:
 | Cross-machine convergence, different local paths, no collisions | UNBOUND/binding model + D2 driver; proven by the B0c two-host test (and the uniform-prefix variant for agent roots) |
 | Rollback/removal documented and tested | D1 remove semantics |
 
-## Operator questions (blocking decisions, batched for one interview)
+## Operator rulings (2026-07-29 interview; asked as one batch)
 
-- **Q1 — uniform roam-root prefix:** `/tcfs/<root_id>` (needs a root-owned
-  directory created once per host) vs `~/tcfs/<root_id>` (no privilege, but
-  `~` differs across OSes so only the *suffix* is uniform — breaks the
-  full-path-slug healing for cross-OS pairs). A third option is a per-OS
-  synthetic mount point unified by the daemon. D4 recommends `/tcfs`.
-- **Q2 — remove retention window:** how long removed-root state caches are
-  retained before `--purge-state` is allowed (proposal: 30 days).
-- **Q3 — driver default posture:** should migrated roots default
-  `lifecycle_policy = "reconcile"` (units retired eagerly) or
-  `"inspect-only"` (operator flips each root after observing plan output)?
-  D2 recommends inspect-only defaults with explicit per-root promotion.
-- **Q4 — home profiles in B:** confirm inventory-and-shadow-only scope for
-  `home-*-v1`, with live home subtrees deferred to C.
+All four blocking questions are now ruled. The original question text is
+preserved in git history at the pre-ruling revision of this document.
+
+- **Q1 — uniform roam-root prefix: RULED — rootful.** Identity is
+  `root_id`; host paths are platform projections (see the amended D4 for
+  the full ruling text). The default Unix projection is `/tcfs/<root_id>`;
+  `~/tcfs/<root_id>` is the fallback projection; FileProvider/CFAPI use
+  mandated containers. The operator ratified erring toward the rootful,
+  filesystem-native pattern as the core product contract: mountpoints and
+  user-level implementation adjust underneath it with no further
+  consumer-facing decisions.
+- **Q2 — remove retention window: RULED — 7 days** of removed-root state
+  cache retention before `--purge-state` is allowed (tighter than the
+  30-day proposal).
+- **Q3 — driver default posture: RULED — `inspect-only` defaults** with
+  explicit per-root promotion after the operator observes each root's
+  plan output (D2 as recommended).
+- **Q4 — home profiles in B: RULED — inventory-and-shadow only** for
+  `home-*-v1`; live home subtrees stay deferred to C.
 
 ## Explicit non-goals of this ADR
 
