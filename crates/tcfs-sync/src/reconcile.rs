@@ -3398,13 +3398,46 @@ async fn compare_both_exist(
     // clock is untouched, so re-recording the conflict each cycle stays
     // idempotent (no per-cycle clock growth). `reclassify_git_ff_conflicts` is
     // unaffected — it decides on git SHA ancestry, not on these clocks.
-    if let Some(tracked_state) = tracked {
-        if tracked_state.blake3 != local_hash
-            && local_vclock.partial_cmp_vc(&remote_manifest.vclock)
-                == Some(std::cmp::Ordering::Less)
-        {
-            local_vclock.tick(device_id);
-        }
+    //
+    // The ordering is computed ONCE, against the STORED clock, before any tick.
+    // Both out-of-band re-tick rules below key off `stored_ordering`, never off
+    // a clock a sibling rule already mutated: TIN-2584 (`Less`) and TIN-3277
+    // (`Equal`) are disjoint cases of the same stored comparison, and the
+    // `else if` makes that mutual exclusion structural. Reading a mutated clock
+    // here would let a `Less` pair be re-ticked into `Equal` and then promoted
+    // to `Greater`/`LocalNewer`, defeating the narrowing comment above.
+    let stored_ordering = local_vclock.partial_cmp_vc(&remote_manifest.vclock);
+    if tracked.is_some_and(|tracked_state| tracked_state.blake3 != local_hash)
+        && stored_ordering == Some(std::cmp::Ordering::Less)
+    {
+        local_vclock.tick(device_id);
+    } else if self_rewrite_retick_applies(
+        rel_path,
+        tracked,
+        &local_hash,
+        &remote_manifest.file_hash,
+        stored_ordering,
+        device_id,
+        remote_device,
+    ) {
+        // TIN-3277: an equal-clock self-pair whose remote content is byte-identical
+        // to our own tracked baseline is proof of a local out-of-band rewrite, not a
+        // concurrent-writer conflict. See `self_rewrite_retick_applies`.
+        //
+        // Audit trail: log the remote manifest key we are about to displace. The
+        // displaced bytes are `tracked.blake3` — this device's own last-synced
+        // content — so this line is sufficient to reconstruct what was replaced
+        // without a parked copy.
+        info!(
+            path = %rel_path,
+            device = %device_id,
+            displaced_manifest = %manifest_path,
+            displaced_hash = %remote_manifest.file_hash,
+            local_hash = %local_hash,
+            "TIN-3277 self-heal: equal-clock self-pair, remote content == our tracked \
+             baseline — re-ticking as a local out-of-band rewrite and pushing"
+        );
+        local_vclock.tick(device_id);
     }
 
     let outcome = compare_clocks(
@@ -3424,6 +3457,123 @@ async fn compare_both_exist(
         remote_entry,
         &manifest_path,
     ))
+}
+
+/// TIN-3277: is this equal-clock divergence a purely LOCAL out-of-band rewrite?
+///
+/// An out-of-band writer (home-manager secrets/dotfile materialization on neo,
+/// `git commit` on a ref, any editor that bypasses the tcfs write hook) rewrites
+/// an enrolled file WITHOUT ticking the tcfs vclock. The clock therefore freezes
+/// at its last-synced value while local content diverges, so `compare_clocks`
+/// sees EQUAL clocks + differing blake3 and returns `Conflict`. The reconcile
+/// `Conflict` arm is record-only (it bumps `times_recorded` and flips status; it
+/// never pushes), so those paths become structurally unpushable — observed live
+/// on neo as 7 permanent conflicts (`secrets/**`, `dotfiles/tcfs/devices.json`)
+/// stuck 24+ days with `times_recorded` in the thousands.
+///
+/// The safety proof is CONTENT identity, not device identity. The load-bearing
+/// clause is `tracked.blake3 == remote_hash`: the remote copy is byte-identical
+/// to what THIS device last synced. Overwriting it therefore provably cannot
+/// lose another writer's work — there is nothing on the remote that is not
+/// already in this device's own tracked baseline. Any foreign write, from any
+/// device, by any mechanism, changes `remote_hash`, fails this clause, and falls
+/// through to the ordinary `compare_clocks` -> `Conflict` path exactly as before
+/// this fix. That is what makes the promotion safe without authenticating
+/// anything.
+///
+/// `remote_device == device_id` is kept as CORROBORATION ONLY, deliberately not
+/// as the safety boundary. `written_by` (`manifest.rs`) is an unauthenticated,
+/// client-set JSON string — `validate_indexed_manifest_binding` binds manifest
+/// BYTES to the index's `manifest_hash`, it does not sign the device claim — so
+/// any holder of the master key could write `"written_by":"neo"`. Under the
+/// content-identity clause that buys an attacker nothing: to pass the predicate
+/// they must publish content equal to our tracked baseline, i.e. leave the
+/// remote exactly as this device last left it. A spoofed `written_by` over
+/// DIFFERENT content still fails `tracked.blake3 == remote_hash` and records a
+/// conflict. The clause also keeps a colliding/cloned `device_id` (two hosts
+/// sharing one id) from mattering: the pair only heals when the remote content
+/// is our own baseline.
+///
+/// Given both clauses, the only event that can explain the divergence is a local
+/// rewrite that skipped the tick (an equal clock proves no later push happened —
+/// a real push ticks). Model it as an ordinary local modification: tick a
+/// comparison-only CLONE of the clock, mirroring `engine.rs`
+/// `local_edit_inferred -> tick` and the TIN-2584 dominated-ref fix, so the pair
+/// classifies `LocalNewer` -> `Push` and converges.
+///
+/// Deliberately narrow — every clause is load-bearing:
+///  * `tracked.blake3 == remote_hash`: the remote is our own last-synced bytes,
+///    so the push displaces only this device's own history (above). This is the
+///    clause that makes "no silent loss" hold; it is checked against real
+///    content, never against a self-declared identity.
+///  * `tracked.blake3 != local_hash`: evidence the LOCAL file moved since the
+///    last sync. Without it, a state cache whose tracked hash still matches the
+///    live file but disagrees with the remote is ambiguous — fail closed.
+///  * `remote_device == device_id`: corroboration; also preserves the
+///    pre-existing behavior that a DISTINCT-device equal-clock pair records a
+///    conflict, and makes legacy v1 manifests (empty `written_by`) fail closed.
+///  * `stored_ordering == Equal` only, computed against the STORED clock before
+///    any re-tick: `Less` is TIN-2584's case, `Greater` already pushes, `None`
+///    (concurrent) is a real conflict. Taking the ordering as a parameter rather
+///    than re-deriving it here makes it impossible for a caller to evaluate this
+///    predicate against a clock a sibling rule already ticked.
+///  * `local_hash != remote_hash`: identical content is `UpToDate` anyway.
+///  * not `.git`-internal: `.git` divergence keeps the fail-closed
+///    fast-forward veto / loser-guard keep-both path (G5-git-13), which decides
+///    on git SHA ancestry rather than clocks. Promoting a divergent non-head ref
+///    to `LocalNewer` here would defeat that guard.
+///
+/// Why no parked copy / `.conflict-{device}` sidecar: `KeepBoth` exists to
+/// preserve a SECOND writer's bytes. Here the displaced remote content is
+/// `tracked.blake3` — this device's own last-synced bytes, still described by
+/// its own state entry and (until GC) still addressable by the manifest key the
+/// self-heal logs at `info`. A sidecar would duplicate our own history and, on
+/// `secrets/**`, would multiply ciphertext copies of sensitive material for no
+/// recovery benefit.
+///
+/// Convergence / no infinite tick: the tick lands on the comparison clone only.
+/// A successful push re-derives and stores the ticked clock (and clears the
+/// stale `conflict` payload via `make_sync_state_full`), so the next cycle sees
+/// equal hashes -> `UpToDate`. A failed or deferred push leaves the stored clock
+/// untouched, so the next cycle re-derives the same single-step tick — the
+/// ordinary retry path, with no per-cycle clock growth. If the remote moves
+/// between plan and execute, the engine's own conflict veto
+/// (`engine.rs` `SyncOutcome::Conflict` arm) records a visible `ConflictInfo`
+/// and rewrites the tracked baseline to the live local hash, which DISARMS
+/// `tracked.blake3 != local_hash` for that path: the entry reverts to the
+/// pre-fix recorded-conflict behavior (surfaced by `tcfs conflicts` / D-Bus)
+/// rather than looping. Fail-closed, not silent.
+fn self_rewrite_retick_applies(
+    rel_path: &str,
+    tracked: Option<&SyncState>,
+    local_hash: &str,
+    remote_hash: &str,
+    stored_ordering: Option<std::cmp::Ordering>,
+    device_id: &str,
+    remote_device: &str,
+) -> bool {
+    if device_id.is_empty() || remote_device != device_id {
+        return false;
+    }
+    if local_hash == remote_hash {
+        return false;
+    }
+    if is_git_internal_path(rel_path) {
+        return false;
+    }
+    let Some(tracked_state) = tracked else {
+        return false;
+    };
+    // The local file moved since the last sync ...
+    if tracked_state.blake3 == local_hash {
+        return false;
+    }
+    // ... and the remote is still exactly the bytes this device last synced, so
+    // nothing but our own history can be displaced. THE load-bearing clause.
+    if tracked_state.blake3 != remote_hash {
+        return false;
+    }
+    stored_ordering == Some(std::cmp::Ordering::Equal)
 }
 
 /// Causal metadata extracted from one fully bound remote manifest.
@@ -4472,6 +4622,18 @@ pub async fn execute_plan(
                         if !upload.skipped {
                             result.pushed += 1;
                             result.bytes_uploaded += upload.bytes;
+                        } else {
+                            // TIN-3277: a planned push the engine vetoed at execute
+                            // time is neither counted in `pushed` nor pushed to
+                            // `errors`, so it used to leave no trace at all. Surface
+                            // it: for a self-heal push this is the signal that the
+                            // remote moved between plan and execute and the entry
+                            // has reverted to a recorded conflict.
+                            info!(
+                                path = %rel_path,
+                                outcome = ?upload.outcome,
+                                "planned push skipped by execute-time veto (remote moved since plan)"
+                            );
                         }
                     }
                     Err(e) => {
@@ -9705,6 +9867,525 @@ mod tests {
         assert!(
             matches!(action, Ok(ReconcileAction::UpToDate { .. })),
             "an unchanged ref with a momentarily-absent remote entry must stay UpToDate, got {action:?}"
+        );
+    }
+
+    // ── TIN-3277: out-of-band self-rewrite self-heal ──────────────────────────
+
+    /// Build the exact live shape of a TIN-3277 stuck entry: the tracked hash is
+    /// the last-synced (== remote) content, the clock is frozen at the value that
+    /// push wrote, and the live local file has since been rewritten out of band.
+    ///
+    /// `tracked.blake3 == remote_hash` here is not incidental — it IS the
+    /// content-identity clause the fix rests on. Tests that must exercise the
+    /// clause's negative case build their pair explicitly instead.
+    async fn tin3277_self_pair(
+        op: &Operator,
+        rel: &str,
+        device: &str,
+        remote_hash: &str,
+        local_bytes: &[u8],
+    ) -> (tempfile::TempDir, PathBuf, RemoteIndexEntry, SyncState) {
+        let remote_entry = seed_manifest_vclock(
+            op,
+            "data",
+            rel,
+            remote_hash,
+            &format!(r#"{{"clocks":{{"{device}":1}}}}"#),
+            device,
+        )
+        .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("entry");
+        std::fs::write(&local_path, local_bytes).unwrap();
+        // Tracked baseline == what we last pushed (the remote content hash).
+        let tracked = tin2584_state(remote_hash, tin2584_vclock(&[(device, 1)]));
+        (dir, local_path, remote_entry, tracked)
+    }
+
+    /// (a) The defect itself: `secrets/*` rewritten by an out-of-band writer
+    /// (home-manager materialization) with the clock frozen at `{neo:1}` — the
+    /// remote side is this same device's own prior push. It must re-tick and
+    /// PUSH, not record yet another unresolvable self-conflict.
+    #[tokio::test]
+    async fn tin3277_self_rewrite_equal_clock_pushes_instead_of_conflicting() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        let (_dir, local_path, remote_entry, tracked) =
+            tin3277_self_pair(&op, rel, "neo", "lastpushedhash", b"hm-rematerialized\n").await;
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                action,
+                Ok(ReconcileAction::Push {
+                    reason: PushReason::LocalNewer,
+                    ..
+                })
+            ),
+            "an equal-clock SELF-pair is a local out-of-band rewrite and must push, got {action:?}"
+        );
+    }
+
+    /// (b) Narrowing guard: a genuine TWO-DEVICE equal-clock divergence has a
+    /// second writer whose work a push would clobber — it must still record a
+    /// conflict. This is the clause that keeps the fix from becoming a
+    /// last-writer-wins clobber.
+    #[tokio::test]
+    async fn tin3277_distinct_device_equal_clock_still_records_conflict() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        // Remote manifest written by `honey`; we are `neo`.
+        let (_dir, local_path, remote_entry, tracked) =
+            tin3277_self_pair(&op, rel, "honey", "honeypushedhash", b"neo-local\n").await;
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "a distinct-device equal-clock divergence must still record a Conflict, got {action:?}"
+        );
+    }
+
+    /// (c) THE LOAD-BEARING CLAUSE, negative case: same self-pair shape, same
+    /// equal clocks, same `written_by == device_id` — but the REMOTE content is
+    /// no longer the bytes this device last synced. Something else wrote it (a
+    /// second state cache under one `device_id`, a peer with a spoofed
+    /// `written_by`, a `tcfs push` from a different state dir). Pushing would
+    /// destroy content that exists nowhere else, so this MUST stay a recorded
+    /// `Conflict`. This is the test that would fail if the safety proof were
+    /// device identity instead of content identity.
+    #[tokio::test]
+    async fn tin3277_remote_moved_since_baseline_still_records_conflict() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        // Remote claims to be us and carries the same clock, but its content is
+        // NOT our tracked baseline.
+        let remote_entry = seed_manifest_vclock(
+            &op,
+            "data",
+            rel,
+            "foreign-write-hash",
+            r#"{"clocks":{"neo":1}}"#,
+            "neo",
+        )
+        .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("entry");
+        std::fs::write(&local_path, b"hm-rematerialized\n").unwrap();
+        // Our baseline is our own last push, which the remote no longer holds.
+        let tracked = tin2584_state("our-baseline-hash", tin2584_vclock(&[("neo", 1)]));
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "remote content that is NOT our tracked baseline may never be silently \
+             overwritten, even for a self-pair: got {action:?}"
+        );
+    }
+
+    /// (c2) STRUCTURAL double-tick regression. `device_id == written_by`, the
+    /// local file moved out of band, and the STORED clock is strictly dominated
+    /// by the remote's (`Ordering::Less`) — TIN-2584's case. If the self-heal
+    /// predicate were evaluated after TIN-2584's tick, the pair would read as
+    /// `Equal`, get ticked a second time, and be promoted to `Greater` ->
+    /// `LocalNewer` -> `Push`, silently overwriting a remote the local side has
+    /// never seen. Pin the behavior `main` has today: a recorded `Conflict`.
+    #[tokio::test]
+    async fn tin3277_self_pair_dominated_clock_is_not_promoted_to_push() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        // Remote is one push ahead of our state cache, and says it was us.
+        let remote_entry = seed_manifest_vclock(
+            &op,
+            "data",
+            rel,
+            "remote-ahead-hash",
+            r#"{"clocks":{"neo":2}}"#,
+            "neo",
+        )
+        .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("entry");
+        std::fs::write(&local_path, b"hm-rematerialized\n").unwrap();
+        // Stale cache: one tick behind, tracked hash != live local hash.
+        let tracked = tin2584_state("stale-baseline-hash", tin2584_vclock(&[("neo", 1)]));
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "a strictly-dominated self-pair is TIN-2584's recorded conflict and must NOT be \
+             double-ticked into a push, got {action:?}"
+        );
+    }
+
+    /// (d) No runaway ticking: the re-tick lands on a comparison-only CLONE, so
+    /// a deferred/failed push (stored clock untouched) yields the SAME
+    /// single-step decision every cycle — no per-cycle clock growth.
+    #[tokio::test]
+    async fn tin3277_deferred_push_does_not_accumulate_ticks() {
+        let op = memory_op();
+        let rel = "secrets/.manifest.toml";
+        let (_dir, local_path, remote_entry, tracked) =
+            tin3277_self_pair(&op, rel, "neo", "lastpushedhash", b"manifest-rewritten\n").await;
+        let clock_before = tracked.vclock.clone();
+
+        for cycle in 0..3 {
+            let action = classify_path(
+                rel,
+                Some(&local_path),
+                Some(&remote_entry),
+                Some(&tracked),
+                &op,
+                "data",
+                "neo",
+                &ReconcileConfig::default(),
+            )
+            .await;
+            assert!(
+                matches!(
+                    action,
+                    Ok(ReconcileAction::Push {
+                        reason: PushReason::LocalNewer,
+                        ..
+                    })
+                ),
+                "cycle {cycle}: a deferred self-heal must stay a plain LocalNewer push, got {action:?}"
+            );
+            assert_eq!(
+                tracked.vclock, clock_before,
+                "cycle {cycle}: classification must not mutate the stored vclock"
+            );
+        }
+    }
+
+    /// (e) `.git` carve-out: a `.git` self-pair keeps the fail-closed
+    /// fast-forward / loser-guard keep-both path (G5-git-13), which decides on
+    /// git SHA ancestry rather than clocks. The self-heal must not pre-empt it.
+    #[tokio::test]
+    async fn tin3277_git_internal_self_pair_stays_conflict() {
+        let op = memory_op();
+        let rel = "repo/.git/refs/heads/main";
+        let (_dir, local_path, remote_entry, tracked) =
+            tin3277_self_pair(&op, rel, "neo", "lastpushedhash", b"deadbeef\n").await;
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "a .git self-pair must stay Conflict for the FF/keep-both guard, got {action:?}"
+        );
+    }
+
+    /// (f) FULL plan -> execute -> state cycle, no hand-built post-push world.
+    /// This is the test that proves the fix actually heals rather than merely
+    /// classifying differently, and it is where the engine's independent clock
+    /// re-derivation (`engine.rs` `local_edit_inferred -> tick`) is exercised for
+    /// real: the plan says `LocalNewer`, the engine must agree and NOT take its
+    /// conflict-veto branch, the stored clock must advance exactly one step, the
+    /// latched `conflict` payload must be cleared, and the next cycle must be a
+    /// no-op. Uses `dotfiles/tcfs/devices.json` — one of the live stuck paths.
+    #[tokio::test]
+    async fn tin3277_full_cycle_self_heal_advances_clock_and_clears_latch() {
+        let op = memory_op();
+        let rel = "dotfiles/tcfs/devices.json";
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("dotfiles/tcfs")).unwrap();
+        let local_path = root.join(rel);
+        std::fs::write(&local_path, b"{\"devices\":[\"neo\"]}\n").unwrap();
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+        let mut state = crate::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+
+        // 1. Baseline push: the file enters the pool the ordinary way.
+        let plan = reconcile(&op, &root, "data", &state, "neo", &blacklist, &config, None)
+            .await
+            .unwrap();
+        let result = execute_plan(&plan, &op, &root, "data", &mut state, "neo", None, None)
+            .await
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.pushed, 1, "baseline push must land");
+        let baseline_clock = state.get(&local_path).unwrap().vclock.clone();
+        assert_eq!(
+            baseline_clock,
+            tin2584_vclock(&[("neo", 1)]),
+            "baseline push stores {{neo:1}}"
+        );
+
+        // 2. The defect's premise: an out-of-band writer (home-manager
+        //    materialization) rewrites the file WITHOUT going through tcfs, so
+        //    the stored clock stays frozen at {neo:1} while content diverges.
+        std::fs::write(&local_path, b"{\"devices\":[\"neo\",\"honey\"]}\n").unwrap();
+        // Latch it the way the record-only Conflict arm has for 24 days, so the
+        // assertion below about the payload being cleared is meaningful.
+        let mut latched = state.get(&local_path).unwrap().clone();
+        let live_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap());
+        latched.status = crate::state::FileSyncStatus::Conflict;
+        latched.conflict = Some(ConflictInfo {
+            rel_path: rel.to_string(),
+            local_vclock: baseline_clock.clone(),
+            remote_vclock: baseline_clock.clone(),
+            local_blake3: live_hash.clone(),
+            remote_blake3: latched.blake3.clone(),
+            local_device: "neo".to_string(),
+            remote_device: "neo".to_string(),
+            detected_at: 0,
+            times_recorded: 4550,
+            remote_manifest_key: None,
+        });
+        state.set(&local_path, latched);
+
+        // 3. The heal: plan must classify LocalNewer ...
+        let heal_plan = reconcile(&op, &root, "data", &state, "neo", &blacklist, &config, None)
+            .await
+            .unwrap();
+        assert!(
+            heal_plan.actions.iter().any(|a| matches!(
+                a,
+                ReconcileAction::Push {
+                    rel_path: p,
+                    reason: PushReason::LocalNewer,
+                    ..
+                } if p == rel
+            )),
+            "out-of-band self-rewrite must plan a LocalNewer push, got {:?}",
+            heal_plan.actions
+        );
+
+        // ... and execute must actually push it. `pushed == 1` is the proof that
+        // the engine's re-derived clock ({neo:1} + one tick = {neo:2}) beat the
+        // remote's {neo:1} and the conflict-veto branch was NOT taken.
+        let heal_result = execute_plan(
+            &heal_plan, &op, &root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+        assert!(heal_result.errors.is_empty(), "{:?}", heal_result.errors);
+        assert_eq!(
+            heal_result.pushed, 1,
+            "the healing push must actually land, not be veto-skipped"
+        );
+
+        let healed = state.get(&local_path).unwrap().clone();
+        assert_eq!(
+            healed.vclock,
+            tin2584_vclock(&[("neo", 2)]),
+            "a successful heal advances the stored clock exactly one step"
+        );
+        assert_eq!(healed.blake3, live_hash, "state tracks the healed content");
+        assert!(
+            healed.conflict.is_none(),
+            "the healing push must clear the latched ConflictInfo"
+        );
+        assert_eq!(
+            healed.status,
+            crate::state::FileSyncStatus::Synced,
+            "the healed entry must leave Conflict status"
+        );
+
+        // 4. Convergence: the next cycle is a no-op, and the clock does not grow.
+        let after_plan = reconcile(&op, &root, "data", &state, "neo", &blacklist, &config, None)
+            .await
+            .unwrap();
+        assert!(
+            after_plan.actions.iter().all(|a| !matches!(
+                a,
+                ReconcileAction::Push { rel_path: p, .. }
+                    | ReconcileAction::Conflict { rel_path: p, .. } if p == rel
+            )),
+            "after healing the pair must converge, got {:?}",
+            after_plan.actions
+        );
+        execute_plan(
+            &after_plan,
+            &op,
+            &root,
+            "data",
+            &mut state,
+            "neo",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.get(&local_path).unwrap().vclock,
+            tin2584_vclock(&[("neo", 2)]),
+            "no per-cycle clock growth once converged"
+        );
+    }
+
+    /// (g) The vetoed-push path, end to end. If a foreign write lands on the
+    /// remote BETWEEN plan and execute, the engine re-derives its own clock and
+    /// vetoes the push. Pin the whole consequence chain, because it is the fix's
+    /// only failure mode: the push is skipped (not counted as pushed), a visible
+    /// `ConflictInfo` is recorded, the baseline moves to the live local hash —
+    /// which DISARMS `tracked.blake3 != local_hash` — and the next cycle
+    /// therefore settles back into the pre-fix recorded-conflict behavior
+    /// instead of replanning the same never-landing push forever.
+    #[tokio::test]
+    async fn tin3277_veto_between_plan_and_execute_records_conflict_and_settles() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("secrets/api")).unwrap();
+        let local_path = root.join(rel);
+        std::fs::write(&local_path, b"age-v1\n").unwrap();
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+        let mut state = crate::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+
+        let plan = reconcile(&op, &root, "data", &state, "neo", &blacklist, &config, None)
+            .await
+            .unwrap();
+        execute_plan(&plan, &op, &root, "data", &mut state, "neo", None, None)
+            .await
+            .unwrap();
+
+        // Out-of-band rewrite -> the self-heal plans a LocalNewer push.
+        std::fs::write(&local_path, b"age-v2-rematerialized\n").unwrap();
+        let live_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap());
+        let heal_plan = reconcile(&op, &root, "data", &state, "neo", &blacklist, &config, None)
+            .await
+            .unwrap();
+        assert!(
+            heal_plan.actions.iter().any(|a| matches!(
+                a,
+                ReconcileAction::Push {
+                    rel_path: p,
+                    reason: PushReason::LocalNewer,
+                    ..
+                } if p == rel
+            )),
+            "precondition: the self-heal must have planned a push"
+        );
+
+        // A peer publishes a concurrent manifest after planning. Built inline (not
+        // via `seed_manifest_vclock`) so the index entry's chunk count matches the
+        // zero-chunk manifest body — the engine, unlike the classifier, validates
+        // that binding before uploading.
+        let foreign_body = format!(
+            r#"{{"version":2,"file_hash":"peer-content-hash","file_size":41,"chunks":[],"vclock":{{"clocks":{{"neo":1,"honey":1}}}},"written_by":"honey","written_at":0,"rel_path":"{rel}"}}"#
+        )
+        .into_bytes();
+        let foreign_hash = crate::index_entry::manifest_object_id(&foreign_body);
+        op.write(&format!("data/manifests/{foreign_hash}"), foreign_body)
+            .await
+            .unwrap();
+        op.write(
+            &format!("data/index/{rel}"),
+            crate::index_entry::VersionedIndexEntry::committed(RemoteIndexEntry::new(
+                foreign_hash,
+                41,
+                0,
+            ))
+            .to_json_bytes()
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let veto_result = execute_plan(
+            &heal_plan, &op, &root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+        assert!(veto_result.errors.is_empty(), "{:?}", veto_result.errors);
+        assert_eq!(
+            veto_result.pushed, 0,
+            "a vetoed push must not be counted as pushed"
+        );
+
+        let vetoed = state.get(&local_path).unwrap().clone();
+        assert_eq!(
+            vetoed.status,
+            crate::state::FileSyncStatus::Conflict,
+            "a vetoed push must leave a VISIBLE conflict (tcfs conflicts / D-Bus)"
+        );
+        assert!(
+            vetoed.conflict.is_some(),
+            "a vetoed push must record ConflictInfo, not vanish"
+        );
+        assert_eq!(
+            vetoed.blake3, live_hash,
+            "documented consequence: the veto moves the baseline to the live local hash"
+        );
+
+        // The baseline move disarms the self-heal predicate, so the next cycle
+        // settles into the ordinary recorded-conflict path rather than looping on
+        // a push that can never land.
+        let next_plan = reconcile(&op, &root, "data", &state, "neo", &blacklist, &config, None)
+            .await
+            .unwrap();
+        assert!(
+            next_plan.actions.iter().all(|a| !matches!(
+                a,
+                ReconcileAction::Push {
+                    rel_path: p,
+                    reason: PushReason::LocalNewer,
+                    ..
+                } if p == rel
+            )),
+            "after a veto the self-heal must be disarmed (fail closed), got {:?}",
+            next_plan.actions
         );
     }
 
