@@ -6013,10 +6013,18 @@ mod tests {
             op.write(&manifest_key, bytes.clone()).await.unwrap();
             let entry = RemoteIndexEntry::new(object_id, 5, 0);
 
-            let error =
-                compare_both_exist("doc.txt", &local_path, &entry, None, &op, "data", "neo", true)
-                    .await
-                    .expect_err("untrusted manifest metadata must abort classification");
+            let error = compare_both_exist(
+                "doc.txt",
+                &local_path,
+                &entry,
+                None,
+                &op,
+                "data",
+                "neo",
+                true,
+            )
+            .await
+            .expect_err("untrusted manifest metadata must abort classification");
 
             assert!(!format!("{error:#}").is_empty());
             assert_eq!(std::fs::read(&local_path).unwrap(), b"local");
@@ -10476,7 +10484,10 @@ mod tests {
         // Uppercase extensions count too.
         let upper = dir.path().join("upper");
         std::fs::write(&upper, b"nope\n").unwrap();
-        assert!(!local_age_ciphertext_intact("secrets/API/TOKEN.AGE", &upper));
+        assert!(!local_age_ciphertext_intact(
+            "secrets/API/TOKEN.AGE",
+            &upper
+        ));
         // A missing local file fails closed.
         assert!(!local_age_ciphertext_intact(
             "secrets/api/gone.age",
