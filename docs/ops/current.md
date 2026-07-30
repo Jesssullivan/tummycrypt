@@ -20,7 +20,7 @@ product threshold.
 | Surface | Proven now | Still open |
 | --- | --- | --- |
 | Git roam | One complete forward repo roam; automatic divergent keep-both without committed-work loss; PR #551 daemon-trusted conflict routing landed after the pre-freeze root-targeted run cleared the production `.git` loop | Residual production-root closure and the two-repo stop rule |
-| Agent state | One bounded Claude project subtree on neo/honey | Arbitrary sessions, Codex state, prompts, and cross-OS cwd mapping; the reconcile canary has not run since 2026-06-08 on either host (neo launchd unit idle; honey cache mtime 2026-06-08) — tracked as [TIN-3300](https://linear.app/tinyland/issue/TIN-3300), pending an operator revive-or-demote ruling |
+| Agent state | One bounded Claude project subtree on neo/honey; the reconcile units were live-verified on both hosts on 2026-07-29 (kickstarted, one clean cycle each: 11 entries synced, 0 conflicts) | Arbitrary sessions, Codex state, prompts, and cross-OS cwd mapping; the canary target itself has been dormant since 2026-04-25, so cache mtime cannot serve as a liveness signal — [TIN-3300](https://linear.app/tinyland/issue/TIN-3300) tracks retargeting and last-reconcile-age surfacing |
 | Hydration | Linux FUSE lifecycle; bounded signed macOS FileProvider lifecycle | Plain-root parity, polished Finder first run, NFS/Windows/iOS parity |
 | Home state | A few explicitly managed paths | Selective product enrollment for home/dotdir classes |
 | Fleet | Honey runs `v0.12.17`; neo version coherence is now measured closed — `which -a tcfs` returns `/Users/jess/.local/bin/tcfs` then `~/.nix-profile/bin/tcfs`, both `v0.12.17`, and the daemon's gRPC status also reports `v0.12.17` (measured 2026-07-29) | The residual defect is provenance, not version skew: `/Users/jess/.local/bin/tcfs` is an unmanaged, hand-placed binary (dated Jul 26) shadowing the home-manager symlink, with nothing keeping it converged; sting remains `v0.12.16`; Bumble is the formal R6 host |
@@ -96,8 +96,12 @@ The full evidence boundary and root invariants are in
   stale `data`/`index` entries; a second, unaccounted worker daemon runs
   from `/etc/tcfsd/config.toml`, and plaintext HTTP was observed live.
 - [TIN-3300](https://linear.app/tinyland/issue/TIN-3300) — The
-  claude-projects reconcile canary has not run since 2026-06-08 on either
-  host; see the Agent state row above.
+  claude-projects reconcile units are healthy (live-verified on both hosts
+  2026-07-29 after a false-positive "dead canary" reading), but the canary's
+  sole target directory has been dormant since 2026-04-25, so the state
+  cache cannot distinguish "nothing to sync" from "reconciler hung." Open
+  work: retarget the canary to an actively-changing directory and surface
+  last-reconcile age in status output.
 
 ## Strategy A queue
 
