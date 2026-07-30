@@ -277,6 +277,13 @@ fn sync_parent_directory(_path: &Path) -> Result<()> {
 #[derive(Debug)]
 pub struct StateFileLock {
     _file: std::fs::File,
+    /// The state cache this lock guards (not the `.lock` sibling).
+    ///
+    /// Carried so an API that *requires* a held lock can verify the caller
+    /// handed it a lock for the right cache instead of trusting that any lock
+    /// guard in scope is the relevant one — see
+    /// [`StateCache::migrate_duplicate_keys_locked`].
+    state_path: PathBuf,
 }
 
 /// Result of probing the existing writer lock without creating or modifying it.
@@ -306,6 +313,11 @@ impl Drop for StateFileLock {
 }
 
 impl StateFileLock {
+    /// The state cache this guard locks.
+    pub fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+
     /// Stable sibling path used by every state-cache writer.
     pub fn lock_path(state_path: &Path) -> PathBuf {
         let mut path = state_path.as_os_str().to_os_string();
@@ -350,7 +362,10 @@ impl StateFileLock {
         validate_opened_state_file(&file, &lock_path)
             .with_context(|| format!("revalidating opened state lock: {}", lock_path.display()))?;
         match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self {
+                _file: file,
+                state_path: state_path.to_path_buf(),
+            }),
             Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
                 "state cache {} is locked by another process; retry after the current reconcile cycle (lock: {})",
                 state_path.display(),
@@ -399,7 +414,10 @@ impl StateFileLock {
             .with_context(|| format!("validating existing state lock: {}", lock_path.display()))?;
 
         match file.try_lock() {
-            Ok(()) => Ok(ExistingStateFileLock::Acquired(Self { _file: file })),
+            Ok(()) => Ok(ExistingStateFileLock::Acquired(Self {
+                _file: file,
+                state_path: state_path.to_path_buf(),
+            })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(ExistingStateFileLock::Contended),
             Err(std::fs::TryLockError::Error(error)) => Err(error).with_context(|| {
                 format!("locking existing state cache via {}", lock_path.display())
@@ -697,6 +715,94 @@ pub struct StateCacheKeySnapshot {
     recovered_from_backup: bool,
 }
 
+/// One conflict row as it should be *reported* to an operator (TIN-3278).
+///
+/// Produced by [`StateCache::conflicts_report`]. `state` is borrowed straight
+/// out of the cache — nothing about it is merged or synthesized.
+#[derive(Debug, Clone)]
+pub struct ConflictReportRow<'a> {
+    /// The key that represents this logical file: the one live
+    /// `get`/`set`/`mark_conflict` derive whenever it is present in the cache.
+    pub cache_key: &'a str,
+    /// The entry recorded under [`ConflictReportRow::cache_key`], verbatim.
+    pub state: &'a SyncState,
+    /// Duplicate keys for the same logical file that this row stands in for.
+    /// Non-empty means the cache carries key-namespace debt an operator can
+    /// repair with the explicit migration; the rows themselves were suppressed
+    /// only for reporting.
+    pub shadowed_keys: Vec<&'a str>,
+}
+
+/// One duplicate-key fold performed by an explicit, lock-holding duplicate-key
+/// migration (TIN-3278).
+///
+/// The primary state cache historically accumulated entries for the same
+/// logical file under two key namespaces — an absolute canonicalized path
+/// (the form [`path_key`] always produces today) and a bare prefix-relative
+/// path left behind by an older keying scheme. The orphaned relative key is
+/// never touched by any live read/write path (`get`/`set`/`mark_conflict`
+/// all re-derive the canonical key via [`path_key`]), so once such an entry
+/// exists it lingers forever, double-counting in raw-entry scans like
+/// [`StateCache::conflicts`] (`tcfs conflicts`) even though the live
+/// reconciler only ever visits the canonical path.
+///
+/// A record is produced per fold, both by the dry-run planner
+/// ([`StateCache::plan_duplicate_key_migration`]) and by the apply step
+/// ([`StateCache::migrate_duplicate_keys_locked`]); it is purely an audit
+/// trail (`Debug`/`Clone`, no `Drop` side effects).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyMergeRecord {
+    /// The non-canonical (or otherwise duplicate) key whose entry was folded
+    /// away. Removed from the cache once the merge completes.
+    pub dropped_key: String,
+    /// The canonical key that survived the merge and now carries the
+    /// combined entry.
+    pub kept_key: String,
+    /// Set when the dropped side carried an active `conflict` record whose
+    /// monotone parts (`times_recorded`, vector clocks) were folded into the
+    /// surviving key's own conflict payload. The surviving key's payload
+    /// **values** are never replaced — see [`merge_duplicate_sync_states`].
+    pub conflict_preserved: bool,
+}
+
+/// Why an explicit duplicate-key migration declined to fold a key (TIN-3278).
+///
+/// Every skip leaves the cache exactly as it was, so a skipped key keeps
+/// double-counting in raw scans; [`StateCache::conflicts_report`] still
+/// collapses it for reporting. Skips are surfaced to the operator rather than
+/// silently guessed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyMigrationSkipReason {
+    /// The orphan matched zero or 2+ independently-resolvable keys by rel-path
+    /// suffix, so there is no unambiguous target (the multi-root case).
+    NoUnambiguousTarget { resolvable_candidates: usize },
+    /// The surviving key carries no conflict and the duplicate does. Folding
+    /// would turn a cosmetic double-count into a live conflict on a currently
+    /// clean entry (and hand that entry's key to `conflict_git` /
+    /// git-routing consumers), so the duplicate is left in place instead.
+    WouldResurrectConflict { kept_key: String },
+    /// The duplicate's conflict payload is *newer* than the surviving key's,
+    /// contradicting the premise that the duplicate is frozen history. Rather
+    /// than choose between two live-looking records, leave both for an operator.
+    DuplicateConflictIsNewer { kept_key: String },
+}
+
+/// What an explicit duplicate-key migration did, or would do (TIN-3278).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyMigrationPlan {
+    /// Folds performed (or, for a dry run, that would be performed).
+    pub merges: Vec<KeyMergeRecord>,
+    /// Duplicates deliberately left alone, with the reason.
+    pub skipped: Vec<(String, KeyMigrationSkipReason)>,
+}
+
+impl KeyMigrationPlan {
+    /// No duplicate key namespaces to repair and nothing declined.
+    pub fn is_empty(&self) -> bool {
+        self.merges.is_empty() && self.skipped.is_empty()
+    }
+}
+
 impl StateCache {
     /// Load or create a state cache at the given path.
     ///
@@ -768,6 +874,27 @@ impl StateCache {
             (HashMap::new(), 0, String::new(), false)
         };
 
+        // TIN-3278: `open` deliberately does NOT repair duplicate key
+        // namespaces. Duplicate-key repair mutates entry content (it deletes a
+        // key and merges two states), and this constructor cannot write:
+        //
+        // - `Drop` flushes whenever `dirty || recovered_from_backup`
+        //   (see `impl Drop for StateCache`), and the `recovered_from_backup`
+        //   leg fires even for a nominally read-only command — which is exactly
+        //   why `lock_explicit_state_cache` (tcfs-cli) exists and says so;
+        // - the CLI takes a cross-process `StateFileLock` only when a `--state`
+        //   override is supplied, so `tcfs conflicts` on the default primary
+        //   holds no lock at all;
+        // - the daemon's startup lock is `<data_dir>/daemon-instance.lock`
+        //   (tcfsd/src/daemon.rs), not this cache's `state.json.lock`.
+        //
+        // A content-mutating fold here would therefore be persisted by unlocked
+        // readers racing the daemon's atomic-rename flush. Repair is an
+        // explicit, lock-holding operation instead:
+        // [`StateCache::plan_duplicate_key_migration`] (pure) and
+        // [`StateCache::migrate_duplicate_keys_locked`] (requires the lock).
+        // Reporting surfaces collapse duplicates at read time with
+        // [`StateCache::conflicts_report`], which never mutates anything.
         Ok(StateCache {
             db_path: db_path.to_path_buf(),
             entries,
@@ -839,6 +966,12 @@ impl StateCache {
         if self.device_id.is_empty() && !device_id.is_empty() {
             self.device_id = device_id;
         }
+        // TIN-3278: no duplicate-key fold here either. The `or_insert` above is
+        // the whole "in-memory wins" contract; a fold would violate it, because
+        // merging a disk entry into a resident key can only be done by choosing
+        // between a disk value and an in-memory value. Duplicate repair is the
+        // explicit locked operation — see `open`'s note and
+        // [`StateCache::migrate_duplicate_keys_locked`].
         Ok(())
     }
 
@@ -936,6 +1069,232 @@ impl StateCache {
             .filter(|(_, s)| s.conflict.is_some())
             .map(|(k, v)| (k.as_str(), v))
             .collect()
+    }
+
+    /// Conflicts collapsed to one row per logical file, for **reporting only**
+    /// (TIN-3278).
+    ///
+    /// [`StateCache::conflicts`] is a raw entry scan, so a file tracked under
+    /// two key namespaces (an absolute canonicalized path — the form
+    /// [`path_key`] always produces on live `get`/`set`/`mark_conflict` — plus a
+    /// bare prefix-relative key left by an older keying scheme) is reported
+    /// twice, while the reconciler only ever visits the canonical key. That is
+    /// the whole user-visible TIN-3278 symptom: `tcfs conflicts` printing 9
+    /// where the daemon's per-cycle plan line reports `conflicts=8`.
+    ///
+    /// This collapses those rows **without touching the cache**: it takes
+    /// `&self`, returns borrowed [`SyncState`]s exactly as recorded, and does
+    /// not merge, graft, re-key, or delete anything. Duplicate repair is a
+    /// separate, explicitly invoked, lock-holding operation
+    /// ([`StateCache::migrate_duplicate_keys_locked`]).
+    ///
+    /// Collapse rules — deliberately conservative:
+    ///
+    /// - Rows whose keys resolve on disk to the *same* path (e.g. `/var/f` and
+    ///   `/private/var/f`, or a symlinked-parent duplicate) are one group. The
+    ///   representative is the row already stored under that resolved path when
+    ///   present; otherwise the highest `last_synced`, breaking ties on the key
+    ///   so output is deterministic.
+    /// - A row whose key cannot resolve at all (the live TIN-3278 orphan shape:
+    ///   `/secrets/.audit.log`, whose `/secrets` does not exist at the
+    ///   filesystem root) is attached to a resolvable row using the same
+    ///   rel-path-suffix convention [`StateCache::get_by_rel_path`] uses for
+    ///   cross-host lookups — but only when **exactly one** resolvable row
+    ///   matches. Zero or 2+ candidates leave the orphan as its own reported
+    ///   row rather than guess.
+    /// - A conflict that has no duplicate among the reported rows is **never**
+    ///   suppressed. In particular, an orphan conflict whose live counterpart is
+    ///   currently clean stays visible: it is real cache debt, and hiding it (or
+    ///   grafting it onto the clean entry) would be worse than double-counting.
+    ///
+    /// Cost: one `fs::canonicalize` attempt per *conflict* row (not per cache
+    /// entry), plus an O(orphan rows x groups) suffix scan over pre-normalized
+    /// strings. Conflict rows are the small minority of a cache.
+    pub fn conflicts_report(&self) -> Vec<ConflictReportRow<'_>> {
+        /// One logical-file group under construction.
+        struct Group<'a> {
+            representative: &'a str,
+            state: &'a SyncState,
+            shadowed: Vec<&'a str>,
+            /// Independently resolved on-disk form, or the literal key when the
+            /// key does not resolve at all.
+            identity: String,
+            normalized_identity: String,
+            resolvable: bool,
+        }
+
+        // Deterministic input order: `conflicts()` iterates a HashMap.
+        let mut rows: Vec<(&str, &SyncState)> = self.conflicts();
+        rows.sort_by(|left, right| left.0.cmp(right.0));
+
+        // Phase 1: group rows that resolve to the same on-disk path.
+        let mut groups: Vec<Group<'_>> = Vec::new();
+        for (cache_key, state) in rows {
+            let resolved = resolve_key_on_disk(cache_key);
+            let identity = resolved.clone().unwrap_or_else(|| cache_key.to_string());
+            match groups.iter().position(|group| group.identity == identity) {
+                Some(index) => {
+                    let group = &mut groups[index];
+                    // Prefer the row already stored under the resolved path —
+                    // that is the key live `get`/`set` derive. Otherwise the
+                    // most recently synced row, ties broken on key order so the
+                    // report is stable.
+                    let challenger_wins =
+                        match (group.representative == identity, cache_key == identity) {
+                            (true, false) => false,
+                            (false, true) => true,
+                            _ => {
+                                state.last_synced > group.state.last_synced
+                                    || (state.last_synced == group.state.last_synced
+                                        && cache_key < group.representative)
+                            }
+                        };
+                    if challenger_wins {
+                        group.shadowed.push(group.representative);
+                        group.representative = cache_key;
+                        group.state = state;
+                    } else {
+                        group.shadowed.push(cache_key);
+                    }
+                }
+                None => groups.push(Group {
+                    representative: cache_key,
+                    state,
+                    shadowed: Vec::new(),
+                    normalized_identity: crate::engine::normalize_rel_path_text(&identity),
+                    resolvable: resolved.is_some(),
+                    identity,
+                }),
+            }
+        }
+
+        // Phase 2: attach an unresolvable orphan to its resolvable counterpart,
+        // but only when exactly one candidate matches by rel-path suffix.
+        let mut fold_target: Vec<Option<usize>> = vec![None; groups.len()];
+        for index in 0..groups.len() {
+            if groups[index].resolvable {
+                continue;
+            }
+            let normalized_orphan = crate::engine::normalize_rel_path_text(
+                groups[index].representative.trim_start_matches('/'),
+            );
+            if normalized_orphan.is_empty() {
+                continue;
+            }
+            let suffix = format!("/{normalized_orphan}");
+            let mut candidates = (0..groups.len()).filter(|other| {
+                *other != index
+                    && groups[*other].resolvable
+                    && groups[*other].normalized_identity.ends_with(&suffix)
+            });
+            let Some(target) = candidates.next() else {
+                continue; // no resolvable counterpart — stays its own row
+            };
+            if candidates.next().is_some() {
+                continue; // ambiguous — stays its own row
+            }
+            fold_target[index] = Some(target);
+        }
+
+        // Phase 3: emit surviving groups, then attribute folded orphan keys.
+        let mut report: Vec<ConflictReportRow<'_>> = Vec::new();
+        let mut report_index: Vec<Option<usize>> = vec![None; groups.len()];
+        for (index, group) in groups.iter().enumerate() {
+            if fold_target[index].is_some() {
+                continue;
+            }
+            report_index[index] = Some(report.len());
+            report.push(ConflictReportRow {
+                cache_key: group.representative,
+                state: group.state,
+                shadowed_keys: group.shadowed.clone(),
+            });
+        }
+        for (index, target) in fold_target.iter().enumerate() {
+            let Some(target) = *target else { continue };
+            let Some(position) = report_index[target] else {
+                continue;
+            };
+            report[position]
+                .shadowed_keys
+                .push(groups[index].representative);
+            report[position]
+                .shadowed_keys
+                .extend(groups[index].shadowed.iter().copied());
+        }
+        for row in &mut report {
+            row.shadowed_keys.sort_unstable();
+            row.shadowed_keys.dedup();
+        }
+        report
+    }
+
+    /// What an explicit duplicate-key migration would do to this cache
+    /// (TIN-3278). Pure: mutates nothing, writes nothing, takes no lock.
+    ///
+    /// Backs the dry-run half of the operator verb. Clones the entry map to
+    /// simulate the fold, so the plan and the apply step below can never
+    /// disagree — they run the identical routine.
+    pub fn plan_duplicate_key_migration(&self) -> KeyMigrationPlan {
+        let mut simulated = self.entries.clone();
+        fold_duplicate_keys(&mut simulated)
+    }
+
+    /// Fold duplicate key-namespace entries and persist the result (TIN-3278).
+    ///
+    /// **This is the only duplicate-key repair path.** It is deliberately not
+    /// reachable from `open`/`reload_from_disk`, because those are entered by
+    /// readers that hold no cross-process lock yet still write on drop when
+    /// `recovered_from_backup` is set — see the note in
+    /// [`StateCache::open`]. Repair is therefore an operation an operator
+    /// invokes, under the lock every other state-cache writer uses.
+    ///
+    /// `lock` is a witness, not decoration: it must be a [`StateFileLock`] for
+    /// *this* cache's path, and mismatches fail closed instead of being
+    /// trusted. The fold dirties the cache and flushes it while the caller's
+    /// guard is still alive.
+    ///
+    /// The fold's own invariant (see [`merge_duplicate_sync_states`]): the
+    /// surviving key's entry is authoritative for every value-bearing field, so
+    /// the only observable effects are that a duplicate key disappears, vector
+    /// clocks gain components, and `times_recorded` rises.
+    pub fn migrate_duplicate_keys_locked(
+        &mut self,
+        lock: &StateFileLock,
+    ) -> Result<KeyMigrationPlan> {
+        anyhow::ensure!(
+            lock.state_path() == self.db_path,
+            "refusing duplicate-key migration: held state lock is for {} but this cache is {}",
+            lock.state_path().display(),
+            self.db_path.display()
+        );
+
+        let applied = fold_duplicate_keys(&mut self.entries);
+        for record in &applied.merges {
+            tracing::warn!(
+                dropped_key = %record.dropped_key,
+                kept_key = %record.kept_key,
+                conflict_preserved = record.conflict_preserved,
+                "state cache: folded duplicate key-namespace entry (TIN-3278, explicit locked migration)"
+            );
+        }
+        for (key, reason) in &applied.skipped {
+            tracing::warn!(
+                key = %key,
+                reason = ?reason,
+                "state cache: duplicate key-namespace entry left in place (TIN-3278)"
+            );
+        }
+        if !applied.merges.is_empty() {
+            self.dirty = true;
+            self.flush().with_context(|| {
+                format!(
+                    "persisting duplicate-key migration: {}",
+                    self.db_path.display()
+                )
+            })?;
+        }
+        Ok(applied)
     }
 
     /// Capture a bounded set of cache entries so callers can roll back
@@ -1580,6 +1939,345 @@ fn path_key(path: &Path) -> String {
         .unwrap_or_else(|| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+/// Like [`path_key`], but returns `None` instead of falling back to the
+/// input string when the key cannot be independently resolved on disk.
+///
+/// `path_key`'s identity fallback exists so the live get/set/remove path
+/// always has *some* key to use, even for a file that does not exist yet.
+/// Migration needs the opposite: a way to tell "this key is already
+/// canonical" apart from "this key cannot be resolved at all" — the two
+/// look identical through `path_key`'s fallback, which is exactly how an
+/// orphaned bare-relative key (e.g. `/secrets/.audit.log`, whose parent
+/// `/secrets` does not exist at the filesystem root) round-trips unchanged
+/// and masquerades as canonical.
+fn resolve_key_on_disk(key: &str) -> Option<String> {
+    let path = Path::new(key);
+    path.parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        .or_else(|| std::fs::canonicalize(path).ok())
+        .map(|resolved| resolved.to_string_lossy().into_owned())
+}
+
+/// Outcome of folding a duplicate entry into the entry at the surviving key.
+#[derive(Debug)]
+enum DuplicateFold {
+    /// The state to store at the surviving key, plus whether the folded-away
+    /// side carried a conflict whose monotone parts were absorbed.
+    Folded {
+        state: Box<SyncState>,
+        conflict_preserved: bool,
+    },
+    /// The surviving key carries no conflict and the duplicate does. Folding
+    /// would manufacture a live conflict on a clean entry.
+    RefusedWouldResurrectConflict,
+    /// The duplicate's conflict is newer than the surviving key's, contradicting
+    /// the "duplicate is frozen history" premise.
+    RefusedDuplicateConflictIsNewer,
+}
+
+/// Fold `duplicate` into `surviving` — the entry stored under the key that will
+/// remain in the cache — for two keys that name the same logical file.
+///
+/// **Fold invariant (the whole safety argument).** `surviving` is authoritative
+/// for every value-bearing field. The fold may only:
+///
+/// 1. raise vector-clock components (pointwise [`VectorClock::merge`]),
+/// 2. raise `conflict.times_recorded`,
+/// 3. cause the duplicate key to disappear.
+///
+/// It never changes `blake3`, `size`, `mtime`, `chunk_count`, `remote_path`,
+/// `device_id`, `status`, `conflict.rel_path`, `conflict.remote_manifest_key`,
+/// or any other conflict payload value on the surviving key, and never gives a
+/// key a conflict it did not already have. That is what makes the migration
+/// provably unable to widen the downstream consumers of those fields:
+/// `conflict_git::collect_repo_conflicts` bails a whole repo resolution when
+/// `remote_path`/`remote_manifest_key` fall outside the selected storage prefix,
+/// `tcfsd::grpc::validate_conflict_cache_route` fails a registered root closed
+/// on the same fields, and `tcfsd::grpc` routes git keep-both on
+/// `Path::new(cache_key).starts_with(git_dir)` over `conflicts()`. None of them
+/// can observe a value at a key that the key did not already carry.
+///
+/// It also means the merge is *not* symmetric, on purpose: the surviving key is
+/// the key live `get`/`set`/`mark_conflict` derive via [`path_key`], so its
+/// entry is the one a live sync cycle has been maintaining, while the duplicate
+/// is by construction a key no live path has touched since the keying scheme
+/// changed (the TIN-3278 evidence: `times_recorded` frozen at 1881 since
+/// 2026-07-07). Preferring the higher `last_synced` instead would let a stale
+/// side's frozen digest overwrite the live one on a wall-clock comparison.
+///
+/// **Vector clocks are joined, not picked.** `partial_cmp_vc` reads a missing
+/// component as `0`, so dropping a component makes a genuinely *concurrent*
+/// pair read as "the remote dominates" against a peer that has advanced on the
+/// dropped device — the engine then classifies `RemoteNewer` and silently
+/// overwrites that divergence instead of recording a conflict. A join only ever
+/// raises components to values one side actually observed. The join is strictly
+/// same-side: `local_vclock` with `local_vclock`, `remote_vclock` with
+/// `remote_vclock`, never crossed, which would destroy the divergence the
+/// record exists to describe.
+///
+/// **Refusals.** A conflict is never resurrected and never silently dropped: if
+/// only the duplicate carries a conflict, the fold is refused outright and the
+/// duplicate key stays (so no record is lost and no clean entry becomes
+/// conflicted). If the duplicate's conflict is newer than the surviving one's,
+/// the fold is refused as well, because the "duplicate is frozen" premise does
+/// not hold and an operator should look.
+fn merge_duplicate_sync_states(surviving: SyncState, duplicate: SyncState) -> DuplicateFold {
+    match (surviving.conflict.as_ref(), duplicate.conflict.as_ref()) {
+        (None, Some(_)) => return DuplicateFold::RefusedWouldResurrectConflict,
+        (Some(kept), Some(dropped)) if dropped.detected_at > kept.detected_at => {
+            return DuplicateFold::RefusedDuplicateConflictIsNewer;
+        }
+        _ => {}
+    }
+
+    let conflict_preserved = duplicate.conflict.is_some();
+    let mut merged = surviving;
+
+    // (1) causal history is a join, never a pick.
+    merged.vclock.merge(&duplicate.vclock);
+
+    // (2) monotone conflict fields only; every payload value stays as recorded
+    // on the surviving key.
+    if let (Some(kept), Some(dropped)) = (merged.conflict.as_mut(), duplicate.conflict) {
+        kept.times_recorded = kept.times_recorded.max(dropped.times_recorded);
+        kept.local_vclock.merge(&dropped.local_vclock);
+        kept.remote_vclock.merge(&dropped.remote_vclock);
+    }
+
+    DuplicateFold::Folded {
+        state: Box::new(merged),
+        conflict_preserved,
+    }
+}
+
+/// Fold duplicate key-namespace entries for the same logical file into a
+/// single canonical entry (TIN-3278).
+///
+/// **Never call this from `open`, `reload_from_disk`, or any other implicitly
+/// reached path.** It mutates entry content, and the only place in this
+/// codebase where that is safe is behind a held [`StateFileLock`] — see
+/// [`StateCache::migrate_duplicate_keys_locked`], the sole caller, and the
+/// rationale recorded in [`StateCache::open`]. Reporting surfaces use
+/// [`StateCache::conflicts_report`] instead, which collapses duplicates without
+/// mutating anything.
+///
+/// Two shapes of duplicate are handled, in separate passes over a sorted
+/// (deterministic) snapshot of the keys present at call time:
+///
+/// 1. **Stray-but-resolvable key**: [`resolve_key_on_disk`] succeeds and
+///    differs from the stored key. The entry is re-keyed to the resolved
+///    form — which is exactly the key live `get`/`set`/`remove` derive via
+///    [`path_key`] for that file, so the repair moves the entry onto the key
+///    the reconciler was always going to look under, and cannot invent a key
+///    outside the file's own real location (same `file_name`, canonicalized
+///    parent). If that key already has an entry, the two are folded via
+///    [`merge_duplicate_sync_states`].
+/// 2. **Orphaned relative key**: [`resolve_key_on_disk`] fails outright —
+///    the key's parent does not exist as an independent filesystem path.
+///    This is the live TIN-3278 shape: a bare `/secrets/.audit.log` key
+///    whose `/secrets` does not exist at the root. The orphan is matched
+///    against the other loaded keys using the exact suffix convention
+///    [`StateCache::get_by_rel_path`] already uses for cross-host lookups.
+///    Only an *unambiguous* single match (one independently-resolvable
+///    other key ending in `/<orphan>`) is folded; zero or multiple
+///    candidates leave the orphan untouched rather than guess at a target.
+///
+/// Never drops an entry outright: a key is removed only when its state has been
+/// folded into the surviving key, and [`merge_duplicate_sync_states`] refuses
+/// (leaving both keys in place) rather than resurrect or discard a conflict.
+/// Refusals are reported in [`KeyMigrationPlan::skipped`] so the operator sees
+/// what was declined and why.
+///
+/// **Precision about pass 1 and git routing.** [`merge_duplicate_sync_states`]
+/// cannot give an existing key a conflict it did not already carry, but a pass-1
+/// *pure* re-key (target key absent) does move an existing conflict onto a key
+/// the cache did not previously hold, which `tcfsd::grpc`'s
+/// `Path::new(cache_key).starts_with(git_dir)` test could then match. That is
+/// not widening: the destination is by construction the key [`path_key`]
+/// derives for the very same file (same `file_name`, canonicalized parent), so
+/// the entry lands exactly where a live `get`/`set`/`mark_conflict` was always
+/// going to look, and routing simply follows the live reconciler instead of
+/// diverging from it. The mismatch this repairs is the whole bug.
+///
+/// **Known boundary (multi-root)**: pass 2's ambiguity guard rejects an orphan
+/// with 0 or 2+ *resolvable* suffix candidates, which does not cover a host
+/// with two registered sync roots sharing a relative suffix where the file is
+/// materialized under only one of them — there the single resolvable candidate
+/// can be the wrong root's entry. Closing that needs root-scoped matching
+/// (state cache keys carry no root attribution today); until then the fold is
+/// deliberately limited to the unambiguous single-candidate case, and the fold
+/// invariant bounds the damage of a mistaken target to a raised clock component
+/// and a raised recurrence count.
+///
+/// **Case sensitivity**: matching is byte-exact, so an orphan differing from its
+/// live counterpart only by case is left in place on case-insensitive volumes
+/// (APFS/NTFS). Declining is the conservative outcome, and the report path still
+/// collapses nothing it cannot prove — such an orphan keeps double-counting.
+///
+/// **Cost**: exactly one `fs::canonicalize` attempt per key per call, computed
+/// up front and reused by both passes. Acceptable because this runs only when
+/// an operator asks for it, never on an `open`/reload hot path.
+fn fold_duplicate_keys(entries: &mut HashMap<String, SyncState>) -> KeyMigrationPlan {
+    let mut plan = KeyMigrationPlan::default();
+
+    let mut keys: Vec<String> = entries.keys().cloned().collect();
+    keys.sort();
+
+    // One resolution attempt per key, shared by both passes.
+    let resolved_by_key: HashMap<&str, Option<String>> = keys
+        .iter()
+        .map(|key| (key.as_str(), resolve_key_on_disk(key)))
+        .collect();
+    // Keys known to resolve independently on disk: valid fold targets for
+    // pass 2. Pass 1's re-keyed forms are resolvable by construction.
+    let mut resolvable: std::collections::HashSet<String> = resolved_by_key
+        .iter()
+        .filter(|(_, resolved)| resolved.is_some())
+        .map(|(key, _)| (*key).to_string())
+        .collect();
+
+    // Pass 1: keys that independently resolve to a real (possibly
+    // different) filesystem path — re-key or fold onto that form.
+    for key in &keys {
+        if !entries.contains_key(key) {
+            continue; // already folded away earlier in this pass
+        }
+        let Some(resolved) = resolved_by_key
+            .get(key.as_str())
+            .and_then(|resolved| resolved.clone())
+        else {
+            continue; // orphan candidate — handled in pass 2
+        };
+        if &resolved == key {
+            continue; // already canonical
+        }
+        match entries.get(&resolved) {
+            Some(surviving) => {
+                let Some(duplicate) = entries.get(key) else {
+                    continue;
+                };
+                match merge_duplicate_sync_states(surviving.clone(), duplicate.clone()) {
+                    DuplicateFold::Folded {
+                        state,
+                        conflict_preserved,
+                    } => {
+                        entries.remove(key);
+                        entries.insert(resolved.clone(), *state);
+                        resolvable.insert(resolved.clone());
+                        plan.merges.push(KeyMergeRecord {
+                            dropped_key: key.clone(),
+                            kept_key: resolved,
+                            conflict_preserved,
+                        });
+                    }
+                    DuplicateFold::RefusedWouldResurrectConflict => plan.skipped.push((
+                        key.clone(),
+                        KeyMigrationSkipReason::WouldResurrectConflict { kept_key: resolved },
+                    )),
+                    DuplicateFold::RefusedDuplicateConflictIsNewer => plan.skipped.push((
+                        key.clone(),
+                        KeyMigrationSkipReason::DuplicateConflictIsNewer { kept_key: resolved },
+                    )),
+                }
+            }
+            None => {
+                // Pure re-key onto the form `path_key` derives for this file.
+                let Some(entry) = entries.remove(key) else {
+                    continue;
+                };
+                let conflict_preserved = entry.conflict.is_some();
+                entries.insert(resolved.clone(), entry);
+                resolvable.insert(resolved.clone());
+                plan.merges.push(KeyMergeRecord {
+                    dropped_key: key.clone(),
+                    kept_key: resolved,
+                    conflict_preserved,
+                });
+            }
+        }
+    }
+
+    // Pass 2: orphans that cannot independently resolve at all — match by
+    // rel-path suffix against a key that can, same convention as
+    // `get_by_rel_path`. Ambiguous (0 or 2+) matches are left in place.
+    for key in &keys {
+        if !entries.contains_key(key) {
+            continue;
+        }
+        if resolved_by_key
+            .get(key.as_str())
+            .is_some_and(Option::is_some)
+        {
+            continue; // handled in pass 1, or already canonical
+        }
+        let normalized_orphan = crate::engine::normalize_rel_path_text(key.trim_start_matches('/'));
+        if normalized_orphan.is_empty() {
+            continue;
+        }
+        let suffix = format!("/{normalized_orphan}");
+
+        let mut candidates: Vec<String> = entries
+            .keys()
+            .filter(|candidate| {
+                candidate.as_str() != key.as_str()
+                    && resolvable.contains(candidate.as_str())
+                    && crate::engine::normalize_rel_path_text(candidate).ends_with(&suffix)
+            })
+            .cloned()
+            .collect();
+
+        if candidates.len() != 1 {
+            // Zero candidates is the ordinary case for an entry whose file is
+            // simply absent (an un-hydrated stub, a deleted tree): not a
+            // duplicate at all, so it is not reported as a skipped repair. Two
+            // or more is the multi-root ambiguity an operator should see.
+            if candidates.len() >= 2 {
+                plan.skipped.push((
+                    key.clone(),
+                    KeyMigrationSkipReason::NoUnambiguousTarget {
+                        resolvable_candidates: candidates.len(),
+                    },
+                ));
+            }
+            continue; // no unambiguous canonical target — leave the orphan in place
+        }
+        let canonical_key = candidates.remove(0);
+        let (Some(surviving), Some(duplicate)) = (entries.get(&canonical_key), entries.get(key))
+        else {
+            continue;
+        };
+        match merge_duplicate_sync_states(surviving.clone(), duplicate.clone()) {
+            DuplicateFold::Folded {
+                state,
+                conflict_preserved,
+            } => {
+                entries.remove(key);
+                entries.insert(canonical_key.clone(), *state);
+                plan.merges.push(KeyMergeRecord {
+                    dropped_key: key.clone(),
+                    kept_key: canonical_key,
+                    conflict_preserved,
+                });
+            }
+            DuplicateFold::RefusedWouldResurrectConflict => plan.skipped.push((
+                key.clone(),
+                KeyMigrationSkipReason::WouldResurrectConflict {
+                    kept_key: canonical_key,
+                },
+            )),
+            DuplicateFold::RefusedDuplicateConflictIsNewer => plan.skipped.push((
+                key.clone(),
+                KeyMigrationSkipReason::DuplicateConflictIsNewer {
+                    kept_key: canonical_key,
+                },
+            )),
+        }
+    }
+
+    plan
 }
 
 /// Create a SyncState from a just-uploaded file
@@ -3298,6 +3996,883 @@ mod tests {
                 .get(std::path::Path::new("/sync/foreign.txt"))
                 .is_none(),
             "foreign-prefix non-conflict entry still purged"
+        );
+    }
+
+    // ── TIN-3278: duplicate key namespaces ──────────────────────────────
+    //
+    // Round-3 architecture (option B): `open`/`reload_from_disk` never repair
+    // anything, reporting collapses duplicates read-only, and repair is an
+    // explicit operation that requires the state-file lock. The tests below are
+    // grouped in that order.
+
+    fn write_state_entries(state_path: &Path, entries: HashMap<String, SyncState>) {
+        let on_disk = StateCacheOnDisk {
+            last_nats_seq: 0,
+            device_id: String::new(),
+            entries,
+        };
+        write_private_state_file(
+            state_path,
+            serde_json::to_string(&on_disk).unwrap().as_bytes(),
+        );
+    }
+
+    fn sample_sync_state(last_synced: u64, device_id: &str) -> SyncState {
+        SyncState {
+            blake3: format!("hash-{last_synced}"),
+            size: 5,
+            mtime: last_synced,
+            chunk_count: 1,
+            remote_path: "data/manifests/sample".into(),
+            last_synced,
+            vclock: VectorClock::new(),
+            device_id: device_id.into(),
+            conflict: None,
+            status: FileSyncStatus::Synced,
+        }
+    }
+
+    fn sample_conflict(
+        rel_path: &str,
+        detected_at: u64,
+        times_recorded: u64,
+        remote_manifest_key: Option<&str>,
+    ) -> crate::conflict::ConflictInfo {
+        crate::conflict::ConflictInfo {
+            rel_path: rel_path.into(),
+            local_vclock: VectorClock::new(),
+            remote_vclock: VectorClock::new(),
+            local_blake3: "local".into(),
+            remote_blake3: "remote".into(),
+            local_device: "neo".into(),
+            remote_device: "yoga".into(),
+            detected_at,
+            times_recorded,
+            remote_manifest_key: remote_manifest_key.map(str::to_string),
+        }
+    }
+
+    fn conflicted(mut state: SyncState, conflict: crate::conflict::ConflictInfo) -> SyncState {
+        state.conflict = Some(conflict);
+        state.status = FileSyncStatus::Conflict;
+        state
+    }
+
+    /// Materialize `<dir>/secrets/.audit.log` and return
+    /// `(file path, canonical key, orphaned bare-relative key)` — the exact live
+    /// TIN-3278 shape, where `/secrets` does not exist at the filesystem root and
+    /// so the orphan can never independently canonicalize.
+    fn duplicate_key_fixture(dir: &Path) -> (PathBuf, String, String) {
+        let secrets_dir = dir.join("secrets");
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        let audit_log = secrets_dir.join(".audit.log");
+        std::fs::write(&audit_log, b"audit").unwrap();
+        let canonical_key = std::fs::canonicalize(&audit_log)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        (audit_log, canonical_key, "/secrets/.audit.log".to_string())
+    }
+
+    fn conflicted_key_set(cache: &StateCache) -> std::collections::BTreeSet<String> {
+        cache
+            .entries
+            .iter()
+            .filter(|(_, state)| state.conflict.is_some())
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    // ── open / reload are inert ──────────────────────────────────────────
+
+    #[test]
+    fn tin3278_open_never_folds_or_rewrites_duplicate_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key.clone(), sample_sync_state(2000, "neo"));
+        entries.insert(orphan_key.clone(), sample_sync_state(1000, "yoga"));
+        write_state_entries(&state_path, entries);
+        let before = std::fs::read(&state_path).unwrap();
+
+        {
+            let cache = StateCache::open(&state_path).unwrap();
+            assert_eq!(
+                cache.len(),
+                2,
+                "open must hand back exactly what is on disk: repair is not a load-time side effect"
+            );
+            assert!(
+                !cache.dirty,
+                "open must not dirty the cache — Drop flushes on dirty and readers hold no lock"
+            );
+            assert!(cache.entries.contains_key(&orphan_key));
+        } // drop → a dirty flush would fire here
+
+        assert_eq!(
+            before,
+            std::fs::read(&state_path).unwrap(),
+            "an unlocked reader must leave the primary state cache byte-identical"
+        );
+    }
+
+    #[test]
+    fn tin3278_bak_recovery_open_writes_back_unfolded_content() {
+        // The `recovered_from_backup` leg of `Drop`/`flush` writes even when
+        // nothing called `set` — `lock_explicit_state_cache` (tcfs-cli) exists
+        // because of it. That write must therefore never carry a content
+        // migration: this is the round-2 `.bak`-recovery variant, and it is what
+        // makes "no fold at open" a structural guarantee rather than a flag check.
+        let dir = tempfile::tempdir().unwrap();
+        let (_audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+
+        let state_path = dir.path().join("state.json");
+        let bak_path = state_path.with_extension("json.bak");
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key.clone(), sample_sync_state(2000, "neo"));
+        entries.insert(orphan_key.clone(), sample_sync_state(1000, "yoga"));
+        write_state_entries(&bak_path, entries);
+        let backup_before = std::fs::read(&bak_path).unwrap();
+        // Content-corrupt primary + valid backup → recovery path.
+        write_private_state_file(&state_path, b"{ this is not json");
+
+        {
+            let cache = StateCache::open(&state_path).unwrap();
+            assert!(cache.recovered_from_backup, "recovery path must be taken");
+            assert_eq!(cache.len(), 2, "recovery must not fold either");
+        } // drop → recovery flush fires here, with no lock held
+
+        let (recovered, _, _) = StateCache::load_from_file(&state_path).unwrap();
+        assert_eq!(
+            recovered.len(),
+            2,
+            "the unlocked recovery flush must write back what it read, not a migrated map"
+        );
+        assert!(
+            recovered.contains_key(&orphan_key),
+            "the duplicate key must survive an unlocked recovery flush"
+        );
+        assert_eq!(
+            recovered.get(&canonical_key).unwrap().blake3,
+            "hash-2000",
+            "no entry may be merged by a recovery flush"
+        );
+        assert_eq!(
+            backup_before,
+            std::fs::read(&bak_path).unwrap(),
+            "the recovery source must be preserved verbatim"
+        );
+    }
+
+    #[test]
+    fn tin3278_reload_from_disk_keeps_in_memory_values() {
+        // `reload_from_disk` documents "in-memory wins". A fold on that path
+        // would break it: the disk side can carry a higher (wall-clock,
+        // skew-prone) `last_synced` than a freshly re-hashed in-memory entry.
+        let dir = tempfile::tempdir().unwrap();
+        let (audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+
+        let mut cache = StateCache::open(&state_path).unwrap();
+        let mut live = sample_sync_state(1000, "neo");
+        live.blake3 = "NEW".into();
+        cache.set(&audit_log, live);
+
+        // Another process's file: stale digest under the canonical key, plus the
+        // legacy duplicate, both with a *higher* last_synced.
+        let mut disk = HashMap::new();
+        let mut stale = sample_sync_state(5000, "neo");
+        stale.blake3 = "OLD".into();
+        disk.insert(canonical_key.clone(), stale.clone());
+        disk.insert(orphan_key.clone(), stale);
+        write_state_entries(&state_path, disk);
+
+        cache.reload_from_disk().unwrap();
+
+        assert_eq!(
+            cache.get(&audit_log).unwrap().blake3,
+            "NEW",
+            "reload must not let a disk value overwrite a live in-memory one"
+        );
+        assert_eq!(
+            cache
+                .entries
+                .get(&orphan_key)
+                .map(|state| state.blake3.as_str()),
+            Some("OLD"),
+            "the new disk-only key is inserted as-is, unfolded"
+        );
+        assert_eq!(cache.len(), 2);
+    }
+
+    // ── read-side reporting collapse ─────────────────────────────────────
+
+    #[test]
+    fn tin3278_conflicts_report_collapses_duplicate_rows_without_mutating() {
+        // The observed defect: `tcfs conflicts` reports 9, the daemon's cycle
+        // reports 8, because one logical file is tracked under two key
+        // namespaces and both carry a conflict record.
+        let dir = tempfile::tempdir().unwrap();
+        let (_audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            canonical_key.clone(),
+            conflicted(
+                sample_sync_state(2000, "neo"),
+                sample_conflict("secrets/.audit.log", 1900, 3, Some("data/manifests/live")),
+            ),
+        );
+        entries.insert(
+            orphan_key.clone(),
+            conflicted(
+                sample_sync_state(1000, "yoga"),
+                sample_conflict("secrets/.audit.log", 500, 1881, Some("legacy/manifests/x")),
+            ),
+        );
+        write_state_entries(&state_path, entries);
+        let before = std::fs::read(&state_path).unwrap();
+
+        let cache = StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            cache.conflicts().len(),
+            2,
+            "the raw scan is unchanged — security/routing consumers keep seeing every key"
+        );
+
+        let report = cache.conflicts_report();
+        assert_eq!(report.len(), 1, "reporting collapses to one row per file");
+        assert_eq!(
+            report[0].cache_key, canonical_key,
+            "the representative is the key live get/set derive"
+        );
+        assert_eq!(report[0].shadowed_keys, vec![orphan_key.as_str()]);
+        // The reported state is the live entry, verbatim — no payload grafting.
+        let reported = report[0].state;
+        assert_eq!(reported.blake3, "hash-2000");
+        assert_eq!(reported.conflict.as_ref().unwrap().times_recorded, 3);
+        assert_eq!(
+            reported
+                .conflict
+                .as_ref()
+                .unwrap()
+                .remote_manifest_key
+                .as_deref(),
+            Some("data/manifests/live")
+        );
+        // And nothing moved in the cache or on disk.
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.dirty);
+        drop(cache);
+        assert_eq!(before, std::fs::read(&state_path).unwrap());
+    }
+
+    #[test]
+    fn tin3278_conflicts_report_never_hides_a_lone_orphan_conflict() {
+        // Only the orphan carries a conflict; the live entry is clean. Reporting
+        // must neither suppress the record (it is real cache debt) nor graft it
+        // onto the clean entry (that is the round-2 conflict-resurrection defect).
+        let dir = tempfile::tempdir().unwrap();
+        let (audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key.clone(), sample_sync_state(2000, "neo"));
+        entries.insert(
+            orphan_key.clone(),
+            conflicted(
+                sample_sync_state(1000, "yoga"),
+                sample_conflict("secrets/.audit.log", 500, 1881, None),
+            ),
+        );
+        write_state_entries(&state_path, entries);
+
+        let cache = StateCache::open(&state_path).unwrap();
+        let report = cache.conflicts_report();
+        assert_eq!(report.len(), 1);
+        assert_eq!(
+            report[0].cache_key, orphan_key,
+            "a conflict with no duplicate row must stay visible under its own key"
+        );
+        assert!(report[0].shadowed_keys.is_empty());
+        let live = cache.get(&audit_log).unwrap();
+        assert_eq!(live.status, FileSyncStatus::Synced);
+        assert!(
+            live.conflict.is_none(),
+            "the clean live entry must not acquire a conflict from reporting"
+        );
+    }
+
+    #[test]
+    fn tin3278_conflicts_report_leaves_ambiguous_orphan_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("repo-a").join("secrets");
+        let repo_b = dir.path().join("repo-b").join("secrets");
+        std::fs::create_dir_all(&repo_a).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+        std::fs::write(repo_a.join(".audit.log"), b"a").unwrap();
+        std::fs::write(repo_b.join(".audit.log"), b"b").unwrap();
+        let key_a = std::fs::canonicalize(repo_a.join(".audit.log"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let key_b = std::fs::canonicalize(repo_b.join(".audit.log"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        let conflict = sample_conflict("secrets/.audit.log", 100, 1, None);
+        entries.insert(
+            key_a,
+            conflicted(sample_sync_state(10, "neo"), conflict.clone()),
+        );
+        entries.insert(
+            key_b,
+            conflicted(sample_sync_state(10, "neo"), conflict.clone()),
+        );
+        entries.insert(
+            "/secrets/.audit.log".to_string(),
+            conflicted(sample_sync_state(5, "yoga"), conflict),
+        );
+        write_state_entries(&state_path, entries);
+
+        let cache = StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            cache.conflicts_report().len(),
+            3,
+            "an orphan matching two resolvable keys must not be attributed to either"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tin3278_conflicts_report_collapses_resolvable_alias_key() {
+        // The other duplicate shape: a key that *does* resolve, but to a
+        // different stored key (symlinked parent, /var vs /private/var).
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(real_dir.join("f.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(&real_dir, dir.path().join("alias")).unwrap();
+
+        let canonical_key = std::fs::canonicalize(real_dir.join("f.txt"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let alias_key = dir
+            .path()
+            .join("alias")
+            .join("f.txt")
+            .to_string_lossy()
+            .into_owned();
+
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        let conflict = sample_conflict("f.txt", 100, 1, None);
+        entries.insert(
+            canonical_key.clone(),
+            conflicted(sample_sync_state(2000, "neo"), conflict.clone()),
+        );
+        entries.insert(
+            alias_key.clone(),
+            conflicted(sample_sync_state(1000, "yoga"), conflict),
+        );
+        write_state_entries(&state_path, entries);
+
+        let cache = StateCache::open(&state_path).unwrap();
+        let report = cache.conflicts_report();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].cache_key, canonical_key);
+        assert_eq!(report[0].shadowed_keys, vec![alias_key.as_str()]);
+    }
+
+    // ── explicit locked repair ───────────────────────────────────────────
+
+    #[test]
+    fn tin3278_explicit_migration_requires_a_lock_for_this_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key, sample_sync_state(2000, "neo"));
+        entries.insert(orphan_key, sample_sync_state(1000, "yoga"));
+        write_state_entries(&state_path, entries);
+        let before = std::fs::read(&state_path).unwrap();
+
+        let other_state_path = dir.path().join("other.json");
+        let foreign_lock = StateFileLock::acquire(&other_state_path).unwrap();
+
+        let mut cache = StateCache::open(&state_path).unwrap();
+        let error = cache
+            .migrate_duplicate_keys_locked(&foreign_lock)
+            .expect_err("a lock for a different cache must not authorize this migration");
+        assert!(
+            error.to_string().contains("held state lock is for"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(cache.len(), 2, "a refused migration must change nothing");
+        assert!(!cache.dirty);
+        drop(cache);
+        assert_eq!(before, std::fs::read(&state_path).unwrap());
+    }
+
+    #[test]
+    fn tin3278_explicit_migration_dry_run_plan_does_not_mutate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key.clone(), sample_sync_state(2000, "neo"));
+        entries.insert(orphan_key.clone(), sample_sync_state(1000, "yoga"));
+        write_state_entries(&state_path, entries);
+        let before = std::fs::read(&state_path).unwrap();
+
+        let cache = StateCache::open(&state_path).unwrap();
+        let plan = cache.plan_duplicate_key_migration();
+        assert_eq!(plan.merges.len(), 1);
+        assert_eq!(plan.merges[0].dropped_key, orphan_key);
+        assert_eq!(plan.merges[0].kept_key, canonical_key);
+        assert!(plan.skipped.is_empty());
+        assert_eq!(cache.len(), 2, "planning must not mutate the cache");
+        assert!(!cache.dirty);
+        drop(cache);
+        assert_eq!(before, std::fs::read(&state_path).unwrap());
+    }
+
+    #[test]
+    fn tin3278_explicit_migration_folds_and_persists_under_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+
+        let mut live = conflicted(
+            sample_sync_state(2000, "neo"),
+            sample_conflict("secrets/.audit.log", 1900, 3, Some("data/manifests/live")),
+        );
+        live.vclock.clocks.insert("neo".into(), 4);
+        let mut orphan = conflicted(
+            sample_sync_state(1000, "yoga"),
+            sample_conflict("secrets/.audit.log", 500, 1881, Some("legacy/manifests/x")),
+        );
+        orphan.vclock.clocks.insert("yoga".into(), 7);
+
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key.clone(), live);
+        entries.insert(orphan_key.clone(), orphan);
+        write_state_entries(&state_path, entries);
+
+        let lock = StateFileLock::acquire(&state_path).unwrap();
+        let mut cache = StateCache::open(&state_path).unwrap();
+        let applied = cache.migrate_duplicate_keys_locked(&lock).unwrap();
+        assert_eq!(applied.merges.len(), 1);
+        assert!(applied.merges[0].conflict_preserved);
+        assert!(applied.skipped.is_empty());
+
+        let entry = cache.get(&audit_log).unwrap();
+        // Surviving key is authoritative for every value…
+        assert_eq!(entry.blake3, "hash-2000");
+        assert_eq!(entry.remote_path, "data/manifests/sample");
+        let conflict = entry.conflict.as_ref().unwrap();
+        assert_eq!(
+            conflict.remote_manifest_key.as_deref(),
+            Some("data/manifests/live"),
+            "the duplicate's legacy manifest key must never ride onto the live key"
+        );
+        // …except the two monotone fields.
+        assert_eq!(
+            conflict.times_recorded, 1881,
+            "recurrence count never regresses"
+        );
+        assert_eq!(entry.vclock.get("yoga"), 7, "clock components are joined");
+        assert_eq!(entry.vclock.get("neo"), 4);
+
+        // Durable, under the lock the caller still holds.
+        let raw = std::fs::read_to_string(&state_path).unwrap();
+        assert!(raw.contains(&canonical_key));
+        assert!(
+            !raw.contains("\"/secrets/.audit.log\""),
+            "the duplicate key must be gone from disk after an applied migration"
+        );
+        drop(lock);
+    }
+
+    #[test]
+    fn tin3278_explicit_migration_refuses_to_resurrect_a_stale_conflict() {
+        // Round-2 must-fix #1, eliminated rather than guarded: the live entry is
+        // clean, the duplicate carries a frozen conflict. Grafting it would make
+        // a cosmetic double-count into a real conflict on the key the
+        // reconciler, FileProvider badges, `conflict_git`, and daemon git
+        // routing all use. The fold refuses instead, and says so.
+        let dir = tempfile::tempdir().unwrap();
+        let (audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key.clone(), sample_sync_state(2000, "neo"));
+        entries.insert(
+            orphan_key.clone(),
+            conflicted(
+                sample_sync_state(1000, "yoga"),
+                sample_conflict("secrets/.audit.log", 500, 1881, Some("legacy/manifests/x")),
+            ),
+        );
+        write_state_entries(&state_path, entries);
+
+        let lock = StateFileLock::acquire(&state_path).unwrap();
+        let mut cache = StateCache::open(&state_path).unwrap();
+        let applied = cache.migrate_duplicate_keys_locked(&lock).unwrap();
+
+        assert!(applied.merges.is_empty(), "nothing may be folded here");
+        assert_eq!(
+            applied.skipped,
+            vec![(
+                orphan_key.clone(),
+                KeyMigrationSkipReason::WouldResurrectConflict {
+                    kept_key: canonical_key.clone(),
+                }
+            )]
+        );
+        let live = cache.get(&audit_log).unwrap();
+        assert_eq!(live.status, FileSyncStatus::Synced);
+        assert!(live.conflict.is_none(), "no conflict may be manufactured");
+        assert!(
+            cache.entries.contains_key(&orphan_key),
+            "the record is kept, not dropped — a refusal loses nothing"
+        );
+        assert!(!cache.dirty, "a refused fold must not dirty the cache");
+        drop(lock);
+    }
+
+    #[test]
+    fn tin3278_explicit_migration_refuses_when_duplicate_conflict_is_newer() {
+        // The fold's premise is that the duplicate key is frozen history. If its
+        // conflict is *newer* than the live one, the premise is wrong; refuse
+        // rather than pick between two live-looking records.
+        let dir = tempfile::tempdir().unwrap();
+        let (_audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            canonical_key.clone(),
+            conflicted(
+                sample_sync_state(2000, "neo"),
+                sample_conflict("secrets/.audit.log", 100, 2, None),
+            ),
+        );
+        entries.insert(
+            orphan_key.clone(),
+            conflicted(
+                sample_sync_state(1000, "yoga"),
+                sample_conflict("secrets/.audit.log", 999, 1881, None),
+            ),
+        );
+        write_state_entries(&state_path, entries);
+
+        let lock = StateFileLock::acquire(&state_path).unwrap();
+        let mut cache = StateCache::open(&state_path).unwrap();
+        let applied = cache.migrate_duplicate_keys_locked(&lock).unwrap();
+        assert!(applied.merges.is_empty());
+        assert_eq!(
+            applied.skipped,
+            vec![(
+                orphan_key,
+                KeyMigrationSkipReason::DuplicateConflictIsNewer {
+                    kept_key: canonical_key
+                }
+            )]
+        );
+        assert_eq!(cache.len(), 2);
+        drop(lock);
+    }
+
+    #[test]
+    fn tin3278_explicit_migration_reports_ambiguous_multi_root_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("repo-a").join("secrets");
+        let repo_b = dir.path().join("repo-b").join("secrets");
+        std::fs::create_dir_all(&repo_a).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+        std::fs::write(repo_a.join(".audit.log"), b"a").unwrap();
+        std::fs::write(repo_b.join(".audit.log"), b"b").unwrap();
+        let key_a = std::fs::canonicalize(repo_a.join(".audit.log"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let key_b = std::fs::canonicalize(repo_b.join(".audit.log"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        entries.insert(key_a, sample_sync_state(10, "neo"));
+        entries.insert(key_b, sample_sync_state(10, "neo"));
+        entries.insert(
+            "/secrets/.audit.log".to_string(),
+            sample_sync_state(5, "yoga"),
+        );
+        write_state_entries(&state_path, entries);
+
+        let lock = StateFileLock::acquire(&state_path).unwrap();
+        let mut cache = StateCache::open(&state_path).unwrap();
+        let applied = cache.migrate_duplicate_keys_locked(&lock).unwrap();
+        assert!(applied.merges.is_empty());
+        assert_eq!(
+            applied.skipped,
+            vec![(
+                "/secrets/.audit.log".to_string(),
+                KeyMigrationSkipReason::NoUnambiguousTarget {
+                    resolvable_candidates: 2
+                }
+            )]
+        );
+        assert_eq!(cache.len(), 3);
+        drop(lock);
+    }
+
+    #[test]
+    fn tin3278_explicit_migration_cannot_widen_git_consumer_fields() {
+        // Round-2 must-fix #4, eliminated rather than tested-around. The two
+        // downstream consumers read `status`, `remote_path` and
+        // `conflict.remote_manifest_key` off `conflicts()` rows
+        // (`conflict_git::collect_repo_conflicts` bails a whole repo resolution
+        // on an out-of-prefix key; `tcfsd::grpc` routes git keep-both on
+        // `Path::new(cache_key).starts_with(git_dir)`). The fold cannot change
+        // any of those on a surviving key, and cannot give a key a conflict it
+        // did not already carry.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_git = dir.path().join("repo").join(".git").join("refs/heads");
+        std::fs::create_dir_all(&repo_git).unwrap();
+        std::fs::write(repo_git.join("main"), b"sha").unwrap();
+        let live_git_key = std::fs::canonicalize(repo_git.join("main"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let orphan_git_key = "/repo/.git/refs/heads/main".to_string();
+        let (_clean_file, clean_key, clean_orphan_key) = duplicate_key_fixture(dir.path());
+
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        let mut live_git = conflicted(
+            sample_sync_state(1000, "neo"),
+            sample_conflict(
+                "repo/.git/refs/heads/main",
+                1900,
+                3,
+                Some("data/manifests/live-head"),
+            ),
+        );
+        live_git.remote_path = "data/index/repo/.git/refs/heads/main".into();
+        // Deliberately *higher* last_synced on the stale duplicate, with a
+        // legacy storage prefix in both address fields.
+        let mut orphan_git = conflicted(
+            sample_sync_state(5000, "yoga"),
+            sample_conflict(
+                "repo/.git/refs/heads/main",
+                500,
+                1881,
+                Some("legacy/manifests/orphan-head"),
+            ),
+        );
+        orphan_git.remote_path = "legacy/index/repo/.git/refs/heads/main".into();
+        entries.insert(live_git_key.clone(), live_git);
+        entries.insert(orphan_git_key.clone(), orphan_git);
+        // Second pair: clean live entry, conflicted duplicate (refusal case).
+        entries.insert(clean_key.clone(), sample_sync_state(2000, "neo"));
+        entries.insert(
+            clean_orphan_key.clone(),
+            conflicted(
+                sample_sync_state(1000, "yoga"),
+                sample_conflict("secrets/.audit.log", 500, 1881, Some("legacy/manifests/y")),
+            ),
+        );
+        write_state_entries(&state_path, entries);
+
+        let lock = StateFileLock::acquire(&state_path).unwrap();
+        let mut cache = StateCache::open(&state_path).unwrap();
+        let conflicted_before = conflicted_key_set(&cache);
+        let git_entry_before = cache.entries.get(&live_git_key).cloned().unwrap();
+
+        let applied = cache.migrate_duplicate_keys_locked(&lock).unwrap();
+        assert_eq!(applied.merges.len(), 1, "only the git pair may fold");
+        assert_eq!(applied.merges[0].dropped_key, orphan_git_key);
+
+        let conflicted_after = conflicted_key_set(&cache);
+        assert!(
+            conflicted_after.is_subset(&conflicted_before),
+            "no key may gain a conflict: before={conflicted_before:?} after={conflicted_after:?}"
+        );
+        let git_entry_after = cache.entries.get(&live_git_key).unwrap();
+        assert_eq!(git_entry_after.status, git_entry_before.status);
+        assert_eq!(git_entry_after.remote_path, git_entry_before.remote_path);
+        assert_eq!(git_entry_after.blake3, git_entry_before.blake3);
+        let conflict_after = git_entry_after.conflict.as_ref().unwrap();
+        let conflict_before = git_entry_before.conflict.as_ref().unwrap();
+        assert_eq!(
+            conflict_after.remote_manifest_key,
+            conflict_before.remote_manifest_key
+        );
+        assert_eq!(conflict_after.rel_path, conflict_before.rel_path);
+        assert_eq!(conflict_after.times_recorded, 1881, "monotone field rises");
+        // No key that *survived a fold* may carry a legacy-prefix address. The
+        // refused pair's orphan still does, and must: refusing means nothing
+        // about that entry changed, so its own legacy addresses stay under its
+        // own (non-live) key where no consumer has ever routed on them.
+        for record in &applied.merges {
+            let survivor = cache.entries.get(&record.kept_key).unwrap();
+            assert!(
+                !survivor.remote_path.starts_with("legacy/"),
+                "folded key {} took the duplicate's remote_path",
+                record.kept_key
+            );
+            assert!(
+                !survivor
+                    .conflict
+                    .as_ref()
+                    .and_then(|conflict| conflict.remote_manifest_key.as_deref())
+                    .is_some_and(|key| key.starts_with("legacy/")),
+                "folded key {} took the duplicate's remote_manifest_key",
+                record.kept_key
+            );
+        }
+        assert!(
+            cache
+                .entries
+                .get(&clean_orphan_key)
+                .and_then(|state| state.conflict.as_ref())
+                .and_then(|conflict| conflict.remote_manifest_key.as_deref())
+                == Some("legacy/manifests/y"),
+            "a refused fold must leave the duplicate entry exactly as it was"
+        );
+        drop(lock);
+    }
+
+    #[test]
+    fn tin3278_explicit_migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_audit_log, canonical_key, orphan_key) = duplicate_key_fixture(dir.path());
+        let state_path = dir.path().join("state.json");
+        let mut entries = HashMap::new();
+        entries.insert(canonical_key, sample_sync_state(2000, "neo"));
+        entries.insert(orphan_key, sample_sync_state(1000, "yoga"));
+        write_state_entries(&state_path, entries);
+
+        let lock = StateFileLock::acquire(&state_path).unwrap();
+        let mut cache = StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            cache
+                .migrate_duplicate_keys_locked(&lock)
+                .unwrap()
+                .merges
+                .len(),
+            1
+        );
+        let second = cache.migrate_duplicate_keys_locked(&lock).unwrap();
+        assert!(
+            second.is_empty(),
+            "second pass has nothing to do: {second:?}"
+        );
+        drop(lock);
+
+        // And a fresh open of the migrated file plans no further work.
+        let reopened = StateCache::open(&state_path).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert!(reopened.plan_duplicate_key_migration().is_empty());
+    }
+
+    // ── fold semantics ───────────────────────────────────────────────────
+
+    fn fold_or_panic(surviving: SyncState, duplicate: SyncState) -> (SyncState, bool) {
+        match merge_duplicate_sync_states(surviving, duplicate) {
+            DuplicateFold::Folded {
+                state,
+                conflict_preserved,
+            } => (*state, conflict_preserved),
+            other => panic!("expected a fold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tin3278_fold_joins_vector_clocks_instead_of_dropping_one_side() {
+        // The folded-away side is the *only* side carrying a `yoga` component.
+        let mut duplicate = sample_sync_state(1000, "yoga");
+        duplicate.vclock.clocks.insert("yoga".into(), 7);
+        let mut surviving = sample_sync_state(2000, "neo");
+        surviving.vclock.clocks.insert("neo".into(), 4);
+
+        let (merged, _) = fold_or_panic(surviving.clone(), duplicate.clone());
+        assert_eq!(
+            merged.vclock.get("yoga"),
+            7,
+            "a component only the folded side carried must survive"
+        );
+        assert_eq!(merged.vclock.get("neo"), 4);
+
+        // A peer that has advanced on `neo` but never saw our `yoga` history.
+        // Against the joined clock that is honestly Concurrent — a real
+        // conflict. Against the surviving-only clock the remote falsely
+        // *dominates* (the lost component reads as 0), so the engine classifies
+        // RemoteNewer and silently overwrites the yoga-side change.
+        let mut peer = VectorClock::new();
+        peer.clocks.insert("neo".into(), 5);
+        assert_eq!(merged.vclock.partial_cmp_vc(&peer), None);
+        assert_eq!(
+            surviving.vclock.partial_cmp_vc(&peer),
+            Some(std::cmp::Ordering::Less),
+            "pinning the hazard: dropping a clock lets the remote falsely dominate"
+        );
+
+        // The join is order-independent, unlike the deliberate live-side
+        // preference for value-bearing fields.
+        let (swapped, _) = fold_or_panic(duplicate, surviving);
+        assert_eq!(swapped.vclock, merged.vclock);
+    }
+
+    #[test]
+    fn tin3278_fold_joins_conflict_side_clocks_same_side_only() {
+        let mut older =
+            sample_conflict("secrets/.audit.log", 100, 1881, Some("legacy/manifests/x"));
+        older.remote_device = "yoga".into();
+        older.local_vclock.clocks.insert("yoga".into(), 2);
+        older.remote_vclock.clocks.insert("yoga".into(), 5);
+
+        let mut newer = sample_conflict("secrets/.audit.log", 900, 3, Some("data/manifests/live"));
+        newer.remote_device = "honey".into();
+        newer.local_vclock.clocks.insert("neo".into(), 3);
+        newer.remote_vclock.clocks.insert("neo".into(), 1);
+
+        // The surviving key carries the newer record; the duplicate is frozen.
+        let surviving = conflicted(sample_sync_state(2000, "neo"), newer);
+        let duplicate = conflicted(sample_sync_state(1000, "yoga"), older);
+
+        let (merged, preserved) = fold_or_panic(surviving, duplicate);
+        assert!(preserved);
+        let conflict = merged.conflict.expect("conflict payload must survive");
+
+        // Every payload value stays as recorded on the surviving key…
+        assert_eq!(conflict.remote_device, "honey");
+        assert_eq!(
+            conflict.remote_manifest_key.as_deref(),
+            Some("data/manifests/live")
+        );
+        // …times_recorded rises to the max…
+        assert_eq!(conflict.times_recorded, 1881);
+        // …and both sides' causal history is joined, same-side only.
+        assert_eq!(conflict.local_vclock.get("yoga"), 2);
+        assert_eq!(conflict.local_vclock.get("neo"), 3);
+        assert_eq!(conflict.remote_vclock.get("yoga"), 5);
+        assert_eq!(conflict.remote_vclock.get("neo"), 1);
+        assert_ne!(
+            conflict.remote_vclock.get("neo"),
+            3,
+            "a local-only observation must never surface as a remote one"
         );
     }
 }
