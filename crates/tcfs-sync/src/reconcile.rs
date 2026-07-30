@@ -10711,7 +10711,9 @@ mod tests {
         let root = dir.path().join("root");
         std::fs::create_dir_all(root.join("secrets/api")).unwrap();
         let local_path = root.join(rel);
-        std::fs::write(&local_path, b"age-v1\n").unwrap();
+        // Real age container bytes: this path is `*.age`, so the degenerate-content
+        // guard (`local_age_ciphertext_intact`) is live on both sides of the rewrite.
+        std::fs::write(&local_path, b"age-encryption.org/v1\n-> X25519 dg\nv1\n").unwrap();
 
         let blacklist = Blacklist::default();
         let config = ReconcileConfig::default();
@@ -10725,7 +10727,7 @@ mod tests {
             .unwrap();
 
         // Out-of-band rewrite -> the self-heal plans a LocalNewer push.
-        std::fs::write(&local_path, b"age-v2-rematerialized\n").unwrap();
+        std::fs::write(&local_path, AGE_LOCAL_BYTES).unwrap();
         let live_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap());
         let heal_plan = reconcile(&op, &root, "data", &state, "neo", &blacklist, &config, None)
             .await
