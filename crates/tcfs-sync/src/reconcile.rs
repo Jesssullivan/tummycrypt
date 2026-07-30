@@ -1611,6 +1611,19 @@ pub async fn reconcile(
         let local = local_files.get(rel_path);
         let remote = remote_index.get(rel_path);
         let tracked = state.get_by_rel_path(rel_path).map(|(_, s)| s);
+        // TIN-3277/TIN-3278: `get_by_rel_path` is a fuzzy suffix match over the
+        // whole entry map, while the push path re-resolves its own baseline with
+        // the exact canonical key (`StateCache::get`) — and only that exact entry
+        // is ever written back. When duplicate keys exist for one file (live on
+        // neo today) the two lookups can disagree, and which one the fuzzy matcher
+        // returns is HashMap-iteration-order luck. Prove they are the SAME record
+        // (pointer equality into the one entry map) so the self-heal predicate can
+        // fail closed rather than reason about a record the push would not touch.
+        // No other classification decision consumes this flag.
+        let tracked_is_exact = match (tracked, local.and_then(|path| state.get(path.as_path()))) {
+            (Some(fuzzy), Some(exact)) => std::ptr::eq(fuzzy, exact),
+            _ => false,
+        };
 
         let action = classify_path(
             rel_path,
@@ -1621,6 +1634,7 @@ pub async fn reconcile(
             remote_prefix,
             device_id,
             config,
+            tracked_is_exact,
         )
         .await
         .with_context(|| format!("classifying reconciliation path {rel_path:?}"))?;
@@ -3158,6 +3172,7 @@ async fn classify_path(
     remote_prefix: &str,
     device_id: &str,
     config: &ReconcileConfig,
+    tracked_is_exact: bool,
 ) -> Result<ReconcileAction> {
     let action = match (local, remote, tracked) {
         // New local file — not on remote, not previously synced
@@ -3267,6 +3282,7 @@ async fn classify_path(
                 op,
                 remote_prefix,
                 device_id,
+                tracked_is_exact,
             )
             .await;
         }
@@ -3285,6 +3301,11 @@ async fn classify_path(
 }
 
 /// Compare when both local and remote exist — uses vector clocks.
+///
+/// `tracked_is_exact` says whether `tracked` is the state record that the push
+/// path would also resolve (exact canonical key) — see
+/// `self_rewrite_retick_applies`, the only decision here that depends on it.
+#[allow(clippy::too_many_arguments)]
 async fn compare_both_exist(
     rel_path: &str,
     local_path: &Path,
@@ -3293,6 +3314,7 @@ async fn compare_both_exist(
     op: &Operator,
     remote_prefix: &str,
     device_id: &str,
+    tracked_is_exact: bool,
 ) -> Result<ReconcileAction> {
     // Symlinks are first-class entries: they must NOT be dereferenced and hashed
     // like regular files (that would hash the *target's* content and then fail to
@@ -3407,37 +3429,64 @@ async fn compare_both_exist(
     // here would let a `Less` pair be re-ticked into `Equal` and then promoted
     // to `Greater`/`LocalNewer`, defeating the narrowing comment above.
     let stored_ordering = local_vclock.partial_cmp_vc(&remote_manifest.vclock);
+    // TIN-3277 local-side evidence, read from the same `symlink_metadata` call
+    // that chose this comparator, before any tick.
+    let local_size = local_metadata.len();
+    let local_content_plausible = local_age_ciphertext_intact(rel_path, local_path);
+    let self_rewrite_shape = |tracked_is_exact: bool| {
+        self_rewrite_retick_applies(
+            rel_path,
+            tracked,
+            tracked_is_exact,
+            &local_hash,
+            local_size,
+            local_content_plausible,
+            &remote_manifest.file_hash,
+            stored_ordering,
+            device_id,
+            remote_device,
+        )
+    };
     if tracked.is_some_and(|tracked_state| tracked_state.blake3 != local_hash)
         && stored_ordering == Some(std::cmp::Ordering::Less)
     {
         local_vclock.tick(device_id);
-    } else if self_rewrite_retick_applies(
-        rel_path,
-        tracked,
-        &local_hash,
-        &remote_manifest.file_hash,
-        stored_ordering,
-        device_id,
-        remote_device,
-    ) {
+    } else if self_rewrite_shape(tracked_is_exact) {
         // TIN-3277: an equal-clock self-pair whose remote content is byte-identical
         // to our own tracked baseline is proof of a local out-of-band rewrite, not a
         // concurrent-writer conflict. See `self_rewrite_retick_applies`.
         //
-        // Audit trail: log the remote manifest key we are about to displace. The
+        // Audit trail: log the remote manifest key we intend to displace. The
         // displaced bytes are `tracked.blake3` — this device's own last-synced
         // content — so this line is sufficient to reconstruct what was replaced
-        // without a parked copy.
+        // without a parked copy. It is emitted at PLAN time and the field names say
+        // so: the engine re-reads the remote before committing, so these values are
+        // the remote as observed during classification (best-effort provenance), not
+        // a post-hoc record of what the push actually overwrote. A remote that moved
+        // in between is vetoed at execute time and logged there instead.
         info!(
             path = %rel_path,
             device = %device_id,
-            displaced_manifest = %manifest_path,
-            displaced_hash = %remote_manifest.file_hash,
+            displaced_manifest_at_plan = %manifest_path,
+            displaced_hash_at_plan = %remote_manifest.file_hash,
             local_hash = %local_hash,
             "TIN-3277 self-heal: equal-clock self-pair, remote content == our tracked \
-             baseline — re-ticking as a local out-of-band rewrite and pushing"
+             baseline — re-ticking as a local out-of-band rewrite and planning a push"
         );
         local_vclock.tick(device_id);
+    } else if !tracked_is_exact && self_rewrite_shape(true) {
+        // Everything about the shape says "local out-of-band rewrite", but the
+        // baseline we would have proved it against is not the state record the push
+        // path would overwrite (TIN-3278 key duplication). Decline and let the
+        // ordinary Conflict arm record it — visible, and no push justified by a
+        // record that may describe a different file.
+        warn!(
+            path = %rel_path,
+            device = %device_id,
+            "TIN-3277 self-heal declined: plan-time tracked entry is not the exact-key \
+             record the push path would overwrite (TIN-3278 state-cache key duplication) \
+             — recording a conflict instead"
+        );
     }
 
     let outcome = compare_clocks(
@@ -3473,13 +3522,23 @@ async fn compare_both_exist(
 ///
 /// The safety proof is CONTENT identity, not device identity. The load-bearing
 /// clause is `tracked.blake3 == remote_hash`: the remote copy is byte-identical
-/// to what THIS device last synced. Overwriting it therefore provably cannot
-/// lose another writer's work — there is nothing on the remote that is not
-/// already in this device's own tracked baseline. Any foreign write, from any
-/// device, by any mechanism, changes `remote_hash`, fails this clause, and falls
-/// through to the ordinary `compare_clocks` -> `Conflict` path exactly as before
-/// this fix. That is what makes the promotion safe without authenticating
-/// anything.
+/// to what THIS device last synced. Overwriting it therefore cannot lose another
+/// writer's work — there is nothing on the remote that is not already in this
+/// device's own tracked baseline. Any foreign write, from any device, by any
+/// mechanism, changes `remote_hash`, fails this clause, and falls through to the
+/// ordinary `compare_clocks` -> `Conflict` path exactly as before this fix. That
+/// is what makes the promotion safe without authenticating anything.
+///
+/// Precision about the strength of that clause: it compares our baseline against
+/// the manifest's self-declared `file_hash` field.
+/// `engine::validate_indexed_manifest_binding` binds manifest BYTES to the
+/// index's `manifest_hash`; it does not prove the declared `file_hash` matches
+/// the chunk payload. A write-capable peer could therefore publish
+/// `file_hash == our baseline` over different chunks and satisfy this clause. So
+/// the guarantee is exactly "no HONEST remote writer's content is displaced",
+/// not an unconditional proof against a master-key-holding adversary — who can
+/// destroy data outright anyway, and whose forged payload the pull path's own
+/// content-hash verification would reject.
 ///
 /// `remote_device == device_id` is kept as CORROBORATION ONLY, deliberately not
 /// as the safety boundary. `written_by` (`manifest.rs`) is an unauthenticated,
@@ -3517,6 +3576,36 @@ async fn compare_both_exist(
 ///    (concurrent) is a real conflict. Taking the ordering as a parameter rather
 ///    than re-deriving it here makes it impossible for a caller to evaluate this
 ///    predicate against a clock a sibling rule already ticked.
+///  * `tracked_is_exact`: the baseline above must come from the SAME state
+///    record the push path will read and overwrite. Planning resolves `tracked`
+///    with the fuzzy suffix matcher `StateCache::get_by_rel_path`, while the
+///    push resolves its own baseline with the exact canonical key
+///    (`engine::upload_planned_push_with_device` -> `StateCache::get`) — and only
+///    the exact-keyed entry is ever written back by `state.set`. Under TIN-3278's
+///    live key-namespace duplication (absolute vs relative keys for the same
+///    file) those two can be DIFFERENT records, and `get_by_rel_path` returns
+///    whichever one `HashMap` iteration reaches first. Evaluating a
+///    content-identity proof against a record the push will not touch is exactly
+///    the ambiguity this predicate must not paper over, so the caller proves
+///    identity of the two lookups (pointer equality) and we fail closed when it
+///    does not hold.
+///  * `local_size != 0` while `tracked.size > 0`: the local side is the one thing
+///    here that no tcfs-aware actor authored, and the predicate's only other
+///    local evidence (`tracked.blake3 != local_hash`) cannot tell "home-manager
+///    re-materialized the secret" from "home-manager/agenix failed and left an
+///    empty file". Publishing the second case would replace good remote content
+///    with nothing and make the previous manifest+chunks GC-eligible, having just
+///    removed the latched Conflict that used to protect the path. Fail closed.
+///  * `local_content_plausible`: for `*.age` paths, the live bytes must still
+///    carry a recognizable age header (binary `age-encryption.org/v1` or the
+///    armored `-----BEGIN AGE ENCRYPTED FILE-----`), so a plaintext error string
+///    or truncated-to-nothing materialization is never published over intact
+///    ciphertext. Deliberately keyed off the `.age` extension rather than a
+///    `secrets/` prefix: the live stuck set includes `secrets/.manifest.toml`,
+///    which is plaintext TOML by design, and a prefix rule would make this fix a
+///    permanent no-op there. Residual limit, stated honestly: a truncation that
+///    preserves the header is not detectable from content alone and is NOT
+///    covered by this clause.
 ///  * `local_hash != remote_hash`: identical content is `UpToDate` anyway.
 ///  * not `.git`-internal: `.git` divergence keeps the fail-closed
 ///    fast-forward veto / loser-guard keep-both path (G5-git-13), which decides
@@ -3543,10 +3632,14 @@ async fn compare_both_exist(
 /// `tracked.blake3 != local_hash` for that path: the entry reverts to the
 /// pre-fix recorded-conflict behavior (surfaced by `tcfs conflicts` / D-Bus)
 /// rather than looping. Fail-closed, not silent.
+#[allow(clippy::too_many_arguments)]
 fn self_rewrite_retick_applies(
     rel_path: &str,
     tracked: Option<&SyncState>,
+    tracked_is_exact: bool,
     local_hash: &str,
+    local_size: u64,
+    local_content_plausible: bool,
     remote_hash: &str,
     stored_ordering: Option<std::cmp::Ordering>,
     device_id: &str,
@@ -3561,6 +3654,12 @@ fn self_rewrite_retick_applies(
     if is_git_internal_path(rel_path) {
         return false;
     }
+    // The baseline we are about to reason about must be the record the push path
+    // will read and overwrite, not whichever duplicate the fuzzy plan-time
+    // matcher happened to return (TIN-3278).
+    if !tracked_is_exact {
+        return false;
+    }
     let Some(tracked_state) = tracked else {
         return false;
     };
@@ -3573,7 +3672,47 @@ fn self_rewrite_retick_applies(
     if tracked_state.blake3 != remote_hash {
         return false;
     }
+    // The local side is the only side no tcfs-aware actor authored: refuse to
+    // publish a degenerate (emptied / non-ciphertext) out-of-band rewrite over
+    // intact remote content.
+    if local_size == 0 && tracked_state.size > 0 {
+        return false;
+    }
+    if !local_content_plausible {
+        return false;
+    }
     stored_ordering == Some(std::cmp::Ordering::Equal)
+}
+
+/// Number of leading bytes needed to recognize either age container header.
+const AGE_HEADER_PROBE_LEN: usize = 34;
+
+/// Do the live local bytes still look like age ciphertext?
+///
+/// Only meaningful for `*.age` paths; every other path answers `true` (nothing to
+/// check). Used as a fail-closed guard on the TIN-3277 self-heal push, which is
+/// the one push in this file that no tcfs-aware writer initiated: an out-of-band
+/// materialization that failed and left a plaintext error message must not be
+/// published over the intact ciphertext currently on the remote.
+///
+/// Accepts BOTH age container forms — the binary header (`age-encryption.org/v1`,
+/// which is what neo's live enrolled `secrets/**.age` files carry) and the
+/// ASCII-armored header — so the guard cannot silently disable the fix for a
+/// legitimately armored corpus.
+fn local_age_ciphertext_intact(rel_path: &str, local_path: &Path) -> bool {
+    if !rel_path.to_ascii_lowercase().ends_with(".age") {
+        return true;
+    }
+    let Ok(file) = std::fs::File::open(local_path) else {
+        return false;
+    };
+    let mut head = Vec::with_capacity(AGE_HEADER_PROBE_LEN);
+    let mut probe = std::io::Read::take(file, AGE_HEADER_PROBE_LEN as u64);
+    if std::io::Read::read_to_end(&mut probe, &mut head).is_err() {
+        return false;
+    }
+    head.starts_with(b"age-encryption.org/v1")
+        || head.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----")
 }
 
 /// Causal metadata extracted from one fully bound remote manifest.
@@ -4623,16 +4762,35 @@ pub async fn execute_plan(
                             result.pushed += 1;
                             result.bytes_uploaded += upload.bytes;
                         } else {
-                            // TIN-3277: a planned push the engine vetoed at execute
+                            // TIN-3277: a planned push the engine skipped at execute
                             // time is neither counted in `pushed` nor pushed to
                             // `errors`, so it used to leave no trace at all. Surface
-                            // it: for a self-heal push this is the signal that the
-                            // remote moved between plan and execute and the entry
-                            // has reverted to a recorded conflict.
+                            // it — but say WHICH skip it was, keyed off the engine's
+                            // own verdict rather than asserting a veto: `skipped` is
+                            // also set for benign content-dedup (`UpToDate`) and for
+                            // `RemoteNewer`. Only the `Conflict` verdict means the
+                            // remote moved between plan and execute, which for a
+                            // TIN-3277 self-heal is the signal that the entry has
+                            // reverted to a recorded conflict.
+                            let skip_reason = match &upload.outcome {
+                                Some(crate::conflict::SyncOutcome::Conflict(_)) => {
+                                    "execute-time conflict veto: remote moved since plan"
+                                }
+                                Some(crate::conflict::SyncOutcome::RemoteNewer) => {
+                                    "execute-time veto: remote is newer than the plan assumed"
+                                }
+                                Some(crate::conflict::SyncOutcome::UpToDate) => {
+                                    "no-op: remote already holds this content"
+                                }
+                                Some(crate::conflict::SyncOutcome::LocalNewer) | None => {
+                                    "engine skipped the upload without a conflict verdict"
+                                }
+                            };
                             info!(
                                 path = %rel_path,
                                 outcome = ?upload.outcome,
-                                "planned push skipped by execute-time veto (remote moved since plan)"
+                                skip_reason,
+                                "planned push skipped by the engine"
                             );
                         }
                     }
@@ -5856,7 +6014,7 @@ mod tests {
             let entry = RemoteIndexEntry::new(object_id, 5, 0);
 
             let error =
-                compare_both_exist("doc.txt", &local_path, &entry, None, &op, "data", "neo")
+                compare_both_exist("doc.txt", &local_path, &entry, None, &op, "data", "neo", true)
                     .await
                     .expect_err("untrusted manifest metadata must abort classification");
 
@@ -5970,6 +6128,7 @@ mod tests {
             &op,
             "data",
             "neo",
+            true,
         )
         .await
         .expect("a local regular-file replacement should be classified causally");
@@ -6012,6 +6171,7 @@ mod tests {
             &op,
             "data",
             "neo",
+            true,
         )
         .await
         .expect("a causally newer remote symlink should replace a regular file");
@@ -6055,6 +6215,7 @@ mod tests {
             &op,
             "data",
             "neo",
+            true,
         )
         .await
         .expect("a local symlink replacement should be classified causally");
@@ -6102,6 +6263,7 @@ mod tests {
             &op,
             "data",
             "neo",
+            true,
         )
         .await
         .expect("a causally newer remote regular file should replace a symlink");
@@ -6149,6 +6311,7 @@ mod tests {
             &op,
             "data",
             "neo",
+            true,
         )
         .await
         .expect("concurrent type replacements should classify as a conflict");
@@ -9707,6 +9870,7 @@ mod tests {
             prefix,
             "honey",
             &config,
+            true,
         )
         .await;
 
@@ -9750,6 +9914,7 @@ mod tests {
             prefix,
             "honey",
             &config,
+            true,
         )
         .await;
 
@@ -9793,6 +9958,7 @@ mod tests {
             prefix,
             "honey",
             &config,
+            true,
         )
         .await;
 
@@ -9827,6 +9993,7 @@ mod tests {
             "data",
             "honey",
             &config,
+            true,
         )
         .await;
 
@@ -9861,6 +10028,7 @@ mod tests {
             "data",
             "honey",
             &config,
+            true,
         )
         .await;
 
@@ -9871,6 +10039,14 @@ mod tests {
     }
 
     // ── TIN-3277: out-of-band self-rewrite self-heal ──────────────────────────
+
+    /// Local bytes that satisfy the `*.age` container-header guard
+    /// (`local_age_ciphertext_intact`). Every `*.age` test that is NOT about that
+    /// guard uses these, so its verdict still turns on the clause it is testing
+    /// rather than on an accidental header failure. Mirrors the binary header form
+    /// the live enrolled `secrets/**.age` files on neo actually carry.
+    const AGE_LOCAL_BYTES: &[u8] =
+        b"age-encryption.org/v1\n-> X25519 dGVzdA\nrematerialized-ciphertext\n";
 
     /// Build the exact live shape of a TIN-3277 stuck entry: the tracked hash is
     /// the last-synced (== remote) content, the clock is frozen at the value that
@@ -9912,7 +10088,7 @@ mod tests {
         let op = memory_op();
         let rel = "secrets/api/github_token.age";
         let (_dir, local_path, remote_entry, tracked) =
-            tin3277_self_pair(&op, rel, "neo", "lastpushedhash", b"hm-rematerialized\n").await;
+            tin3277_self_pair(&op, rel, "neo", "lastpushedhash", AGE_LOCAL_BYTES).await;
 
         let action = classify_path(
             rel,
@@ -9923,6 +10099,7 @@ mod tests {
             "data",
             "neo",
             &ReconcileConfig::default(),
+            true,
         )
         .await;
 
@@ -9948,7 +10125,7 @@ mod tests {
         let rel = "secrets/api/github_token.age";
         // Remote manifest written by `honey`; we are `neo`.
         let (_dir, local_path, remote_entry, tracked) =
-            tin3277_self_pair(&op, rel, "honey", "honeypushedhash", b"neo-local\n").await;
+            tin3277_self_pair(&op, rel, "honey", "honeypushedhash", AGE_LOCAL_BYTES).await;
 
         let action = classify_path(
             rel,
@@ -9959,6 +10136,7 @@ mod tests {
             "data",
             "neo",
             &ReconcileConfig::default(),
+            true,
         )
         .await;
 
@@ -9993,7 +10171,9 @@ mod tests {
         .await;
         let dir = tempfile::TempDir::new().unwrap();
         let local_path = dir.path().join("entry");
-        std::fs::write(&local_path, b"hm-rematerialized\n").unwrap();
+        // Valid age ciphertext: this test must fail on the content-identity clause,
+        // not on the degenerate-content guard.
+        std::fs::write(&local_path, AGE_LOCAL_BYTES).unwrap();
         // Our baseline is our own last push, which the remote no longer holds.
         let tracked = tin2584_state("our-baseline-hash", tin2584_vclock(&[("neo", 1)]));
 
@@ -10006,6 +10186,7 @@ mod tests {
             "data",
             "neo",
             &ReconcileConfig::default(),
+            true,
         )
         .await;
 
@@ -10039,7 +10220,9 @@ mod tests {
         .await;
         let dir = tempfile::TempDir::new().unwrap();
         let local_path = dir.path().join("entry");
-        std::fs::write(&local_path, b"hm-rematerialized\n").unwrap();
+        // Valid age ciphertext: this test must fail on the clock structure, not on
+        // the degenerate-content guard.
+        std::fs::write(&local_path, AGE_LOCAL_BYTES).unwrap();
         // Stale cache: one tick behind, tracked hash != live local hash.
         let tracked = tin2584_state("stale-baseline-hash", tin2584_vclock(&[("neo", 1)]));
 
@@ -10052,6 +10235,7 @@ mod tests {
             "data",
             "neo",
             &ReconcileConfig::default(),
+            true,
         )
         .await;
 
@@ -10060,6 +10244,244 @@ mod tests {
             "a strictly-dominated self-pair is TIN-2584's recorded conflict and must NOT be \
              double-ticked into a push, got {action:?}"
         );
+    }
+
+    /// (c3) STRUCTURAL double-tick regression, part 2 — the case that pins the
+    /// `else if` on its OWN, with the content-identity clause fully SATISFIED.
+    /// `tracked.blake3 == remote_hash` (a same-content republish the state cache
+    /// never recorded) while the stored clock is one tick behind (`Less`). v2 takes
+    /// TIN-2584's branch only, reaches `Equal`, and records a `Conflict`. The v1
+    /// sequential shape would tick again off the already-mutated clock, reach
+    /// `Greater`, and push. Unlike (c2), removing the content clause cannot mask
+    /// this test — it fails the moment the two rules stop being mutually exclusive.
+    #[tokio::test]
+    async fn tin3277_same_content_republish_dominated_clock_is_not_double_ticked() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        // Remote holds exactly our baseline content but is a tick ahead of our cache.
+        let remote_entry = seed_manifest_vclock(
+            &op,
+            "data",
+            rel,
+            "our-baseline-hash",
+            r#"{"clocks":{"neo":2}}"#,
+            "neo",
+        )
+        .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("entry");
+        std::fs::write(&local_path, AGE_LOCAL_BYTES).unwrap();
+        let tracked = tin2584_state("our-baseline-hash", tin2584_vclock(&[("neo", 1)]));
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+            true,
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "a dominated stored clock must be ticked ONCE by TIN-2584 and never re-ticked \
+             by the TIN-3277 rule, even when the content-identity clause holds, got {action:?}"
+        );
+    }
+
+    /// (c4) Degenerate local content, part 1: the out-of-band writer FAILED and
+    /// left an empty file. The local side is the one side no tcfs-aware actor
+    /// authored, so an emptied rewrite must never be published over intact remote
+    /// content — especially now that the latched `Conflict` that used to protect
+    /// these paths is gone.
+    #[tokio::test]
+    async fn tin3277_emptied_local_rewrite_is_not_pushed() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        let (_dir, local_path, remote_entry, tracked) =
+            tin3277_self_pair(&op, rel, "neo", "lastpushedhash", b"").await;
+        assert_eq!(
+            std::fs::metadata(&local_path).unwrap().len(),
+            0,
+            "setup: the local file must actually be empty"
+        );
+        assert!(
+            tracked.size > 0,
+            "setup: the baseline must be non-empty for this to be a truncation"
+        );
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+            true,
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "an emptied out-of-band rewrite must fail closed, not publish nothing over \
+             intact remote content, got {action:?}"
+        );
+    }
+
+    /// (c5) Degenerate local content, part 2: a failed `agenix`/home-manager
+    /// materialization that left a PLAINTEXT error string where ciphertext belongs.
+    /// Same shape as (a) — which pushes — with only the local container header
+    /// changed, so this test isolates the `*.age` header guard.
+    #[tokio::test]
+    async fn tin3277_non_ciphertext_local_age_rewrite_is_not_pushed() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        let (_dir, local_path, remote_entry, tracked) = tin3277_self_pair(
+            &op,
+            rel,
+            "neo",
+            "lastpushedhash",
+            b"error: no identity matched any of the recipients\n",
+        )
+        .await;
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+            true,
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "non-ciphertext bytes must never be published over an intact *.age remote, \
+             got {action:?}"
+        );
+
+        // Control: the guard is keyed off the `.age` extension, NOT a `secrets/`
+        // prefix — `secrets/.manifest.toml` is plaintext TOML by design and is one
+        // of the live stuck paths, so a prefix rule would make the fix a permanent
+        // no-op there.
+        let plain_rel = "secrets/.manifest.toml";
+        let (_plain_dir, plain_local, plain_remote, plain_tracked) = tin3277_self_pair(
+            &op,
+            plain_rel,
+            "neo",
+            "lastpushedplainhash",
+            b"[secrets]\nrewritten = true\n",
+        )
+        .await;
+        let plain_action = classify_path(
+            plain_rel,
+            Some(&plain_local),
+            Some(&plain_remote),
+            Some(&plain_tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+            true,
+        )
+        .await;
+        assert!(
+            matches!(
+                plain_action,
+                Ok(ReconcileAction::Push {
+                    reason: PushReason::LocalNewer,
+                    ..
+                })
+            ),
+            "a non-.age path under secrets/ must still self-heal, got {plain_action:?}"
+        );
+    }
+
+    /// (c6) The self-heal's baseline must be the state record the PUSH path would
+    /// read and overwrite. Planning resolves `tracked` with the fuzzy suffix
+    /// matcher; the push re-resolves it with the exact canonical key, and only the
+    /// exact entry is ever written back. Under TIN-3278's live key duplication the
+    /// two can differ, so when the caller cannot prove they are the same record the
+    /// self-heal must decline (and the ordinary Conflict arm records it visibly).
+    /// Identical to (a) apart from `tracked_is_exact`.
+    #[tokio::test]
+    async fn tin3277_inexact_tracked_lookup_declines_self_heal() {
+        let op = memory_op();
+        let rel = "secrets/api/github_token.age";
+        let (_dir, local_path, remote_entry, tracked) =
+            tin3277_self_pair(&op, rel, "neo", "lastpushedhash", AGE_LOCAL_BYTES).await;
+
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            &ReconcileConfig::default(),
+            false,
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
+            "a self-heal whose baseline may not be the record the push would overwrite \
+             must fail closed, got {action:?}"
+        );
+    }
+
+    /// (c7) The `*.age` container guard must accept BOTH age forms. A guard that
+    /// only knew the binary header would silently disable the fix for an armored
+    /// corpus — the same "no-op on its own target population" failure the
+    /// extension-vs-prefix decision above avoids.
+    #[test]
+    fn tin3277_age_header_guard_accepts_both_container_forms() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cases: [(&str, &[u8], bool); 5] = [
+            ("binary", b"age-encryption.org/v1\n-> X25519 dGVzdA\n", true),
+            (
+                "armored",
+                b"-----BEGIN AGE ENCRYPTED FILE-----\nYWJj\n",
+                true,
+            ),
+            ("plaintext", b"error: no identity matched\n", false),
+            ("empty", b"", false),
+            ("short", b"age-encryption", false),
+        ];
+        for (name, bytes, expected) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                local_age_ciphertext_intact("secrets/api/token.age", &path),
+                expected,
+                "{name}: unexpected verdict for a *.age path"
+            );
+            // Non-`.age` paths are out of scope for the container check.
+            assert!(
+                local_age_ciphertext_intact("secrets/.manifest.toml", &path),
+                "{name}: a non-.age path must never be gated on an age header"
+            );
+        }
+        // Uppercase extensions count too.
+        let upper = dir.path().join("upper");
+        std::fs::write(&upper, b"nope\n").unwrap();
+        assert!(!local_age_ciphertext_intact("secrets/API/TOKEN.AGE", &upper));
+        // A missing local file fails closed.
+        assert!(!local_age_ciphertext_intact(
+            "secrets/api/gone.age",
+            &dir.path().join("does-not-exist")
+        ));
     }
 
     /// (d) No runaway ticking: the re-tick lands on a comparison-only CLONE, so
@@ -10083,6 +10505,7 @@ mod tests {
                 "data",
                 "neo",
                 &ReconcileConfig::default(),
+                true,
             )
             .await;
             assert!(
@@ -10121,6 +10544,7 @@ mod tests {
             "data",
             "neo",
             &ReconcileConfig::default(),
+            true,
         )
         .await;
 
@@ -10415,6 +10839,7 @@ mod tests {
             "data",
             "honey",
             &config,
+            true,
         )
         .await;
 
@@ -10452,6 +10877,7 @@ mod tests {
             "data",
             "honey",
             &config,
+            true,
         )
         .await
         .unwrap();
@@ -10505,6 +10931,7 @@ mod tests {
             "data",
             "honey",
             &config,
+            true,
         )
         .await
         .unwrap();
