@@ -152,36 +152,37 @@ Claude-style agent state keys sessions by absolute-path slug *and* by a
 literal-path registry (`~/.claude.json` `projects{}`), and 32–57% of
 in-transcript path references are embedded absolute paths no shim reaches.
 The recorded escalation — **a uniform absolute prefix, identical on every
-host** — is adopted here as the binding convention for agent-session and
-roam-first roots:
+host** — remains the candidate binding convention for agent-session and
+roam-first roots. The exact presentation prefix is still an open operator
+decision:
 
-- **Ruled 2026-07-29 (Q1):** the canonical identity remains `root_id` — no
-  path is ever the protocol (reaffirming TIN-2853). Host paths are
-  *platform projections* recorded in `RootBindingV1`. The default Unix
-  projection is `/tcfs/<root_id>`: a root-owned boundary directory with
-  user-owned children — exactly the ancestry shape the landed B0
-  validation already accepts — so slug, registry key, and embedded cwd
-  all match with zero rewriting on every host that carries the boundary.
-  `~/tcfs/<root_id>` is the documented fallback projection where root
-  provisioning is unavailable; FileProvider/CFAPI clients use their
-  mandated containers. In-place transcript rewriting stays rejected — it
-  would break the byte-exact convergence invariant roam enrollment
-  depends on.
-- Boundary provisioning is one line per platform (`tmpfiles.d` on Linux,
-  `synthetic.conf` on macOS — the `/nix` mechanism already proven on the
-  darwin fleet), rendered by lab and deploy-gated behind the live freeze.
-  An optional `~/tcfs → /tcfs` symlink is the same-OS compat bridge for
-  legacy embedded paths; legacy `~/tcfs` roots are grandfathered until
-  re-adopted through the D1 transaction. Cross-OS session healing is
-  expected to be a no-op for default-projection roots; a mapping layer
-  remains only for fallback-projection and mandated-container hosts.
-- Uniform-prefix bindings are a *convention on top of* the binding contract,
-  not a change to it: hosts that cannot honor the prefix stay `UNBOUND` and
-  fail closed.
-- This is the designed unlock for the R7 fence ("sting = sole writer, no
-  roam until TIN-2301/1556"): agent-session roam resumes only via roots
-  adopted under this convention, after TIN-2301's resume proof passes
-  against a uniform-prefix root.
+- The canonical identity remains `root_id`; no local path is part of the
+  fleet-stable root identity, remote namespace, authorization identity, or
+  mutation selector (reaffirming TIN-2853). Host paths remain host-local
+  protocol/read-surface data recorded in `RootBindingV1` and its
+  `binding_fingerprint`; existing `~/tcfs` bindings remain valid.
+- `/tcfs` is a credible opt-in Unix continuity projection for a canary, not
+  yet the default product contract. A multiuser rootful layout also needs a
+  stable principal namespace (for example,
+  `/tcfs/u/<principal>/<root_id>`); `/tcfs/<root_id>` alone is only a
+  possible single-principal shorthand.
+- FileProvider and CFAPI continue to use their platform-managed or
+  explicitly registered roots. In-place transcript rewriting stays
+  rejected because it would break the byte-exact convergence invariant
+  roam enrollment depends on.
+- A `~/tcfs → /tcfs` symlink does not by itself prove path identity:
+  canonicalization and process `getcwd` behavior can still expose the
+  backing path. A projection is path-identity-capable only after the
+  literal cwd observed by session registries, pickers, resumed dialogs, and
+  embedded records is proven.
+- If Q1 selects a uniform prefix, it remains a *convention on top of* the
+  binding contract, not a change to it: hosts that cannot honor the prefix
+  stay `UNBOUND` and fail closed.
+- Q1 is therefore still part of the R7 fence ("sting = sole writer, no roam
+  until TIN-2301/1556"). A uniform-prefix choice requires TIN-2301's resume
+  proof against that projection; a non-uniform rootless choice defers
+  cross-OS agent-session roaming until a separately approved healing
+  mechanism exists.
 
 ## Decision D5 — scale posture for 100+ roots
 
@@ -222,10 +223,11 @@ defers the rest:
    any `git-raw-v1` root on a fresh host** — adopt/reconcile on the origin
    host does not depend on it.
 3. Delivery order: **B0b** (plan-only driver + adopt dry-run inventory) →
-   **B0c** (execute + fleet-rendered registry rows) → uniform-prefix
-   agent-static adoption + TIN-2301 resume proof → repo adoption after the
-   TIN-2306 two-repo stop rule passes. Broad `~/git`/home claims stay out
-   until the C phase, per the standing claim boundary.
+   **B0c** (execute + fleet-rendered registry rows) → Q1 ruling →
+   selected-projection agent-static adoption + the applicable TIN-2301
+   resume proof → repo adoption after the TIN-2306 two-repo stop rule
+   passes. Broad `~/git`/home claims stay out until the C phase, per the
+   standing claim boundary.
 4. Everything above is source/tests/docs until the TIN-2856/TIN-2801 freeze
    clears; no step in this ADR authorizes a live ceremony.
 
@@ -241,19 +243,22 @@ defers the rest:
 | Cross-machine convergence, different local paths, no collisions | UNBOUND/binding model + D2 driver; proven by the B0c two-host test (and the uniform-prefix variant for agent roots) |
 | Rollback/removal documented and tested | D1 remove semantics |
 
-## Operator rulings (2026-07-29 interview; asked as one batch)
+## Operator rulings and remaining question (2026-07-29 interview)
 
-All four blocking questions are now ruled. The original question text is
-preserved in git history at the pre-ruling revision of this document.
+Q2–Q4 were ruled in the batched interview. Q1 was not: the operator
+immediately reopened the initial `~/tcfs/<root_id>` selection, called the
+rootful alternative a complex architectural question worth careful
+consideration, and did not make a final choice.
 
-- **Q1 — uniform roam-root prefix: RULED — rootful.** Identity is
-  `root_id`; host paths are platform projections (see the amended D4 for
-  the full ruling text). The default Unix projection is `/tcfs/<root_id>`;
-  `~/tcfs/<root_id>` is the fallback projection; FileProvider/CFAPI use
-  mandated containers. The operator ratified erring toward the rootful,
-  filesystem-native pattern as the core product contract: mountpoints and
-  user-level implementation adjust underneath it with no further
-  consumer-facing decisions.
+- **Q1 — uniform roam-root prefix: OPEN.** Decide among extending the
+  existing rootless `~/tcfs` deployment convention with a proposed
+  `<root_id>` layout, a provisioned rootful Unix projection, or
+  profile-selected support for both. Before promoting a rootful default,
+  prove root-relative state/cache identity and migration, multiuser
+  ownership and collision resistance, reboot recovery, rootless
+  refusal/fallback, and the literal cwd seen by Claude/Codex session
+  registries and resumed dialogs. Keep existing bindings and historical
+  session paths available during any dual-projection canary.
 - **Q2 — remove retention window: RULED — 7 days** of removed-root state
   cache retention before `--purge-state` is allowed (tighter than the
   30-day proposal).
