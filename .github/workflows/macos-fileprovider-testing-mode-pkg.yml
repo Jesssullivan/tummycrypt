@@ -475,6 +475,7 @@ jobs:
           name: fileprovider-testing-policy-${{ github.run_id }}
           path: ${{ runner.temp }}/tcfs-fileprovider-testing-policy
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: Archive FileProvider app
         shell: bash
