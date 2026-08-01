@@ -111,3 +111,4 @@ jobs:
           name: container-runtime-smoke-${{ github.event.inputs.tag }}-${{ matrix.artifact_suffix }}
           path: ${{ env.LOG_DIR }}
           if-no-files-found: error
+          retention-days: 7
