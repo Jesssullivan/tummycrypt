@@ -392,6 +392,29 @@ enum Commands {
         state: Option<PathBuf>,
     },
 
+    /// Repair duplicate state-cache key namespaces (TIN-3278)
+    ///
+    /// One logical file can be tracked under two keys — the absolute
+    /// canonicalized path live reads/writes derive, plus a bare
+    /// prefix-relative key left by an older keying scheme — which
+    /// double-counts in raw scans such as `tcfs conflicts`. This is the only
+    /// verb that repairs that: it takes the state-cache lock and folds the
+    /// duplicate away. Dry run unless `--execute` is given.
+    #[command(name = "state-migrate-keys")]
+    StateMigrateKeys {
+        /// Apply the migration under the state-cache lock. Without this flag
+        /// nothing is written.
+        #[arg(long)]
+        execute: bool,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+        /// Path to the sync state cache JSON file (overrides config).
+        /// `.db` paths are normalized to their `.json` sibling.
+        #[arg(long, env = "TCFS_STATE_PATH")]
+        state: Option<PathBuf>,
+    },
+
     /// Manage the sync trash (staged deletes)
     ///
     /// When trash is enabled, deletion writes an immutable safety copy and
@@ -1079,6 +1102,11 @@ async fn main() -> Result<()> {
         Commands::Conflicts { json, root, state } => {
             cmd_conflicts(&config, json, root.as_deref(), state.as_deref()).await
         }
+        Commands::StateMigrateKeys {
+            execute,
+            json,
+            state,
+        } => cmd_state_migrate_keys(&config, execute, json, state.as_deref()).await,
     }
 }
 
@@ -9151,13 +9179,142 @@ fn conflict_age(detected_at: u64) -> String {
 /// `tcfs conflicts` — list recorded conflicts, grouped by repo for
 /// `.git`-internal paths. Named roots use the daemon-selected cache; the
 /// primary/legacy path stays an offline read.
+/// Tell the operator when the conflict list collapsed duplicate key-namespace
+/// rows, and how to repair the cache (TIN-3278).
+///
+/// Reporting deliberately does not repair: `tcfs conflicts` on the default
+/// primary holds no `StateFileLock`, so it must not write.
+fn report_duplicate_cache_keys(duplicate_cache_keys: &[String], state_path: &Path) {
+    if duplicate_cache_keys.is_empty() {
+        return;
+    }
+    println!(
+        "note: {} duplicate cache key(s) collapsed for reporting (TIN-3278); \
+         the count above is per logical file, matching the daemon's cycle count.",
+        duplicate_cache_keys.len()
+    );
+    for key in duplicate_cache_keys {
+        println!("  duplicate key: {key}");
+    }
+    println!(
+        "  repair (writes, takes the state lock): tcfs state-migrate-keys --state {} --execute",
+        state_path.display()
+    );
+}
+
+/// `tcfs state-migrate-keys` — explicit duplicate-key repair (TIN-3278).
+///
+/// Dry run by default. **Both** modes acquire the same `StateFileLock` every
+/// other state-cache writer uses, before `StateCache::open`. The dry run needs
+/// it too, and not for the migration (which it never calls): `open` itself can
+/// write, because it recovers a missing or corrupt primary from `.bak` and
+/// `Drop` flushes that recovery even for a nominally read-only command — the
+/// same hazard `lock_explicit_state_cache` documents. Taking the lock up front
+/// means this verb can never write unlocked in either mode, and a run that
+/// collides with a daemon cycle fails loudly instead of racing it.
+///
+/// `--execute` hands the guard to `StateCache::migrate_duplicate_keys_locked`,
+/// which verifies it is a lock for *this* cache and refuses otherwise. This is
+/// the only path that repairs duplicate key namespaces; `open` and
+/// `reload_from_disk` never do.
+async fn cmd_state_migrate_keys(
+    config: &tcfs_core::config::TcfsConfig,
+    execute: bool,
+    json: bool,
+    state_override: Option<&Path>,
+) -> Result<()> {
+    let state_path = resolve_state_path(config, state_override);
+
+    let render = |plan: &tcfs_sync::state::KeyMigrationPlan| {
+        if json {
+            let merges: Vec<serde_json::Value> = plan
+                .merges
+                .iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "dropped_key": record.dropped_key,
+                        "kept_key": record.kept_key,
+                        "conflict_preserved": record.conflict_preserved,
+                    })
+                })
+                .collect();
+            let skipped: Vec<serde_json::Value> = plan
+                .skipped
+                .iter()
+                .map(|(key, reason)| {
+                    serde_json::json!({ "key": key, "reason": format!("{reason:?}") })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "state_path": state_path.to_string_lossy(),
+                    "executed": execute,
+                    "merges": merges,
+                    "skipped": skipped,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            );
+            return;
+        }
+        println!("state cache: {}", state_path.display());
+        println!(
+            "{} ({} fold(s), {} left in place)",
+            if execute {
+                "applied"
+            } else {
+                "dry run — nothing written"
+            },
+            plan.merges.len(),
+            plan.skipped.len()
+        );
+        for record in &plan.merges {
+            println!(
+                "  fold {} -> {}{}",
+                record.dropped_key,
+                record.kept_key,
+                if record.conflict_preserved {
+                    " (conflict recurrence/clocks absorbed)"
+                } else {
+                    ""
+                }
+            );
+        }
+        for (key, reason) in &plan.skipped {
+            println!("  keep {key}: {reason:?}");
+        }
+        if !execute && !plan.merges.is_empty() {
+            println!("re-run with --execute to apply under the state-cache lock.");
+        }
+    };
+
+    // Held for both modes, and taken before `open` — see the note above.
+    let lock = tcfs_sync::state::StateFileLock::acquire(&state_path).with_context(|| {
+        format!(
+            "locking state cache for migration: {}",
+            state_path.display()
+        )
+    })?;
+    let mut cache = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+
+    if !execute {
+        render(&cache.plan_duplicate_key_migration());
+        return Ok(());
+    }
+
+    let applied = cache.migrate_duplicate_keys_locked(&lock)?;
+    render(&applied);
+    Ok(())
+}
+
 async fn cmd_conflicts(
     config: &tcfs_core::config::TcfsConfig,
     json: bool,
     root_id: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let (state_path, routed_local_root, routed_remote_prefix, items) =
+    let (state_path, routed_local_root, routed_remote_prefix, items, duplicate_cache_keys) =
         if let Some(root_id) = root_id {
             let mut client = connect_daemon(&config.daemon.socket).await?;
             let response = client
@@ -9201,23 +9358,35 @@ async fn cmd_conflicts(
                 Some(response.local_root),
                 Some(response.remote_prefix),
                 items,
+                Vec::new(),
             )
         } else {
             let state_path = resolve_state_path(config, state_override);
             let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
             let state = tcfs_sync::state::StateCache::open(&state_path)
                 .with_context(|| format!("opening state cache: {}", state_path.display()))?;
-            let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = state
-                .conflicts()
-                .into_iter()
-                .filter_map(|(key, state)| {
-                    state
+            // TIN-3278: collapse duplicate key-namespace rows for the same
+            // logical file at *read* time. This is reporting only — it never
+            // mutates the cache, so a `tcfs conflicts` that holds no state-file
+            // lock (the default primary path: `lock_explicit_state_cache` takes
+            // the lock only for an explicit `--state`) still writes nothing.
+            // Repair is the separate, locked `tcfs state-migrate-keys` verb.
+            let report = state.conflicts_report();
+            let mut duplicate_keys: Vec<String> = report
+                .iter()
+                .flat_map(|row| row.shadowed_keys.iter().map(|key| (*key).to_string()))
+                .collect();
+            duplicate_keys.sort();
+            let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = report
+                .iter()
+                .filter_map(|row| {
+                    row.state
                         .conflict
                         .as_ref()
-                        .map(|conflict| (key.to_string(), conflict.clone()))
+                        .map(|conflict| (row.cache_key.to_string(), conflict.clone()))
                 })
                 .collect();
-            (state_path, None, None, items)
+            (state_path, None, None, items, duplicate_keys)
         };
 
     let groups = group_conflicts(&items);
@@ -9257,6 +9426,11 @@ async fn cmd_conflicts(
                 "remote_prefix": routed_remote_prefix.as_deref(),
                 "state_path": state_path.to_string_lossy(),
                 "conflict_count": items.len(),
+                // TIN-3278: duplicate key-namespace rows collapsed for
+                // reporting. Present means the cache carries repairable debt;
+                // the count above is the per-logical-file count the reconciler
+                // acts on.
+                "duplicate_cache_keys": duplicate_cache_keys,
                 "groups": rendered,
             }))?
         );
@@ -9268,6 +9442,7 @@ async fn cmd_conflicts(
             println!("Root: {root_id}");
         }
         println!("No recorded conflicts.");
+        report_duplicate_cache_keys(&duplicate_cache_keys, &state_path);
         return Ok(());
     }
 
@@ -9286,6 +9461,7 @@ async fn cmd_conflicts(
         items.len(),
         groups.len()
     );
+    report_duplicate_cache_keys(&duplicate_cache_keys, &state_path);
     for g in &groups {
         println!();
         match &g.repo_root {
