@@ -972,7 +972,7 @@ impl VirtualFilesystem for TcfsVfs {
         let manifest = SymlinkManifest::from_bytes(&manifest_bytes)
             .with_context(|| format!("parsing symlink manifest for {path}"))?;
         tcfs_sync::engine::validate_indexed_symlink_target(
-            Path::new(path),
+            Path::new(&resolved.logical_rel_path),
             &manifest.symlink_target,
         )?;
         Ok(manifest.symlink_target)

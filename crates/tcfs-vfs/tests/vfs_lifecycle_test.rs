@@ -252,6 +252,7 @@ async fn readdir_getattr_and_readlink_preserve_symlink_entries() {
     let vfs = memory_vfs_with_op(op.clone(), "test", cache.path().join("cache"));
 
     publish_symlink(&op, "test", "link.txt", "target.txt").await;
+    publish_symlink(&op, "test", "nested/link.txt", "../target.txt").await;
 
     let entries = vfs.readdir("/").await.expect("readdir root");
     let link = entries
@@ -266,6 +267,12 @@ async fn readdir_getattr_and_readlink_preserve_symlink_entries() {
 
     let target = vfs.readlink("/link.txt").await.expect("readlink");
     assert_eq!(target, "target.txt");
+
+    let nested_target = vfs
+        .readlink("/nested/link.txt")
+        .await
+        .expect("readlink with safe logical-root parent traversal");
+    assert_eq!(nested_target, "../target.txt");
 }
 
 #[tokio::test]

@@ -4,6 +4,9 @@
 //! into a single `Blacklist` type with a unified `check()` method.
 
 use std::path::Path;
+use tcfs_core::fixed_ingress::{
+    FixedIngressDenyReasonV1, FixedIngressPolicyV1, FixedIngressRuleV1,
+};
 use tracing::debug;
 
 /// Why a path was excluded — useful for debug logging and diagnostics.
@@ -68,6 +71,23 @@ impl std::fmt::Display for BlacklistReason {
             BlacklistReason::GitLockFile => write!(f, "git lockfile"),
             BlacklistReason::GitTcfsUndo => write!(f, ".git/tcfs-undo bundle"),
             BlacklistReason::VfsMarker => write!(f, "VFS marker"),
+        }
+    }
+}
+
+impl From<FixedIngressDenyReasonV1> for BlacklistReason {
+    fn from(reason: FixedIngressDenyReasonV1) -> Self {
+        match reason.rule() {
+            FixedIngressRuleV1::GitWorktreesAdmin => Self::GitWorktreesAdmin,
+            FixedIngressRuleV1::GitLockFile => Self::GitLockFile,
+            FixedIngressRuleV1::GitTcfsUndo => Self::GitTcfsUndo,
+            FixedIngressRuleV1::SecurityDirectory
+            | FixedIngressRuleV1::SecurityExactFile
+            | FixedIngressRuleV1::MasterKeyRotationPending
+            | FixedIngressRuleV1::MasterKeyRotationState
+            | FixedIngressRuleV1::AtomicWriteTemporary
+            | FixedIngressRuleV1::Dotenv
+            | FixedIngressRuleV1::LiveDatabase => Self::Security(reason.label()),
         }
     }
 }
@@ -485,30 +505,9 @@ impl Blacklist {
     /// credentials/live databases, linked-worktree admin data, Git lockfiles,
     /// and legacy in-tree undo bundles are never valid hydration payloads.
     pub fn check_fixed_ingress_path_components(&self, path: &Path) -> Option<BlacklistReason> {
-        if has_git_worktrees_segment(path) {
-            return Some(BlacklistReason::GitWorktreesAdmin);
-        }
-        if is_git_lockfile_path(path) {
-            return Some(BlacklistReason::GitLockFile);
-        }
-        if has_git_tcfs_undo_segment(path) {
-            return Some(BlacklistReason::GitTcfsUndo);
-        }
-        for component in path.components() {
-            if let std::path::Component::Normal(name) = component {
-                if let Some(name_str) = name.to_str() {
-                    for &dir in SECURITY_DIRS {
-                        if name_str.eq_ignore_ascii_case(dir) {
-                            return Some(BlacklistReason::Security(dir));
-                        }
-                    }
-                    if let Some(label) = security_file_reason(name_str) {
-                        return Some(BlacklistReason::Security(label));
-                    }
-                }
-            }
-        }
-        None
+        FixedIngressPolicyV1::strict_v1()
+            .classify_path(path)
+            .map(BlacklistReason::from)
     }
 }
 
@@ -523,6 +522,33 @@ mod tests {
     fn blacklist_with_globs(patterns: &[&str]) -> Blacklist {
         let pats: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
         Blacklist::new(&pats, false, false, "bundle")
+    }
+
+    fn legacy_fixed_ingress_reference(path: &Path) -> Option<BlacklistReason> {
+        if has_git_worktrees_segment(path) {
+            return Some(BlacklistReason::GitWorktreesAdmin);
+        }
+        if is_git_lockfile_path(path) {
+            return Some(BlacklistReason::GitLockFile);
+        }
+        if has_git_tcfs_undo_segment(path) {
+            return Some(BlacklistReason::GitTcfsUndo);
+        }
+        for component in path.components() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name) = name.to_str() {
+                    for &directory in SECURITY_DIRS {
+                        if name.eq_ignore_ascii_case(directory) {
+                            return Some(BlacklistReason::Security(directory));
+                        }
+                    }
+                    if let Some(label) = security_file_reason(name) {
+                        return Some(BlacklistReason::Security(label));
+                    }
+                }
+            }
+        }
+        None
     }
 
     #[test]
@@ -988,6 +1014,51 @@ mod tests {
                     .is_some(),
                 "case alias must remain fenced: {path}"
             );
+        }
+    }
+
+    #[test]
+    fn fixed_ingress_adapter_matches_core_policy_independent_of_config() {
+        let policy = FixedIngressPolicyV1::strict_v1();
+        let configured_patterns = vec!["*.json".to_owned(), "target/**".to_owned()];
+        let blacklists = [
+            Blacklist::default(),
+            Blacklist::new(&[], true, true, "raw"),
+            Blacklist::new(&configured_patterns, false, false, "bundle"),
+        ];
+        let corpus = [
+            "repo/.git/worktrees/wt/HEAD",
+            "repo/.git/index.lock",
+            "repo/.git/tcfs-undo/history.bundle",
+            "home/.ssh/id_ed25519",
+            "home/auth.json",
+            "home/vault.rotate-pending",
+            "home/vault.rotate-state.json",
+            "home/.vault.tmp.0123456789abcdef0123456789abcdef",
+            "repo/service.env",
+            "home/state.sqlite-wal",
+            "repo/.git/HEAD",
+            "repo/Cargo.lock",
+            "home/.envrc",
+            "home/state.dbf",
+            "repo/ordinary.json",
+            "home/auth.json/.ssh/id_ed25519",
+            "home/.ssh/repo/.git/worktrees/wt/auth.json",
+        ];
+
+        for path in corpus {
+            let path = Path::new(path);
+            let core = policy.classify_path(path).map(BlacklistReason::from);
+            let legacy = legacy_fixed_ingress_reference(path);
+            assert_eq!(core, legacy, "core policy changed V1 behavior for {path:?}");
+            let expected = policy.classify_path(path).map(BlacklistReason::from);
+            for blacklist in &blacklists {
+                assert_eq!(
+                    blacklist.check_fixed_ingress_path_components(path),
+                    expected,
+                    "adapter drift for {path:?}"
+                );
+            }
         }
     }
 

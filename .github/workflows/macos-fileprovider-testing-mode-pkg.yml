@@ -60,7 +60,7 @@ env:
 jobs:
   build-testing-mode-pkg:
     name: Build testing-mode .pkg
-    if: github.repository == 'Jesssullivan/tummycrypt'
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 60
     steps:

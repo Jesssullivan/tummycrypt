@@ -49,7 +49,7 @@ permissions:
 jobs:
   storage-canary:
     name: Scoped storage canary
-    if: github.repository == 'Jesssullivan/tummycrypt'
+    if: ${{ github.repository == '__TIN_2538_DISABLED__' }}
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 20
     environment: ${{ github.event.inputs.smoke_environment }}

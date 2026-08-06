@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tcfs_core::config::RegisteredRootPlanContractV1;
 
 use crate::conflict::VectorClock;
 
@@ -186,6 +187,41 @@ fn read_opened_state_file(mut file: std::fs::File, display_path: &Path) -> Resul
 
 fn secure_read_file_bytes(path: &Path) -> Result<Vec<u8>> {
     read_opened_state_file(secure_open_state_file(path)?, path)
+}
+
+fn secure_read_file_bytes_bounded_v1(path: &Path) -> Result<Vec<u8>> {
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .state_contract()
+        .max_primary_bytes();
+    let mut file = secure_open_state_file(path)?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading private state file metadata: {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.len() <= max_bytes,
+        "registered-root V1 state primary exceeds {} bytes: {}",
+        max_bytes,
+        path.display()
+    );
+
+    let mut contents = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .context("registered-root V1 state primary length does not fit memory")?,
+    );
+    (&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut contents)
+        .with_context(|| format!("reading private state file: {}", path.display()))?;
+    anyhow::ensure!(
+        u64::try_from(contents.len())
+            .context("registered-root V1 state primary read length does not fit u64")?
+            <= max_bytes,
+        "registered-root V1 state primary grew beyond {} bytes while reading: {}",
+        max_bytes,
+        path.display()
+    );
+    validate_opened_state_file(&file, path)?;
+    Ok(contents)
 }
 
 fn secure_read_file(path: &Path) -> Result<String> {
@@ -404,6 +440,142 @@ impl StateFileLock {
             Err(std::fs::TryLockError::Error(error)) => Err(error).with_context(|| {
                 format!("locking existing state cache via {}", lock_path.display())
             }),
+        }
+    }
+}
+
+/// Exact digest of one securely read registered-root V1 primary state file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PrimaryStateBytesDigestV1([u8; 32]);
+
+impl PrimaryStateBytesDigestV1 {
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Exact primary-state bytes observed without consulting compatibility
+/// recovery or creating a writer sidecar.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ReadOnlyPrimaryStateBytesSnapshotV1 {
+    raw_bytes: Arc<[u8]>,
+    raw_bytes_digest: PrimaryStateBytesDigestV1,
+}
+
+impl std::fmt::Debug for ReadOnlyPrimaryStateBytesSnapshotV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReadOnlyPrimaryStateBytesSnapshotV1")
+            .field("raw_bytes_len", &self.raw_bytes.len())
+            .field(
+                "raw_bytes_digest",
+                &blake3::Hash::from_bytes(*self.raw_bytes_digest.as_bytes()),
+            )
+            .finish()
+    }
+}
+
+impl ReadOnlyPrimaryStateBytesSnapshotV1 {
+    pub(crate) fn raw_bytes(&self) -> &[u8] {
+        &self.raw_bytes
+    }
+
+    pub(crate) const fn raw_bytes_digest(&self) -> PrimaryStateBytesDigestV1 {
+        self.raw_bytes_digest
+    }
+
+    pub(crate) fn into_parts(self) -> (Arc<[u8]>, PrimaryStateBytesDigestV1) {
+        (self.raw_bytes, self.raw_bytes_digest)
+    }
+}
+
+/// Result of one cooperative, non-creating read of a V1 state primary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadOnlyPrimaryStateBytesV1 {
+    Missing,
+    WriterActive,
+    Unstable,
+    Snapshot(ReadOnlyPrimaryStateBytesSnapshotV1),
+}
+
+fn primary_state_bytes_digest_v1(bytes: &[u8]) -> PrimaryStateBytesDigestV1 {
+    let mut hasher =
+        blake3::Hasher::new_derive_key("tinyland.tcfs.registered-root-state-primary-bytes.b3v1");
+    let length =
+        u64::try_from(bytes.len()).expect("registered-root V1 state primary length must fit u64");
+    hasher.update(&length.to_be_bytes());
+    hasher.update(bytes);
+    PrimaryStateBytesDigestV1(*hasher.finalize().as_bytes())
+}
+
+fn read_primary_state_bytes_once_v1(
+    state_path: &Path,
+) -> Result<Option<ReadOnlyPrimaryStateBytesSnapshotV1>> {
+    if !state_path_entry_exists(state_path)? {
+        return Ok(None);
+    }
+    let raw_bytes: Arc<[u8]> = secure_read_file_bytes_bounded_v1(state_path)?.into();
+    let raw_bytes_digest = primary_state_bytes_digest_v1(&raw_bytes);
+    Ok(Some(ReadOnlyPrimaryStateBytesSnapshotV1 {
+        raw_bytes,
+        raw_bytes_digest,
+    }))
+}
+
+/// Read only the selected registered-root primary state bytes.
+///
+/// This never creates a lock, reads a backup, invokes compatibility parsing,
+/// or writes state. A missing lock is probed again after the read because V1
+/// writers create a persistent sidecar before their full transaction. If a
+/// sidecar appears, the first observation is discarded and either reported as
+/// contended or repeated while holding the newly observed lock. A writer that
+/// bypasses this persistent-sidecar protocol is outside the registered-root V1
+/// consistency contract.
+pub(crate) fn read_primary_state_bytes_read_only_v1(
+    state_path: &Path,
+) -> Result<ReadOnlyPrimaryStateBytesV1> {
+    read_primary_state_bytes_read_only_v1_inner(state_path, || ())
+}
+
+fn read_primary_state_bytes_read_only_v1_inner<T>(
+    state_path: &Path,
+    after_unlocked_read: impl FnOnce() -> T,
+) -> Result<ReadOnlyPrimaryStateBytesV1> {
+    match StateFileLock::try_acquire_existing(state_path)? {
+        ExistingStateFileLock::Contended => Ok(ReadOnlyPrimaryStateBytesV1::WriterActive),
+        ExistingStateFileLock::Acquired(_guard) => {
+            Ok(match read_primary_state_bytes_once_v1(state_path)? {
+                Some(snapshot) => ReadOnlyPrimaryStateBytesV1::Snapshot(snapshot),
+                None => ReadOnlyPrimaryStateBytesV1::Missing,
+            })
+        }
+        ExistingStateFileLock::Missing => {
+            let first_observation = read_primary_state_bytes_once_v1(state_path);
+            // Keep any test-injected writer guard alive through the second
+            // probe. Production passes `()`, so this seam performs no action.
+            let _between_probes = after_unlocked_read();
+            match StateFileLock::try_acquire_existing(state_path)? {
+                ExistingStateFileLock::Contended => Ok(ReadOnlyPrimaryStateBytesV1::WriterActive),
+                ExistingStateFileLock::Acquired(_guard) => {
+                    Ok(match read_primary_state_bytes_once_v1(state_path)? {
+                        Some(snapshot) => ReadOnlyPrimaryStateBytesV1::Snapshot(snapshot),
+                        None => ReadOnlyPrimaryStateBytesV1::Missing,
+                    })
+                }
+                ExistingStateFileLock::Missing => {
+                    let first_observation = first_observation?;
+                    let second_observation = read_primary_state_bytes_once_v1(state_path)?;
+                    Ok(match (first_observation, second_observation) {
+                        (None, None) => ReadOnlyPrimaryStateBytesV1::Missing,
+                        (Some(first), Some(second)) if first == second => {
+                            ReadOnlyPrimaryStateBytesV1::Snapshot(second)
+                        }
+                        (None, Some(_)) | (Some(_), None) | (Some(_), Some(_)) => {
+                            ReadOnlyPrimaryStateBytesV1::Unstable
+                        }
+                    })
+                }
+            }
         }
     }
 }
@@ -2177,6 +2349,119 @@ mod tests {
             StateFileLock::try_acquire_existing(&state_path).unwrap(),
             ExistingStateFileLock::Acquired(_)
         ));
+    }
+
+    #[test]
+    fn registered_root_primary_bytes_read_is_non_creating_and_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let lock_path = StateFileLock::lock_path(&state_path);
+
+        assert!(matches!(
+            read_primary_state_bytes_read_only_v1(&state_path).unwrap(),
+            ReadOnlyPrimaryStateBytesV1::Missing
+        ));
+        assert!(!state_path.exists());
+        assert!(!lock_path.exists());
+
+        let expected = br#"{"last_nats_seq":0,"device_id":"sting","entries":{}}"#;
+        write_private_state_file(&state_path, expected);
+        let before = std::fs::metadata(&state_path).unwrap();
+        let snapshot = match read_primary_state_bytes_read_only_v1(&state_path).unwrap() {
+            ReadOnlyPrimaryStateBytesV1::Snapshot(snapshot) => snapshot,
+            other => panic!("expected exact primary snapshot, got {other:?}"),
+        };
+        assert_eq!(snapshot.raw_bytes(), expected);
+        assert_eq!(
+            blake3::Hash::from_bytes(*snapshot.raw_bytes_digest().as_bytes())
+                .to_hex()
+                .to_string(),
+            "37f6cf98f5e05f65ef93f97fcc116492d7be88a1a3b7b30e0f2c9ffb345639d3"
+        );
+        let after = std::fs::metadata(&state_path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn registered_root_primary_bytes_debug_never_discloses_state_payload() {
+        let sentinel = b"state-secret-sentinel-that-must-not-appear";
+        let snapshot = ReadOnlyPrimaryStateBytesSnapshotV1 {
+            raw_bytes: Arc::from(sentinel.as_slice()),
+            raw_bytes_digest: primary_state_bytes_digest_v1(sentinel),
+        };
+
+        let snapshot_debug = format!("{snapshot:?}");
+        let result_debug = format!("{:?}", ReadOnlyPrimaryStateBytesV1::Snapshot(snapshot));
+        for debug in [&snapshot_debug, &result_debug] {
+            assert!(!debug.contains("state-secret-sentinel"));
+            assert!(debug.contains("raw_bytes_len"));
+            assert!(debug.contains(&sentinel.len().to_string()));
+            assert!(debug.contains("raw_bytes_digest"));
+        }
+    }
+
+    #[test]
+    fn registered_root_primary_bytes_read_reports_writer_and_preserves_existing_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let lock_path = StateFileLock::lock_path(&state_path);
+        write_private_state_file(&state_path, b"state-sentinel");
+
+        let writer = StateFileLock::acquire(&state_path).expect("writer lock");
+        assert!(matches!(
+            read_primary_state_bytes_read_only_v1(&state_path).unwrap(),
+            ReadOnlyPrimaryStateBytesV1::WriterActive
+        ));
+        drop(writer);
+
+        let lock_bytes = std::fs::read(&lock_path).unwrap();
+        let lock_before = std::fs::metadata(&lock_path).unwrap();
+        let snapshot = match read_primary_state_bytes_read_only_v1(&state_path).unwrap() {
+            ReadOnlyPrimaryStateBytesV1::Snapshot(snapshot) => snapshot,
+            other => panic!("expected primary snapshot under existing lock, got {other:?}"),
+        };
+        assert_eq!(snapshot.raw_bytes(), b"state-sentinel");
+        assert_eq!(std::fs::read(&lock_path).unwrap(), lock_bytes);
+        let lock_after = std::fs::metadata(&lock_path).unwrap();
+        assert_eq!(lock_before.len(), lock_after.len());
+        assert_eq!(
+            lock_before.modified().unwrap(),
+            lock_after.modified().unwrap()
+        );
+    }
+
+    #[test]
+    fn registered_root_primary_bytes_discards_unlocked_read_when_writer_lock_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let lock_path = StateFileLock::lock_path(&state_path);
+        write_private_state_file(&state_path, b"first-observation-must-not-escape");
+        assert!(!lock_path.exists());
+
+        let result = read_primary_state_bytes_read_only_v1_inner(&state_path, || {
+            StateFileLock::acquire(&state_path).expect("writer appears between probes")
+        })
+        .unwrap();
+
+        assert!(matches!(result, ReadOnlyPrimaryStateBytesV1::WriterActive));
+        assert!(lock_path.exists(), "writer created its persistent sidecar");
+    }
+
+    #[test]
+    fn registered_root_primary_bytes_rejects_unlocked_generation_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        write_private_state_file(&state_path, b"first-generation");
+
+        let result = read_primary_state_bytes_read_only_v1_inner(&state_path, || {
+            write_private_state_file(&state_path, b"second-generation");
+        })
+        .unwrap();
+
+        assert!(matches!(result, ReadOnlyPrimaryStateBytesV1::Unstable));
+        assert!(!StateFileLock::lock_path(&state_path).exists());
     }
 
     #[cfg(unix)]

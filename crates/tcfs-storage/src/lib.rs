@@ -10,10 +10,10 @@ pub use health::{
     HealthCheckError, HealthCheckFailureKind, HealthCheckReport,
 };
 pub use operator::{
-    build_operator, ensure_conditional_write_semantics,
-    memory_conditional_write_emulation_is_registered_for_tests,
+    acquire_conditional_write_semantics_receipt, build_operator,
+    ensure_conditional_write_semantics, memory_conditional_write_emulation_is_registered_for_tests,
     register_memory_conditional_write_emulation_for_tests, verify_conditional_write_semantics,
-    StorageConfig,
+    ConditionalWriteSemanticsReceipt, StorageConfig,
 };
 
 /// Parse a remote spec like `seaweedfs://host:port/bucket[/prefix]`.

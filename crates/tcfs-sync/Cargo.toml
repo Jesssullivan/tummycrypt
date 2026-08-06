@@ -16,7 +16,7 @@ opendal = { workspace = true }
 # rocksdb and async-nats are optional until Phase 4 implementation
 rocksdb = { workspace = true, optional = true }
 async-nats = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
+futures = { workspace = true }
 bytes = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 notify = { workspace = true }
@@ -37,7 +37,7 @@ tempfile = { workspace = true }
 [features]
 default = []
 # NATS JetStream messaging only (no RocksDB) — used by tcfsd k8s-worker
-nats = ["dep:async-nats", "dep:futures", "dep:bytes"]
+nats = ["dep:async-nats", "dep:bytes"]
 # E2E encryption support (XChaCha20-Poly1305 chunk encryption)
 crypto = ["dep:tcfs-crypto", "dep:base64"]
 # Full feature set including RocksDB persistent state + encryption
@@ -48,3 +48,4 @@ proptest = { workspace = true }
 tokio-test = { workspace = true }
 age = { workspace = true }
 secrecy = { workspace = true }
+static_assertions = { workspace = true }
