@@ -79,7 +79,7 @@
           "reason": "Cross-platform runtime smoke has no sanctioned GF replacement yet."
         }
       },
-      "topology_sha256": "49b9ac3a38fdeda16208976643744b80bea7f91b1dd339194ef1c68f4db0ad8c"
+      "topology_sha256": "5f133bcd5a4ede19fec6e52b2b9af3115df71c711b46ebe5e71f903b948fa446"
     },
     {
       "path": ".github/workflows/docs.yml",
@@ -108,7 +108,7 @@
           "reason": "Pages deployment remains held until its source build runs only on sanctioned GF compute."
         }
       },
-      "topology_sha256": "b63e7ffdd43f3a8cf14e12fd2c36fea1f7985c8e71319acdc4bfd24ae1c6cbb2"
+      "topology_sha256": "ff3dd13c4a3f6ef75b13aea4e90043b4adc1515879a53cf3c9e464ae81a1daf0"
     },
     {
       "path": ".github/workflows/homebrew-install-smoke.yml",
@@ -123,7 +123,7 @@
           "reason": "Packaged first-run and upgrade smoke lacks a sanctioned GF replacement."
         }
       },
-      "topology_sha256": "13d38c818239eaed39f5728d1c7c65a06c56fabbba5753ce4a95b9e0bd1f99c8"
+      "topology_sha256": "d7441f3a131f8f5907516881939237e3efbe182d278e0fb03b2342fd278ede8f"
     },
     {
       "path": ".github/workflows/linux-package-container-smoke.yml",
@@ -183,7 +183,7 @@
           "reason": "Testing-mode FileProvider package proof is not bound to the commissioned GF Darwin path."
         }
       },
-      "topology_sha256": "f97ea3e60ce478917feed49ce0306b045f1abc9a615b673f300b8579e192869f"
+      "topology_sha256": "c8b4af81019b2f2b255cadf82f08908dfaceb7e058ce2d6f9b7bde5ee62e698b"
     },
     {
       "path": ".github/workflows/macos-postinstall-smoke.yml",
@@ -213,7 +213,7 @@
           "reason": "Nix profile first-run smoke lacks a sanctioned GF replacement."
         }
       },
-      "topology_sha256": "04e888b14cf5b2678f904a8d5e9b883ce2dc43bd90252425c3a1c2bc15aa657f"
+      "topology_sha256": "eb64149ccacfb4a2e362bf8b39a54cb23f9898d616e56209796880f85b67aa09"
     },
     {
       "path": ".github/workflows/release.yml",
@@ -299,7 +299,7 @@
           "reason": "Large-restore storage proof lacks a sanctioned GF replacement."
         }
       },
-      "topology_sha256": "0a898072d133338bcd322427f9cf3b4c34e84a13169c625ba6aaa2aa25ae0960"
+      "topology_sha256": "ea511b32356ec29e05335be4875214fb19e53dae6b002b4075be780d2e62e102"
     },
     {
       "path": ".github/workflows/storage-posture-canary.yml",
