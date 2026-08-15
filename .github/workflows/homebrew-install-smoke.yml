@@ -127,3 +127,4 @@ jobs:
           name: homebrew-install-smoke-${{ github.event.inputs.binary_expected_version }}
           path: ${{ runner.temp }}/homebrew-install-smoke
           if-no-files-found: warn
+          retention-days: 7

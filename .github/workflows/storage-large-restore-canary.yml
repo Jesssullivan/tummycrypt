@@ -560,3 +560,4 @@ jobs:
           name: storage-large-restore-canary-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.EVIDENCE_DIR }}
           if-no-files-found: error
+          retention-days: 7

@@ -186,3 +186,4 @@ jobs:
           name: ${{ env.TCFS_NIX_SMOKE_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/nix-profile-install-smoke
           if-no-files-found: warn
+          retention-days: 7
