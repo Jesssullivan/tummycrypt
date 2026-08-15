@@ -2124,6 +2124,19 @@ fn split_explicit_git_dir(git_dir: &Path) -> Result<(PathBuf, Vec<std::ffi::OsSt
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_protected_root_compatibility_alias(
+    path: &Path,
+    alias_uid: u32,
+    parent_uid: u32,
+    parent_mode: u32,
+) -> bool {
+    path.parent() == Some(Path::new("/"))
+        && alias_uid == 0
+        && parent_uid == 0
+        && parent_mode & 0o022 == 0
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn validate_explicit_repo_root_spelling(repo_root: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     use std::path::Component;
@@ -2170,9 +2183,17 @@ fn validate_explicit_repo_root_spelling(repo_root: &Path) -> Result<()> {
                 parent.display()
             )
         })?;
-        let protected_root_alias = metadata.uid() == 0
-            && parent_metadata.uid() == 0
-            && (parent_metadata.mode() & 0o022 == 0 || parent_metadata.mode() & 0o1000 != 0);
+        // Permit only an OS-managed compatibility alias directly below `/`
+        // (for example macOS `/var` -> `private/var`). A broader ownership
+        // predicate is unsafe under UID 0: any nested symlink created by that
+        // process is also root-owned and would otherwise redirect repository
+        // capture through an attacker-selected tree.
+        let protected_root_alias = is_protected_root_compatibility_alias(
+            &prefix,
+            metadata.uid(),
+            parent_metadata.uid(),
+            parent_metadata.mode(),
+        );
         if !protected_root_alias {
             anyhow::bail!(
                 "explicit Git repo root contains a mutable symlink component: {}",
@@ -8927,6 +8948,35 @@ mod tests {
             git_safety::local_ref_sha(&victim, "refs/heads/commondir-probe").is_none(),
             "commondir target refs must remain untouched"
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn protected_root_compatibility_alias_is_root_level_only() {
+        assert!(is_protected_root_compatibility_alias(
+            Path::new("/var"),
+            0,
+            0,
+            0o755,
+        ));
+        assert!(!is_protected_root_compatibility_alias(
+            Path::new("/tmp/tcfs/repo-alias"),
+            0,
+            0,
+            0o700,
+        ));
+        assert!(!is_protected_root_compatibility_alias(
+            Path::new("/var"),
+            501,
+            0,
+            0o755,
+        ));
+        assert!(!is_protected_root_compatibility_alias(
+            Path::new("/var"),
+            0,
+            0,
+            0o777,
+        ));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
