@@ -13,8 +13,9 @@ on:
 permissions:
   contents: read
 
-# TIN-3127 public-read-only applies to Attic authentication. The pinned helper
-# may separately retain the contents:read GitHub token for Nix source fetches.
+# Public-read-only applies to Attic authentication. The repository-local TCFS
+# bootstrap receives no Attic token or inherited netrc.
+# The contents:read GitHub token boundary remains documented for Nix fetches.
 env:
   ATTIC_TOKEN: ""
 
@@ -44,8 +45,8 @@ jobs:
       - name: Require the preinstalled GF Nix runtime
         run: command -v nix
 
-      - name: Check and build through the public-read-only GloriousFlywheel Nix front door
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@693574567f9b879486782f1fb7f432c54a2fe294
+      - name: Check and build through the TCFS public-read Nix front door on GloriousFlywheel
+        uses: ./.github/actions/tcfs-public-read-nix-job
         env:
           GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ATTIC_TOKEN: ""
@@ -69,9 +70,12 @@ jobs:
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
             test "${NETRC:-}" = /dev/null
             test "$(nix config show netrc-file)" = /dev/null
-            nix config show extra-substituters |
+            nix config show substituters |
               tr ' ' '\n' |
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
+            nix config show trusted-public-keys |
+              tr ' ' '\n' |
+              grep -Fx -- "${ATTIC_PUBLIC_KEY}"
             nix flake check
             for package in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
               nix build --fallback ".#${package}"

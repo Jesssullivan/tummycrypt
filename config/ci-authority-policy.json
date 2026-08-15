@@ -1,8 +1,13 @@
 {
-  "version": 2,
+  "version": 3,
   "issue": "TIN-2538",
-  "gloriousflywheel_revision": "693574567f9b879486782f1fb7f432c54a2fe294",
   "checkout_revision": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+  "public_read_front_door": {
+    "action_path": "./.github/actions/tcfs-public-read-nix-job",
+    "source_path": ".github/actions/tcfs-public-read-nix-job/action.yml",
+    "source_sha256": "8110be069476b984518dc6ff793592993d8a6e4a24b705389a83238a3aa43ed8",
+    "ownership": "TCFS-owned independently authored repository-local public-read bootstrap; not private GloriousFlywheel action source"
+  },
   "attic_public_read": {
     "public_key": "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=",
     "local_dev_substituter": "https://nix-cache.tinyland.dev/main"
@@ -28,12 +33,12 @@
         "darwin-authority-held": "TIN-2538"
       },
       "command_sha256": {
-        "linux-source": "546b4ac02cfa6ba83f9ee4a00e17151a735b4d97181278d9b8471fc8d2ed63a0",
-        "windows-cross": "0c86cd94cb1103feb1aed49db318ba6c6ebc245b76cd64ac19386e1e74dbd134"
+        "linux-source": "f9817905b7ac82e0d615eeac7a2577f22152842ed995ff71713245370d601b56",
+        "windows-cross": "33a806559d22a8377346e4f97826cce6b11cfca1308714446461d1a166e11397"
       },
       "pull_request_all_bases": true,
-      "front_door": "nix-job",
-      "topology_sha256": "ff30faa218f7a345fe235cd08db3b9241183251dcad43ee404dc4170f9d589eb"
+      "front_door": "./.github/actions/tcfs-public-read-nix-job",
+      "topology_sha256": "3b163bb61a99eba0a34d4bf42355628480b163f9a12553328d3bb9bf91aed845"
     },
     {
       "path": ".github/workflows/ci-live-storage.yml",
@@ -42,11 +47,11 @@
       },
       "held_jobs": {},
       "command_sha256": {
-        "fleet-live": "fe546799062e78d9e0be2917ed947fc1f1d8eb152823a7c9cebdfd873ed5acdf"
+        "fleet-live": "015ed2575332c03650e56303864e4e658a331408ba2e8c2002c67da7a6f62920"
       },
       "pull_request_all_bases": true,
-      "front_door": "nix-job",
-      "topology_sha256": "b84b88750d51728ad2c620b2354e758541cbf6c19c3019e8dfc69aff3c9bddea"
+      "front_door": "./.github/actions/tcfs-public-read-nix-job",
+      "topology_sha256": "9e568223faabd7fb46c3f806be186ef7cf83d64b45e078a65dc929f533d025eb"
     },
     {
       "path": ".github/workflows/nix-ci.yml",
@@ -58,11 +63,11 @@
         "nix-darwin-authority-held": "TIN-2538"
       },
       "command_sha256": {
-        "nix-linux": "9404929c63d5eb925b8421a4f12855bf290338b55982db628e0262d5e32f9d15"
+        "nix-linux": "101c965d971d08863ea5b4c66cfe48881c9c8726bdbe0c4900cf676d9976f990"
       },
       "pull_request_all_bases": true,
-      "front_door": "nix-job",
-      "topology_sha256": "14557f9d87699aaef03981652af0f97d002d26157e7a6ac4131d1ff35bed9062"
+      "front_door": "./.github/actions/tcfs-public-read-nix-job",
+      "topology_sha256": "86c17e246ddebb83dc8b433342ddfbb9fe0fc41d26ce67d42b4169c5d006d55a"
     }
   ],
   "disabled_legacy_workflows": [

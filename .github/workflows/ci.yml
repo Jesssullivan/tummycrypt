@@ -18,9 +18,10 @@ env:
   RUST_BACKTRACE: 1
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  # TIN-3127 public-read-only applies to Attic authentication. The pinned
-  # helper may separately retain the contents:read GitHub token for Nix source
-  # fetches; checked-out PR code receives no Attic token or inherited netrc.
+  # Public-read-only applies to Attic authentication. The repository-local
+  # TCFS bootstrap does not receive an Attic token or inherited netrc. The
+  # contents:read GitHub token boundary remains separately documented for Nix
+  # source fetches.
   ATTIC_TOKEN: ""
 
 jobs:
@@ -45,8 +46,8 @@ jobs:
       - name: Require the preinstalled GF Nix runtime
         run: command -v nix
 
-      - name: Attach GloriousFlywheel public-read-only cache runtime
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@693574567f9b879486782f1fb7f432c54a2fe294
+      - name: Attach the TCFS public-read cache runtime on GloriousFlywheel
+        uses: ./.github/actions/tcfs-public-read-nix-job
         env:
           GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ATTIC_TOKEN: ""
@@ -71,9 +72,12 @@ jobs:
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
             test "${NETRC:-}" = /dev/null
             test "$(nix config show netrc-file)" = /dev/null
-            nix config show extra-substituters |
+            nix config show substituters |
               tr ' ' '\n' |
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
+            nix config show trusted-public-keys |
+              tr ' ' '\n' |
+              grep -Fx -- "${ATTIC_PUBLIC_KEY}"
             # shellcheck disable=SC2016 # Expanded by the inner repo-toolchain shell.
             nix develop .#default --command bash -euo pipefail -c '
             python3 scripts/test-ci-authority-contract.py
@@ -120,8 +124,8 @@ jobs:
       - name: Require the preinstalled GF Nix runtime
         run: command -v nix
 
-      - name: Attach GloriousFlywheel public-read-only cache runtime
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@693574567f9b879486782f1fb7f432c54a2fe294
+      - name: Attach the TCFS public-read cache runtime on GloriousFlywheel
+        uses: ./.github/actions/tcfs-public-read-nix-job
         env:
           GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ATTIC_TOKEN: ""
@@ -145,9 +149,12 @@ jobs:
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
             test "${NETRC:-}" = /dev/null
             test "$(nix config show netrc-file)" = /dev/null
-            nix config show extra-substituters |
+            nix config show substituters |
               tr ' ' '\n' |
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
+            nix config show trusted-public-keys |
+              tr ' ' '\n' |
+              grep -Fx -- "${ATTIC_PUBLIC_KEY}"
             nix develop .#default --command \
             cargo check -p tcfs-cloudfilter \
               --target x86_64-pc-windows-gnu \

@@ -17,10 +17,12 @@ import unittest
 
 sys.dont_write_bytecode = True
 
-PENDING_GF_REVISION = "TIN_3127_SIGNED_MERGE_REVISION_PENDING"
-GF_ACTION_ROOT = "tinyland-inc/GloriousFlywheel/.github/actions/"
+LOCAL_PUBLIC_READ_ACTION = "./.github/actions/tcfs-public-read-nix-job"
+LOCAL_PUBLIC_READ_ACTION_FILE = ".github/actions/tcfs-public-read-nix-job/action.yml"
 ATTIC_PUBLIC_KEY = "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
+ATTIC_SERVER = "https://nix-cache.tinyland.dev"
 LOCAL_DEV_ATTIC_SUBSTITUTER = "https://nix-cache.tinyland.dev/main"
+BAZEL_REMOTE_CACHE = "https://bazel-cache.tinyland.dev"
 EXPECTED_SHA_EXPRESSION = (
     "${{ github.event_name == 'pull_request' && "
     "github.event.pull_request.head.sha || github.sha }}"
@@ -89,6 +91,7 @@ LIVE_STORAGE_PATHS = [
     "docker-compose.yml",
     "config/**",
     ".github/workflows/ci-live-storage.yml",
+    LOCAL_PUBLIC_READ_ACTION_FILE,
     "scripts/test-ci-authority-contract.py",
     "config/ci-authority-policy.json",
 ]
@@ -115,10 +118,6 @@ PROTECTED_TRIGGER_CONTRACTS: dict[str, dict[str, Any]] = {
 
 class ContractError(ValueError):
     """The checked-in CI authority contract is unsafe or incomplete."""
-
-
-class PromotionHold(ContractError):
-    """The source shape is reviewable but cannot be promoted."""
 
 
 def find_repo_root() -> Path:
@@ -202,33 +201,9 @@ def load_workflow(path: Path) -> tuple[dict[str, Any], str]:
     return document, source
 
 
-def semantic_topology(
-    value: Any,
-    *,
-    gf_revision: str,
-    key: str | None = None,
-) -> Any:
-    expected_nix_job = f"{GF_ACTION_ROOT}nix-job@{gf_revision}"
-    if key == "uses" and value == expected_nix_job:
-        return f"{GF_ACTION_ROOT}nix-job@<GF_REVISION>"
-    if isinstance(value, dict):
-        return {
-            item_key: semantic_topology(
-                item_value,
-                gf_revision=gf_revision,
-                key=item_key,
-            )
-            for item_key, item_value in value.items()
-        }
-    if isinstance(value, list):
-        return [semantic_topology(item, gf_revision=gf_revision) for item in value]
-    return value
-
-
-def topology_sha256(document: dict[str, Any], *, gf_revision: str) -> str:
-    topology = semantic_topology(document, gf_revision=gf_revision)
+def topology_sha256(document: dict[str, Any]) -> str:
     encoded = json.dumps(
-        topology,
+        document,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -239,13 +214,11 @@ def topology_sha256(document: dict[str, Any], *, gf_revision: str) -> str:
 def validate_topology(
     document: dict[str, Any],
     contract: dict[str, Any],
-    *,
-    gf_revision: str,
 ) -> None:
     expected = contract.get("topology_sha256")
     if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         raise ContractError(f"{contract['path']} lacks a reviewed topology digest")
-    actual = topology_sha256(document, gf_revision=gf_revision)
+    actual = topology_sha256(document)
     if actual != expected:
         raise ContractError(
             f"{contract['path']} workflow topology drifted "
@@ -325,12 +298,11 @@ def validate_action_refs(
     jobs: dict[str, dict[str, Any]],
     *,
     checkout_revision: str,
-    gf_revision: str,
     front_door: str,
 ) -> None:
     allowed = {
         f"actions/checkout@{checkout_revision}",
-        f"{GF_ACTION_ROOT}{front_door}@{gf_revision}",
+        front_door,
     }
     action_steps = all_action_steps(jobs)
     if not action_steps:
@@ -341,15 +313,12 @@ def validate_action_refs(
             raise ContractError(
                 f"{job_name} contains an unreviewed action reference: {action_ref!r}"
             )
-        revision = action_ref.rsplit("@", 1)[-1]
         if action_ref.startswith("actions/checkout@"):
+            revision = action_ref.rsplit("@", 1)[-1]
             if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
                 raise ContractError("checkout action revision must be immutable")
-        elif (
-            revision != PENDING_GF_REVISION
-            and re.fullmatch(r"[0-9a-f]{40}", revision) is None
-        ):
-            raise ContractError("GloriousFlywheel action revision must be immutable")
+        elif action_ref != LOCAL_PUBLIC_READ_ACTION:
+            raise ContractError("public-read action must be repository-local")
 
 
 def unique_step(
@@ -378,10 +347,9 @@ def validate_public_read_tuple(
     job: dict[str, Any],
     *,
     checkout_revision: str,
-    gf_revision: str,
     expected_command_sha256: str,
 ) -> None:
-    expected_action = f"{GF_ACTION_ROOT}nix-job@{gf_revision}"
+    expected_action = LOCAL_PUBLIC_READ_ACTION
     steps = workflow_steps(job_name, job)
     checkout_index, checkout = unique_step(
         job_name,
@@ -400,7 +368,7 @@ def validate_public_read_tuple(
     )
     if not checkout_index < nix_index < action_index:
         raise ContractError(
-            f"{job_name} must verify preinstalled Nix before entering GF"
+            f"{job_name} must verify preinstalled Nix before the public-read action"
         )
     if require_nix.get("run") != "command -v nix":
         raise ContractError(f"{job_name} Nix preflight must fail closed")
@@ -438,7 +406,9 @@ def validate_public_read_tuple(
     action_env = action.get("env")
     action_with = action.get("with")
     if not isinstance(action_env, dict) or not isinstance(action_with, dict):
-        raise ContractError(f"{job_name} GF action must define env and with mappings")
+        raise ContractError(
+            f"{job_name} public-read action must define env and with mappings"
+        )
     expected_action_env = {
         "GF_EXPECTED_RUNNER_ENVIRONMENT": "${{ runner.environment }}",
         "ATTIC_TOKEN": "",
@@ -449,7 +419,7 @@ def validate_public_read_tuple(
             "github.event.pull_request.base.sha || '' }}"
         )
     if action_env != expected_action_env:
-        raise ContractError(f"{job_name} GF action environment drifted")
+        raise ContractError(f"{job_name} public-read action environment drifted")
 
     exact_public_values = {
         "attic-enabled": "true",
@@ -468,12 +438,12 @@ def validate_public_read_tuple(
         if forbidden in action_with:
             raise ContractError(f"{job_name} must not override {forbidden}")
     if set(action_with) != set(exact_public_values) | {"command"}:
-        raise ContractError(f"{job_name} GF action inputs drifted")
+        raise ContractError(f"{job_name} public-read action inputs drifted")
     command = action_with.get("command")
     if not isinstance(command, str) or not command:
-        raise ContractError(f"{job_name} GF command is missing")
+        raise ContractError(f"{job_name} public-read command is missing")
     if hashlib.sha256(command.encode()).hexdigest() != expected_command_sha256:
-        raise ContractError(f"{job_name} GF command body drifted")
+        raise ContractError(f"{job_name} public-read command body drifted")
     for required in (
         'test "${GF_EXPECTED_RUNNER_ENVIRONMENT:-}" = self-hosted',
         'test "${ATTIC_TOKEN:-}" = ""',
@@ -486,7 +456,10 @@ def validate_public_read_tuple(
         'test "${NIX_USER_CONF_FILES:-}" = /dev/null',
         'test "${NETRC:-}" = /dev/null',
         'test "$(nix config show netrc-file)" = /dev/null',
+        "nix config show substituters |",
         'grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"',
+        "nix config show trusted-public-keys |",
+        'grep -Fx -- "${ATTIC_PUBLIC_KEY}"',
     ):
         if required not in command:
             raise ContractError(f"{job_name} lacks public-read check: {required}")
@@ -498,7 +471,7 @@ def validate_public_read_tuple(
             )
     for marker in WORKLOAD_MARKERS[(path, job_name)]:
         if marker not in command:
-            raise ContractError(f"{job_name} workload escaped the GF wrapper")
+            raise ContractError(f"{job_name} workload escaped the public-read wrapper")
 
     trailing_steps = steps[action_index + 1 :]
     if path == ".github/workflows/ci-live-storage.yml":
@@ -507,15 +480,17 @@ def validate_public_read_tuple(
             ("Print compose logs on failure", "failure()"),
             ("Tear down compose stack", "always()"),
         ]:
-            raise ContractError(f"{job_name} has unaudited work after the GF wrapper")
+            raise ContractError(
+                f"{job_name} has unaudited work after the public-read wrapper"
+            )
         for step in trailing_steps:
             trailing_run = str(step.get("run", ""))
             if re.search(r"\b(?:nix|cargo)\b", trailing_run):
                 raise ContractError(
-                    f"{job_name} has Nix-dependent work after the GF wrapper"
+                    f"{job_name} has Nix-dependent work after the public-read wrapper"
                 )
     elif trailing_steps:
-        raise ContractError(f"{job_name} has work after the GF wrapper")
+        raise ContractError(f"{job_name} has work after the public-read wrapper")
 
 
 def validate_held_job(job_name: str, job: dict[str, Any], issue: str) -> None:
@@ -555,11 +530,7 @@ def validate_protected_workflow(
     contract: dict[str, Any],
     policy: dict[str, Any],
 ) -> None:
-    validate_topology(
-        document,
-        contract,
-        gf_revision=policy["gloriousflywheel_revision"],
-    )
+    validate_topology(document, contract)
     validate_protected_triggers(document, contract)
     validate_permissions(document)
     path = contract["path"]
@@ -569,8 +540,10 @@ def validate_protected_workflow(
     front_door = contract["front_door"]
     if not isinstance(path, str) or not isinstance(expected_jobs, dict):
         raise ContractError("protected policy entry has an invalid shape")
-    if not isinstance(held_jobs, dict) or front_door != "nix-job":
-        raise ContractError("protected workflows must use the nix-job front door")
+    if not isinstance(held_jobs, dict) or front_door != LOCAL_PUBLIC_READ_ACTION:
+        raise ContractError(
+            "protected workflows must use the local public-read front door"
+        )
     productive_jobs = set(expected_jobs) - set(held_jobs)
     if (
         not isinstance(command_sha256, dict)
@@ -580,7 +553,7 @@ def validate_protected_workflow(
             for value in command_sha256.values()
         )
     ):
-        raise ContractError("protected GF command digest inventory drifted")
+        raise ContractError("protected public-read command digest inventory drifted")
 
     if HOSTED_RUNNER_PATTERN.search(source):
         raise ContractError("GitHub-hosted runner label is forbidden")
@@ -643,14 +616,12 @@ def validate_protected_workflow(
                 job_name,
                 job,
                 checkout_revision=policy["checkout_revision"],
-                gf_revision=policy["gloriousflywheel_revision"],
                 expected_command_sha256=command_sha256[job_name],
             )
 
     validate_action_refs(
         jobs,
         checkout_revision=policy["checkout_revision"],
-        gf_revision=policy["gloriousflywheel_revision"],
         front_door=front_door,
     )
 
@@ -673,7 +644,7 @@ def validate_protected_workflow(
         live_command = next(
             step["with"]["command"]
             for step in workflow_steps("fleet-live", jobs["fleet-live"])
-            if step.get("uses", "").startswith(GF_ACTION_ROOT)
+            if step.get("uses") == LOCAL_PUBLIC_READ_ACTION
         )
         for required in (
             'test -n "${DOCKER_HOST:-}"',
@@ -692,10 +663,9 @@ def validate_disabled_workflow(
     document: dict[str, Any],
     contract: dict[str, Any],
     *,
-    gf_revision: str,
     protected_job_index: dict[tuple[str, str], str],
 ) -> None:
-    validate_topology(document, contract, gf_revision=gf_revision)
+    validate_topology(document, contract)
     expected_triggers = contract["triggers"]
     actual_triggers = workflow_triggers(document)
     if actual_triggers != expected_triggers:
@@ -790,7 +760,6 @@ def validate_inventory(root: Path, policy: dict[str, Any]) -> None:
         validate_disabled_workflow(
             document,
             entry,
-            gf_revision=policy["gloriousflywheel_revision"],
             protected_job_index=protected_job_index(policy),
         )
 
@@ -845,8 +814,143 @@ def validate_attic_public_read(root: Path, policy: dict[str, Any]) -> None:
             raise ContractError(f"flake.nix contains an ambiguous Attic token: {token}")
 
 
+def validate_local_public_read_action(root: Path, policy: dict[str, Any]) -> None:
+    front_door = policy.get("public_read_front_door")
+    if not isinstance(front_door, dict) or set(front_door) != {
+        "action_path",
+        "source_path",
+        "source_sha256",
+        "ownership",
+    }:
+        raise ContractError("local public-read front-door policy drifted")
+    if front_door.get("action_path") != LOCAL_PUBLIC_READ_ACTION:
+        raise ContractError("local public-read action path drifted")
+    if front_door.get("source_path") != LOCAL_PUBLIC_READ_ACTION_FILE:
+        raise ContractError("local public-read action source path drifted")
+    if front_door.get("ownership") != (
+        "TCFS-owned independently authored repository-local public-read "
+        "bootstrap; not private GloriousFlywheel action source"
+    ):
+        raise ContractError("local public-read action ownership claim drifted")
+
+    source_path = root / LOCAL_PUBLIC_READ_ACTION_FILE
+    source = source_path.read_text(encoding="utf-8")
+    expected_digest = front_door.get("source_sha256")
+    if (
+        not isinstance(expected_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+        or hashlib.sha256(source.encode()).hexdigest() != expected_digest
+    ):
+        raise ContractError("local public-read action source digest drifted")
+    if "tinyland-inc/gloriousflywheel" in source.lower():
+        raise ContractError(
+            "local public-read action must not reference private GF source"
+        )
+
+    document, _ = load_workflow(source_path)
+    if set(document) != {"name", "description", "inputs", "runs"}:
+        raise ContractError("local public-read action top-level shape drifted")
+    inputs = document.get("inputs")
+    expected_inputs = {
+        "attic-enabled",
+        "attic-public-key",
+        "attic-public-read-only",
+        "attic-public-read-site",
+        "push-cache",
+        "require-cache-push",
+        "command",
+    }
+    if not isinstance(inputs, dict) or set(inputs) != expected_inputs:
+        raise ContractError("local public-read action input inventory drifted")
+    for name, value in inputs.items():
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"description", "required"}
+            or value.get("required") is not True
+            or not isinstance(value.get("description"), str)
+            or not value["description"].strip()
+        ):
+            raise ContractError(f"local public-read action input drifted: {name}")
+
+    runs = document.get("runs")
+    if not isinstance(runs, dict) or set(runs) != {"using", "steps"}:
+        raise ContractError("local public-read action runtime shape drifted")
+    steps = runs.get("steps")
+    if (
+        runs.get("using") != "composite"
+        or not isinstance(steps, list)
+        or len(steps) != 1
+    ):
+        raise ContractError("local public-read action must be one composite step")
+    step = steps[0]
+    if not isinstance(step, dict) or set(step) != {"name", "shell", "env", "run"}:
+        raise ContractError("local public-read action step shape drifted")
+    if step.get("shell") != "bash":
+        raise ContractError("local public-read action shell drifted")
+
+    expected_nix_config = (
+        f"extra-substituters = {LOCAL_DEV_ATTIC_SUBSTITUTER}\n"
+        f"extra-trusted-public-keys = {ATTIC_PUBLIC_KEY}\n"
+        "netrc-file = /dev/null\n"
+    )
+    expected_env = {
+        "GF_COMMAND": "${{ inputs.command }}",
+        "GF_EXPECTED_RUNNER_ENVIRONMENT": ("${{ env.GF_EXPECTED_RUNNER_ENVIRONMENT }}"),
+        "GF_INPUT_ATTIC_ENABLED": "${{ inputs.attic-enabled }}",
+        "GF_INPUT_ATTIC_PUBLIC_KEY": "${{ inputs.attic-public-key }}",
+        "GF_INPUT_ATTIC_PUBLIC_READ_ONLY": ("${{ inputs.attic-public-read-only }}"),
+        "GF_INPUT_ATTIC_PUBLIC_READ_SITE": "${{ inputs.attic-public-read-site }}",
+        "GF_INPUT_PUSH_CACHE": "${{ inputs.push-cache }}",
+        "GF_INPUT_REQUIRE_CACHE_PUSH": "${{ inputs.require-cache-push }}",
+        "ATTIC_TOKEN": "${{ env.ATTIC_TOKEN }}",
+        "ATTIC_SERVER": ATTIC_SERVER,
+        "ATTIC_CACHE": "main",
+        "ATTIC_PUBLIC_KEY": ATTIC_PUBLIC_KEY,
+        "ATTIC_PUBLIC_READ_SITE": "${{ inputs.attic-public-read-site }}",
+        "BAZEL_REMOTE_CACHE": BAZEL_REMOTE_CACHE,
+        "GF_BAZEL_SUBSTRATE_MODE": "shared-cache-backed",
+        "NIX_USER_CONF_FILES": "/dev/null",
+        "NETRC": "/dev/null",
+        "NIX_CONFIG": expected_nix_config,
+    }
+    if step.get("env") != expected_env:
+        raise ContractError("local public-read action environment drifted")
+
+    run = step.get("run")
+    if not isinstance(run, str):
+        raise ContractError("local public-read action command is missing")
+    for required in (
+        'test "${GF_EXPECTED_RUNNER_ENVIRONMENT:-}" = self-hosted',
+        'test "${GF_INPUT_ATTIC_ENABLED:-}" = true',
+        'test "${GF_INPUT_ATTIC_PUBLIC_KEY:-}" = "${ATTIC_PUBLIC_KEY}"',
+        'test "${GF_INPUT_ATTIC_PUBLIC_READ_ONLY:-}" = true',
+        "tcfs-linux-source|tcfs-windows-cross|tcfs-live-storage|tcfs-nix-linux",
+        'test "${GF_INPUT_PUSH_CACHE:-}" = false',
+        'test "${GF_INPUT_REQUIRE_CACHE_PUSH:-}" = false',
+        'test "${ATTIC_TOKEN:-}" = ""',
+        'test "${NIX_USER_CONF_FILES:-}" = /dev/null',
+        'test "${NETRC:-}" = /dev/null',
+        'bash -euo pipefail -c "${GF_COMMAND}"',
+    ):
+        if required not in run:
+            raise ContractError(f"local public-read action lacks guard: {required}")
+    lowered = run.lower()
+    for forbidden in (
+        "attic login",
+        "attic push",
+        "github_env",
+        "secrets.",
+        "push-cache=true",
+        "require-cache-push=true",
+    ):
+        if forbidden in lowered:
+            raise ContractError(
+                f"local public-read action contains forbidden capability: {forbidden}"
+            )
+
+
 def validate_current_tree(root: Path, policy: dict[str, Any]) -> None:
-    if policy.get("version") != 2 or policy.get("issue") != "TIN-2538":
+    if policy.get("version") != 3 or policy.get("issue") != "TIN-2538":
         raise ContractError("CI authority policy identity or version drifted")
     live_hold = policy.get("live_proof_hold")
     if (
@@ -869,25 +973,10 @@ def validate_current_tree(root: Path, policy: dict[str, Any]) -> None:
     validate_inventory(root, policy)
     validate_actionlint_labels(root, policy)
     validate_attic_public_read(root, policy)
+    validate_local_public_read_action(root, policy)
     for contract in policy["protected_proof"]:
         document, source = load_workflow(root / contract["path"])
         validate_protected_workflow(document, source, contract, policy)
-
-
-def validate_promotable_revision(policy: dict[str, Any]) -> None:
-    revision = policy.get("gloriousflywheel_revision")
-    hold = policy.get("promotion_hold")
-    if revision == PENDING_GF_REVISION:
-        if not isinstance(hold, dict) or hold.get("issue") != "TIN-3127":
-            raise ContractError("pending GF revision lacks its exact TIN-3127 hold")
-        raise PromotionHold(
-            "TIN-3127 signed merge revision is unavailable; "
-            "the protected workflows are intentionally non-promotable"
-        )
-    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-        raise ContractError("GloriousFlywheel revision must be a full commit SHA")
-    if hold is not None:
-        raise ContractError("resolved GloriousFlywheel revision retains a stale hold")
 
 
 class CiAuthorityContractTest(unittest.TestCase):
@@ -916,15 +1005,88 @@ class CiAuthorityContractTest(unittest.TestCase):
                     self.policy,
                 )
 
+    def assert_local_action_rejected(
+        self,
+        old: str,
+        new: str,
+        message: str,
+    ) -> None:
+        source = (self.root / LOCAL_PUBLIC_READ_ACTION_FILE).read_text(encoding="utf-8")
+        self.assertIn(old, source)
+        unsafe = source.replace(old, new, 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate_root = Path(temporary)
+            candidate = candidate_root / LOCAL_PUBLIC_READ_ACTION_FILE
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text(unsafe, encoding="utf-8")
+            policy = copy.deepcopy(self.policy)
+            policy["public_read_front_door"]["source_sha256"] = hashlib.sha256(
+                unsafe.encode()
+            ).hexdigest()
+            with self.assertRaisesRegex(ContractError, message):
+                validate_local_public_read_action(candidate_root, policy)
+
     def test_current_tree_is_closed_and_fail_closed(self) -> None:
         validate_current_tree(self.root, self.policy)
 
-    def test_revision_promotion_state_is_explicit(self) -> None:
-        if self.policy["gloriousflywheel_revision"] == PENDING_GF_REVISION:
-            with self.assertRaisesRegex(PromotionHold, "TIN-3127"):
-                validate_promotable_revision(self.policy)
-        else:
-            validate_promotable_revision(self.policy)
+    def test_local_front_door_is_source_bound(self) -> None:
+        validate_local_public_read_action(self.root, self.policy)
+
+    def test_local_front_door_rejects_public_read_boundary_mutations(self) -> None:
+        mutations = [
+            (
+                "extra-substituters = https://nix-cache.tinyland.dev/main",
+                "extra-substituters = https://cache.invalid/main",
+                "environment drifted",
+            ),
+            (
+                f"extra-trusted-public-keys = {ATTIC_PUBLIC_KEY}",
+                "extra-trusted-public-keys = main:" + "A" * 44,
+                "environment drifted",
+            ),
+            (
+                "netrc-file = /dev/null",
+                "netrc-file = /home/runner/.netrc",
+                "environment drifted",
+            ),
+            (
+                "ATTIC_TOKEN: ${{ env.ATTIC_TOKEN }}",
+                "ATTIC_TOKEN: inherited",
+                "environment drifted",
+            ),
+            (
+                'test "${GF_INPUT_PUSH_CACHE:-}" = false',
+                'test "${GF_INPUT_PUSH_CACHE:-}" = true',
+                "lacks guard",
+            ),
+            (
+                "tcfs-linux-source|tcfs-windows-cross|tcfs-live-storage|tcfs-nix-linux",
+                "tcfs-linux-source|tcfs-windows-cross|tcfs-live-storage|unreviewed",
+                "lacks guard",
+            ),
+        ]
+        for old, new, message in mutations:
+            self.assert_local_action_rejected(old, new, message)
+
+    def test_local_front_door_rejects_write_and_credential_inputs(self) -> None:
+        self.assert_local_action_rejected(
+            "  command:\n",
+            "  attic-token:\n"
+            "    description: Forbidden cache credential\n"
+            "    required: true\n"
+            "  command:\n",
+            "input inventory drifted",
+        )
+
+        source = (self.root / LOCAL_PUBLIC_READ_ACTION_FILE).read_text(encoding="utf-8")
+        unsafe = source + "\n# digest drift\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate_root = Path(temporary)
+            candidate = candidate_root / LOCAL_PUBLIC_READ_ACTION_FILE
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text(unsafe, encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "source digest drifted"):
+                validate_local_public_read_action(candidate_root, self.policy)
 
     def test_quoted_job_and_trigger_keys_are_rejected(self) -> None:
         path = ".github/workflows/ci.yml"
@@ -966,10 +1128,7 @@ class CiAuthorityContractTest(unittest.TestCase):
 
             for unsafe in unsafe_documents:
                 contract = copy.deepcopy(self.contracts[path])
-                contract["topology_sha256"] = topology_sha256(
-                    unsafe,
-                    gf_revision=self.policy["gloriousflywheel_revision"],
-                )
+                contract["topology_sha256"] = topology_sha256(unsafe)
                 with self.assertRaisesRegex(
                     ContractError,
                     "protected trigger contract drifted",
@@ -1096,10 +1255,7 @@ class CiAuthorityContractTest(unittest.TestCase):
 
                 for unsafe in variants:
                     contract = copy.deepcopy(self.contracts[path])
-                    contract["topology_sha256"] = topology_sha256(
-                        unsafe,
-                        gf_revision=self.policy["gloriousflywheel_revision"],
-                    )
+                    contract["topology_sha256"] = topology_sha256(unsafe)
                     with self.assertRaisesRegex(
                         ContractError,
                         "exact same-repository fork guard",
@@ -1111,23 +1267,20 @@ class CiAuthorityContractTest(unittest.TestCase):
                             self.policy,
                         )
 
-    def test_semantic_topology_binds_bodies_order_and_non_gf_actions(self) -> None:
+    def test_semantic_topology_binds_bodies_order_and_action_paths(self) -> None:
         path = ".github/workflows/ci.yml"
         document, _ = load_workflow(self.root / path)
         contract = self.contracts[path]
-        gf_revision = self.policy["gloriousflywheel_revision"]
         linux_steps = document["jobs"]["linux-source"]["steps"]
         action = next(
-            step
-            for step in linux_steps
-            if str(step.get("uses", "")).startswith(GF_ACTION_ROOT)
+            step for step in linux_steps if step.get("uses") == LOCAL_PUBLIC_READ_ACTION
         )
 
         body_drift = copy.deepcopy(document)
         body_action = next(
             step
             for step in body_drift["jobs"]["linux-source"]["steps"]
-            if str(step.get("uses", "")).startswith(GF_ACTION_ROOT)
+            if step.get("uses") == LOCAL_PUBLIC_READ_ACTION
         )
         body_action["with"]["command"] += "\n# one-byte-authority-drift"
 
@@ -1146,37 +1299,24 @@ class CiAuthorityContractTest(unittest.TestCase):
         self.assertIn("command", action["with"])
         for unsafe in (body_drift, run_drift, order_drift, checkout_drift):
             with self.assertRaisesRegex(ContractError, "topology drifted"):
-                validate_topology(
-                    unsafe,
-                    contract,
-                    gf_revision=gf_revision,
-                )
+                validate_topology(unsafe, contract)
 
-    def test_gf_revision_normalization_is_policy_bound(self) -> None:
+    def test_local_action_path_is_policy_bound(self) -> None:
         path = ".github/workflows/ci.yml"
         document, source = load_workflow(self.root / path)
-        current_revision = self.policy["gloriousflywheel_revision"]
-        next_revision = "1" * 40
         changed = copy.deepcopy(document)
         for job in changed["jobs"].values():
             for step in job["steps"]:
-                if step.get("uses") == (f"{GF_ACTION_ROOT}nix-job@{current_revision}"):
-                    step["uses"] = f"{GF_ACTION_ROOT}nix-job@{next_revision}"
+                if step.get("uses") == LOCAL_PUBLIC_READ_ACTION:
+                    step["uses"] = "./.github/actions/unreviewed"
 
-        self.assertEqual(
-            topology_sha256(document, gf_revision=current_revision),
-            topology_sha256(changed, gf_revision=next_revision),
-        )
         self.assertNotEqual(
-            topology_sha256(document, gf_revision=current_revision),
-            topology_sha256(changed, gf_revision=current_revision),
+            topology_sha256(document),
+            topology_sha256(changed),
         )
 
         contract = copy.deepcopy(self.contracts[path])
-        contract["topology_sha256"] = topology_sha256(
-            changed,
-            gf_revision=current_revision,
-        )
+        contract["topology_sha256"] = topology_sha256(changed)
         with self.assertRaises(ContractError):
             validate_protected_workflow(
                 changed,
@@ -1184,6 +1324,66 @@ class CiAuthorityContractTest(unittest.TestCase):
                 contract,
                 self.policy,
             )
+
+    def test_effective_nix_setting_proofs_use_canonical_names(self) -> None:
+        for path, contract in self.contracts.items():
+            document, source = load_workflow(self.root / path)
+            for job_name in contract["command_sha256"]:
+                changed = copy.deepcopy(document)
+                action = next(
+                    step
+                    for step in changed["jobs"][job_name]["steps"]
+                    if step.get("uses") == LOCAL_PUBLIC_READ_ACTION
+                )
+                command = action["with"]["command"]
+                self.assertIn("nix config show substituters |", command)
+                action["with"]["command"] = command.replace(
+                    "nix config show substituters |",
+                    "nix config show extra-substituters |",
+                    1,
+                )
+                changed_contract = copy.deepcopy(contract)
+                changed_contract["topology_sha256"] = topology_sha256(changed)
+                changed_contract["command_sha256"][job_name] = hashlib.sha256(
+                    action["with"]["command"].encode()
+                ).hexdigest()
+                with self.assertRaisesRegex(
+                    ContractError,
+                    "lacks public-read check: nix config show substituters",
+                ):
+                    validate_protected_workflow(
+                        changed,
+                        source,
+                        changed_contract,
+                        self.policy,
+                    )
+
+                missing_key = copy.deepcopy(document)
+                key_action = next(
+                    step
+                    for step in missing_key["jobs"][job_name]["steps"]
+                    if step.get("uses") == LOCAL_PUBLIC_READ_ACTION
+                )
+                key_action["with"]["command"] = key_action["with"]["command"].replace(
+                    "nix config show trusted-public-keys |",
+                    "nix config show substituters |",
+                    1,
+                )
+                key_contract = copy.deepcopy(contract)
+                key_contract["topology_sha256"] = topology_sha256(missing_key)
+                key_contract["command_sha256"][job_name] = hashlib.sha256(
+                    key_action["with"]["command"].encode()
+                ).hexdigest()
+                with self.assertRaisesRegex(
+                    ContractError,
+                    "lacks public-read check: nix config show trusted-public-keys",
+                ):
+                    validate_protected_workflow(
+                        missing_key,
+                        source,
+                        key_contract,
+                        self.policy,
+                    )
 
     def test_accept_flake_config_variants_are_rejected(self) -> None:
         path = ".github/workflows/ci.yml"
@@ -1205,10 +1405,9 @@ class CiAuthorityContractTest(unittest.TestCase):
                     self.policy,
                 )
 
-    def test_workload_cannot_escape_gf_wrapper(self) -> None:
+    def test_workload_cannot_escape_public_read_wrapper(self) -> None:
         path = ".github/workflows/ci.yml"
         document, source = load_workflow(self.root / path)
-        gf_revision = self.policy["gloriousflywheel_revision"]
 
         escaped = copy.deepcopy(document)
         escaped["jobs"]["linux-source"]["steps"].append(
@@ -1218,11 +1417,10 @@ class CiAuthorityContractTest(unittest.TestCase):
             }
         )
         escaped_contract = copy.deepcopy(self.contracts[path])
-        escaped_contract["topology_sha256"] = topology_sha256(
-            escaped,
-            gf_revision=gf_revision,
-        )
-        with self.assertRaisesRegex(ContractError, "work after the GF wrapper"):
+        escaped_contract["topology_sha256"] = topology_sha256(escaped)
+        with self.assertRaisesRegex(
+            ContractError, "work after the public-read wrapper"
+        ):
             validate_protected_workflow(
                 escaped,
                 source,
@@ -1234,16 +1432,13 @@ class CiAuthorityContractTest(unittest.TestCase):
         missing_action = next(
             step
             for step in missing["jobs"]["linux-source"]["steps"]
-            if str(step.get("uses", "")).startswith(GF_ACTION_ROOT)
+            if step.get("uses") == LOCAL_PUBLIC_READ_ACTION
         )
         missing_action["with"]["command"] = missing_action["with"]["command"].replace(
             "cargo deny check", "true", 1
         )
         missing_contract = copy.deepcopy(self.contracts[path])
-        missing_contract["topology_sha256"] = topology_sha256(
-            missing,
-            gf_revision=gf_revision,
-        )
+        missing_contract["topology_sha256"] = topology_sha256(missing)
         missing_contract["command_sha256"]["linux-source"] = hashlib.sha256(
             missing_action["with"]["command"].encode()
         ).hexdigest()
@@ -1262,14 +1457,11 @@ class CiAuthorityContractTest(unittest.TestCase):
         action = next(
             step
             for step in changed["jobs"]["linux-source"]["steps"]
-            if str(step.get("uses", "")).startswith(GF_ACTION_ROOT)
+            if step.get("uses") == LOCAL_PUBLIC_READ_ACTION
         )
         action["with"]["attic-public-key"] = "main:" + "A" * 44
         contract = copy.deepcopy(self.contracts[path])
-        contract["topology_sha256"] = topology_sha256(
-            changed,
-            gf_revision=self.policy["gloriousflywheel_revision"],
-        )
+        contract["topology_sha256"] = topology_sha256(changed)
         with self.assertRaisesRegex(ContractError, "attic-public-key"):
             validate_protected_workflow(
                 changed,
@@ -1308,14 +1500,13 @@ class CiAuthorityContractTest(unittest.TestCase):
         path = ".github/workflows/ci.yml"
         source = self.sources[path]
         checkout = self.policy["checkout_revision"]
-        gf_revision = self.policy["gloriousflywheel_revision"]
         variants = [
             source + "\n# actions/cache@" + "0" * 40 + "\n",
             source + "\n# cache-to: type=gha,mode=max\n",
             source.replace(f"actions/checkout@{checkout}", "actions/checkout@main"),
             source.replace(
-                f"{GF_ACTION_ROOT}nix-job@{gf_revision}",
-                f"{GF_ACTION_ROOT}nix-job@{'0' * 40}",
+                LOCAL_PUBLIC_READ_ACTION,
+                "tinyland-inc/GloriousFlywheel/.github/actions/nix-job@" + "0" * 40,
                 1,
             ),
             source.replace("persist-credentials: false", "persist-credentials: true"),
@@ -1393,7 +1584,6 @@ class CiAuthorityContractTest(unittest.TestCase):
                 validate_disabled_workflow(
                     document,
                     unsafe,
-                    gf_revision=self.policy["gloriousflywheel_revision"],
                     protected_job_index=protected_job_index(self.policy),
                 )
 
@@ -1425,7 +1615,6 @@ class CiAuthorityContractTest(unittest.TestCase):
                     validate_disabled_workflow(
                         document,
                         entry,
-                        gf_revision=self.policy["gloriousflywheel_revision"],
                         protected_job_index=protected_job_index(self.policy),
                     )
 
@@ -1435,10 +1624,7 @@ def print_topology(root: Path, policy: dict[str, Any]) -> None:
     report = {}
     for entry in entries:
         document, _ = load_workflow(root / entry["path"])
-        report[entry["path"]] = topology_sha256(
-            document,
-            gf_revision=policy["gloriousflywheel_revision"],
-        )
+        report[entry["path"]] = topology_sha256(document)
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
@@ -1447,7 +1633,7 @@ def main() -> int:
     parser.add_argument(
         "--source-hold-ok",
         action="store_true",
-        help="validate the source shape while retaining the explicit TIN-3127 hold",
+        help="compatibility alias for source-only CI authority validation",
     )
     parser.add_argument(
         "--print-topology",
@@ -1465,11 +1651,6 @@ def main() -> int:
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     if not result.wasSuccessful():
         return 1
-    try:
-        validate_promotable_revision(policy)
-    except PromotionHold as hold:
-        print(f"HOLD: {hold}", file=sys.stderr)
-        return 0 if args.source_hold_ok else 2
     return 0
 
 

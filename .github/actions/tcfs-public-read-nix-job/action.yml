@@ -1,0 +1,74 @@
+name: TCFS public-read Nix job
+description: Run a TCFS command with the public Tinyland Nix cache on sanctioned self-hosted compute
+
+inputs:
+  attic-enabled:
+    description: Require the public Attic substituter
+    required: true
+  attic-public-key:
+    description: Trusted public key for the public Attic cache
+    required: true
+  attic-public-read-only:
+    description: Require a read-only cache session
+    required: true
+  attic-public-read-site:
+    description: Audited TCFS workload identity
+    required: true
+  push-cache:
+    description: Cache publication must remain disabled
+    required: true
+  require-cache-push:
+    description: Cache publication must not be required
+    required: true
+  command:
+    description: Repository-owned command body to execute under the public-read environment
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate and run the TCFS public-read workload
+      shell: bash
+      env:
+        GF_COMMAND: ${{ inputs.command }}
+        GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ env.GF_EXPECTED_RUNNER_ENVIRONMENT }}
+        GF_INPUT_ATTIC_ENABLED: ${{ inputs.attic-enabled }}
+        GF_INPUT_ATTIC_PUBLIC_KEY: ${{ inputs.attic-public-key }}
+        GF_INPUT_ATTIC_PUBLIC_READ_ONLY: ${{ inputs.attic-public-read-only }}
+        GF_INPUT_ATTIC_PUBLIC_READ_SITE: ${{ inputs.attic-public-read-site }}
+        GF_INPUT_PUSH_CACHE: ${{ inputs.push-cache }}
+        GF_INPUT_REQUIRE_CACHE_PUSH: ${{ inputs.require-cache-push }}
+        ATTIC_TOKEN: ${{ env.ATTIC_TOKEN }}
+        ATTIC_SERVER: https://nix-cache.tinyland.dev
+        ATTIC_CACHE: main
+        ATTIC_PUBLIC_KEY: main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
+        ATTIC_PUBLIC_READ_SITE: ${{ inputs.attic-public-read-site }}
+        BAZEL_REMOTE_CACHE: https://bazel-cache.tinyland.dev
+        GF_BAZEL_SUBSTRATE_MODE: shared-cache-backed
+        NIX_USER_CONF_FILES: /dev/null
+        NETRC: /dev/null
+        NIX_CONFIG: |
+          extra-substituters = https://nix-cache.tinyland.dev/main
+          extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
+          netrc-file = /dev/null
+      run: |
+        set -euo pipefail
+        test "${GF_EXPECTED_RUNNER_ENVIRONMENT:-}" = self-hosted
+        test "${GF_INPUT_ATTIC_ENABLED:-}" = true
+        test "${GF_INPUT_ATTIC_PUBLIC_KEY:-}" = "${ATTIC_PUBLIC_KEY}"
+        test "${GF_INPUT_ATTIC_PUBLIC_READ_ONLY:-}" = true
+        case "${GF_INPUT_ATTIC_PUBLIC_READ_SITE:-}" in
+          tcfs-linux-source|tcfs-windows-cross|tcfs-live-storage|tcfs-nix-linux) ;;
+          *)
+            echo "::error title=Unreviewed public-read site::${GF_INPUT_ATTIC_PUBLIC_READ_SITE:-<empty>}"
+            exit 1
+            ;;
+        esac
+        test "${GF_INPUT_PUSH_CACHE:-}" = false
+        test "${GF_INPUT_REQUIRE_CACHE_PUSH:-}" = false
+        test "${ATTIC_TOKEN:-}" = ""
+        test "${NIX_USER_CONF_FILES:-}" = /dev/null
+        test "${NETRC:-}" = /dev/null
+        test -n "${GF_COMMAND:-}"
+        command -v nix
+        bash -euo pipefail -c "${GF_COMMAND}"

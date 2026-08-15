@@ -1,11 +1,11 @@
 name: CI Live Storage
 
 # TIN-2538: live-storage proof is valid only on the shared GloriousFlywheel
-# DinD capability lane with immutable service images and the TIN-3127
-# public-read-only Nix front door. Public-only applies to Attic authentication:
-# the pinned helper may retain the repository-scoped contents:read GitHub token
-# for Nix source fetches. A missing personal-owner binding queues this job; it
-# never falls back to hosted execution.
+# DinD capability lane with immutable service images and the repository-local
+# TCFS public-read-only Nix front door. Public-only applies to Attic authentication.
+# The contents:read GitHub token boundary remains separately documented for Nix
+# source fetches. A missing personal-owner binding queues this job; it never
+# falls back to hosted execution.
 
 on:
   pull_request:
@@ -17,6 +17,7 @@ on:
       - "docker-compose.yml"
       - "config/**"
       - ".github/workflows/ci-live-storage.yml"
+      - ".github/actions/tcfs-public-read-nix-job/action.yml"
       - "scripts/test-ci-authority-contract.py"
       - "config/ci-authority-policy.json"
   push:
@@ -29,6 +30,7 @@ on:
       - "docker-compose.yml"
       - "config/**"
       - ".github/workflows/ci-live-storage.yml"
+      - ".github/actions/tcfs-public-read-nix-job/action.yml"
       - "scripts/test-ci-authority-contract.py"
       - "config/ci-authority-policy.json"
   workflow_dispatch:
@@ -75,8 +77,8 @@ jobs:
       - name: Require the preinstalled GF Nix runtime
         run: command -v nix
 
-      - name: Attach GloriousFlywheel public-read-only DinD cache runtime
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/nix-job@693574567f9b879486782f1fb7f432c54a2fe294
+      - name: Attach the TCFS public-read DinD cache runtime on GloriousFlywheel
+        uses: ./.github/actions/tcfs-public-read-nix-job
         env:
           GF_EXPECTED_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ATTIC_TOKEN: ""
@@ -101,9 +103,12 @@ jobs:
             test "${NIX_USER_CONF_FILES:-}" = /dev/null
             test "${NETRC:-}" = /dev/null
             test "$(nix config show netrc-file)" = /dev/null
-            nix config show extra-substituters |
+            nix config show substituters |
               tr ' ' '\n' |
               grep -Fx -- "${ATTIC_SERVER%/}/${ATTIC_CACHE}"
+            nix config show trusted-public-keys |
+              tr ' ' '\n' |
+              grep -Fx -- "${ATTIC_PUBLIC_KEY}"
             docker version
             docker info
             mkdir -p .github/compose-overrides
