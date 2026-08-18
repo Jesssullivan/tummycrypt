@@ -206,9 +206,11 @@ incident freeze:
 5. PR #551/TIN-2853 landed on 2026-07-18 as merge commit `929bbf1`; that
    accepts the source seam but does not clear the remaining live-work freeze.
 
-TIN-2658 therefore remains In Review rather than Done. TIN-2856 blocks any
-further live resolver, enrollment/TOTP, deploy, or crypto ceremony. When that
-freeze clears, closure requires explicit content decisions, stale-ref handling,
+TIN-2658 therefore remains In Review rather than Done. TIN-2856 containment
+and harness work is accepted, but its credential-rotation ceremony has not
+executed. Parent TIN-2801 and `LAB_DEPLOY_FREEZE` remain the current gates on
+live resolver, enrollment/TOTP, deploy, and crypto ceremonies. When those
+gates clear, closure requires explicit content decisions, stale-ref handling,
 and final Git/content/state convergence evidence; Git-only success is not a
 whole-root convergence claim.
 
