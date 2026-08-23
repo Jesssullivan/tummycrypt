@@ -123,15 +123,14 @@ export TCFS_S3_BUCKET=tcfs
 export AWS_ACCESS_KEY_ID=<from seaweedfs-admin secret>
 export AWS_SECRET_ACCESS_KEY=<from seaweedfs-admin secret>
 export TCFS_NATS_URL=nats://nats-tcfs:4222
-just neo-honey-smoke
+cargo test -p tcfs-e2e --test fleet_live neo_honey_two_device_sync_smoke -- --nocapture
 ```
 
 Implementation notes:
 
-- wrapper script: `scripts/neo-honey-smoke.sh`
 - underlying test file: `tests/e2e/tests/fleet_live.rs`
 - canonical contract and pass/fail criteria: `docs/ops/neo-honey-acceptance.md`
-- this is a manual acceptance lane today, not a continuously scheduled CI lane
+- this is retained source-level coverage, not installed-runtime acceptance
 - release readiness can cite this lane explicitly instead of referring to ad hoc live test runs
 
 ### Fallback Behavior

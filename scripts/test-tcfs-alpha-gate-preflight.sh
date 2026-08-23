@@ -105,7 +105,7 @@ assert_contains "$READY" "- status: \`runnable\`"
 assert_contains "$READY" "scripts/storage-posture-canary-dispatch.sh"
 assert_contains "$READY" "gh workflow run linux-postinstall-smoke.yml"
 assert_contains "$READY" "-f tag=v1.2.3"
-assert_contains "$READY" "just neo-honey-smoke"
+assert_contains "$READY" "just installed-runtime-acceptance linux /usr/bin/tcfs egreg"
 
 SHARED_ENV="$TMPDIR/shared-env.out"
 bash "$SCRIPT" \

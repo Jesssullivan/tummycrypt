@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use opendal::Operator;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -462,6 +463,170 @@ pub struct ReconcilePlan {
     pub generated_at: u64,
 }
 
+impl ReconcilePlan {
+    /// Stable SHA-256 over the mutation-bearing plan and its selected route.
+    /// Wall-clock generation time and diagnostic conflict counters are excluded.
+    pub fn sha256(&self, route_authority: &str) -> Result<String> {
+        fn field(hasher: &mut Sha256, tag: &str, value: &[u8]) {
+            hasher.update((tag.len() as u32).to_be_bytes());
+            hasher.update(tag.as_bytes());
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value);
+        }
+        fn text(hasher: &mut Sha256, tag: &str, value: &str) {
+            field(hasher, tag, value.as_bytes());
+        }
+        fn number(hasher: &mut Sha256, tag: &str, value: u64) {
+            field(hasher, tag, &value.to_be_bytes());
+        }
+        fn clock(hasher: &mut Sha256, tag: &str, clock: &VectorClock) {
+            number(hasher, &format!("{tag}.len"), clock.clocks.len() as u64);
+            for (device, tick) in &clock.clocks {
+                text(hasher, &format!("{tag}.device"), device);
+                number(hasher, &format!("{tag}.tick"), *tick);
+            }
+        }
+
+        let mut hasher = Sha256::new();
+        text(&mut hasher, "domain", "dev.tinyland.tcfs.reconcile-plan.v1");
+        text(&mut hasher, "route", route_authority);
+        text(&mut hasher, "device", &self.device_id);
+        number(&mut hasher, "actions", self.actions.len() as u64);
+        for action in &self.actions {
+            text(&mut hasher, "path", action_rel_path(action));
+            match action {
+                ReconcileAction::Push {
+                    local_path, reason, ..
+                } => {
+                    text(&mut hasher, "kind", "push");
+                    let metadata = std::fs::symlink_metadata(local_path).with_context(|| {
+                        format!("binding planned local input: {}", local_path.display())
+                    })?;
+                    if metadata.file_type().is_symlink() {
+                        let target = std::fs::read_link(local_path).with_context(|| {
+                            format!("reading planned symlink input: {}", local_path.display())
+                        })?;
+                        let target = target.to_str().with_context(|| {
+                            format!(
+                                "planned symlink target is not portable UTF-8: {}",
+                                local_path.display()
+                            )
+                        })?;
+                        text(&mut hasher, "local-kind", "symlink");
+                        text(
+                            &mut hasher,
+                            "local-content",
+                            &engine::symlink_manifest_hash(target),
+                        );
+                        number(&mut hasher, "local-size", target.len() as u64);
+                    } else {
+                        anyhow::ensure!(
+                            metadata.is_file(),
+                            "planned push input is not a regular file: {}",
+                            local_path.display()
+                        );
+                        let content_hash = tcfs_chunks::hash_file(local_path)
+                            .map(|hash| tcfs_chunks::hash_to_hex(&hash))
+                            .with_context(|| {
+                                format!("hashing planned local input: {}", local_path.display())
+                            })?;
+                        text(&mut hasher, "local-kind", "regular-file");
+                        text(&mut hasher, "local-content", &content_hash);
+                        number(&mut hasher, "local-size", metadata.len());
+                    }
+                    match reason {
+                        PushReason::NewLocal => text(&mut hasher, "reason", "new-local"),
+                        PushReason::LocalNewer => text(&mut hasher, "reason", "local-newer"),
+                        PushReason::GitFastForward {
+                            expected_remote_manifest,
+                            ref_pins,
+                        } => {
+                            text(&mut hasher, "reason", "git-fast-forward");
+                            text(&mut hasher, "remote-manifest", expected_remote_manifest);
+                            let mut pins = ref_pins.iter().collect::<Vec<_>>();
+                            pins.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+                            number(&mut hasher, "pins", pins.len() as u64);
+                            for pin in pins {
+                                text(&mut hasher, "pin.path", &pin.rel_path);
+                                text(&mut hasher, "pin.sha", &pin.sha);
+                            }
+                        }
+                    }
+                }
+                ReconcileAction::Pull {
+                    manifest_hash,
+                    size,
+                    chunks,
+                    reason,
+                    expected_kind,
+                    expected_symlink_target,
+                    ..
+                } => {
+                    text(&mut hasher, "kind", "pull");
+                    text(&mut hasher, "manifest", manifest_hash);
+                    number(&mut hasher, "size", *size);
+                    number(&mut hasher, "chunks", *chunks as u64);
+                    text(
+                        &mut hasher,
+                        "reason",
+                        match reason {
+                            PullReason::NewRemote => "new-remote",
+                            PullReason::RemoteNewer => "remote-newer",
+                            PullReason::GitFastForward { .. } => "git-fast-forward",
+                        },
+                    );
+                    if let PullReason::GitFastForward { ref_pins } = reason {
+                        let mut pins = ref_pins.iter().collect::<Vec<_>>();
+                        pins.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+                        for pin in pins {
+                            text(&mut hasher, "pin.path", &pin.rel_path);
+                            text(&mut hasher, "pin.sha", &pin.sha);
+                        }
+                    }
+                    text(
+                        &mut hasher,
+                        "entry-kind",
+                        match expected_kind {
+                            RemoteEntryKind::RegularFile => "regular-file",
+                            RemoteEntryKind::Symlink => "symlink",
+                        },
+                    );
+                    text(
+                        &mut hasher,
+                        "symlink-target",
+                        expected_symlink_target.as_deref().unwrap_or(""),
+                    );
+                }
+                ReconcileAction::DeleteLocal { .. } => text(&mut hasher, "kind", "delete-local"),
+                ReconcileAction::DeleteRemote { .. } => text(&mut hasher, "kind", "delete-remote"),
+                ReconcileAction::Conflict { info, .. } => {
+                    text(&mut hasher, "kind", "conflict");
+                    text(&mut hasher, "local-hash", &info.local_blake3);
+                    text(&mut hasher, "remote-hash", &info.remote_blake3);
+                    text(&mut hasher, "local-device", &info.local_device);
+                    text(&mut hasher, "remote-device", &info.remote_device);
+                    clock(&mut hasher, "local-clock", &info.local_vclock);
+                    clock(&mut hasher, "remote-clock", &info.remote_vclock);
+                    text(
+                        &mut hasher,
+                        "remote-manifest-key",
+                        info.remote_manifest_key.as_deref().unwrap_or(""),
+                    );
+                }
+                ReconcileAction::CreateDirectory { .. } => {
+                    text(&mut hasher, "kind", "create-directory")
+                }
+                ReconcileAction::UpToDate { .. } => text(&mut hasher, "kind", "up-to-date"),
+            }
+        }
+        Ok(hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+}
+
 /// Configuration controlling reconciliation behavior.
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileConfig {
@@ -480,6 +645,10 @@ pub struct ReconcileConfig {
     /// `"raw"`). The FF reclassifier only engages in `"raw"` mode, where the
     /// raw `.git/*` internals roam as ordinary files.
     pub git_sync_mode: String,
+    /// Optional exact logical namespace supplied by an external, versioned
+    /// inventory contract. Any local, remote, or tracked path outside it makes
+    /// planning fail closed instead of creating a parallel transport.
+    pub authoritative_paths: Option<BTreeSet<String>>,
 }
 
 /// Result of executing a reconciliation plan.
@@ -1554,7 +1723,22 @@ pub async fn reconcile(
         .as_secs();
 
     // 1. Collect local files
-    let local_files = collect_local_set(local_root, blacklist)?;
+    let local_files =
+        collect_local_set(local_root, blacklist, config.authoritative_paths.is_some())?;
+    if let Some(authoritative) = &config.authoritative_paths {
+        anyhow::ensure!(
+            config.git_sync_mode != "bundle" || local_files.contains_key(".git-tcfs-bundle"),
+            "authoritative Git workspace did not produce its required bundle/ref content"
+        );
+        if let Some(unexpected) = local_files
+            .keys()
+            .find(|path| !authoritative.contains(path.as_str()))
+        {
+            anyhow::bail!(
+                "local path is outside the authoritative workspace capture: {unexpected}"
+            );
+        }
+    }
     for (rel_path, local_path) in &local_files {
         if is_git_internal_path(rel_path) {
             let metadata = std::fs::symlink_metadata(local_path).with_context(|| {
@@ -1583,6 +1767,21 @@ pub async fn reconcile(
         "fetched remote empty directory markers"
     );
     validate_remote_ingress_blacklist(&remote_index, &remote_empty_dirs, blacklist)?;
+    if let Some(authoritative) = &config.authoritative_paths {
+        if let Some(unexpected) = remote_index
+            .keys()
+            .find(|path| !authoritative.contains(path.as_str()))
+            .or_else(|| {
+                remote_empty_dirs
+                    .iter()
+                    .find(|path| !authoritative.contains(path.as_str()))
+            })
+        {
+            anyhow::bail!(
+                "remote path is outside the authoritative workspace capture: {unexpected}"
+            );
+        }
+    }
     validate_casefold_prefix_aliases(
         local_files
             .keys()
@@ -1599,6 +1798,13 @@ pub async fn reconcile(
     // Include state-tracked paths (may have been deleted from both sides)
     for (key, _entry) in StateCacheBackend::all_entries(state) {
         if let Some(rel) = extract_rel_path_from_state(&key, local_root) {
+            if config
+                .authoritative_paths
+                .as_ref()
+                .is_some_and(|paths| !paths.contains(&rel))
+            {
+                anyhow::bail!("tracked path is outside the authoritative workspace capture: {rel}");
+            }
             all_paths.insert(rel);
         }
     }
@@ -1610,9 +1816,17 @@ pub async fn reconcile(
     for rel_path in &all_paths {
         let local = local_files.get(rel_path);
         let remote = remote_index.get(rel_path);
-        let tracked = state.get_by_rel_path(rel_path).map(|(_, s)| s);
+        // A live local path always resolves through its canonical absolute key.
+        // Relative/suffix lookup is reserved for state-only paths, where there is
+        // no local path to key exactly. This removes HashMap-order ambiguity from
+        // every write-capable classification decision (TIN-3278).
+        let tracked = match local {
+            Some(path) => state.get(path.as_path()),
+            None => state.get_by_rel_path(rel_path).map(|(_, state)| state),
+        };
+        let tracked_is_exact = local.is_some() && tracked.is_some();
 
-        let action = classify_path(
+        let action = classify_path_with_context(
             rel_path,
             local,
             remote,
@@ -1621,6 +1835,8 @@ pub async fn reconcile(
             remote_prefix,
             device_id,
             config,
+            tracked_is_exact,
+            encryption,
         )
         .await
         .with_context(|| format!("classifying reconciliation path {rel_path:?}"))?;
@@ -1679,6 +1895,7 @@ pub async fn reconcile(
         kind_rank(a)
             .cmp(&kind_rank(b))
             .then_with(|| git_apply_rank(a).cmp(&git_apply_rank(b)))
+            .then_with(|| action_rel_path(a).cmp(action_rel_path(b)))
     });
 
     info!(
@@ -1708,6 +1925,18 @@ fn kind_rank(a: &ReconcileAction) -> u8 {
         ReconcileAction::DeleteLocal { .. } => 4,
         ReconcileAction::DeleteRemote { .. } => 5,
         ReconcileAction::UpToDate { .. } => 6,
+    }
+}
+
+fn action_rel_path(action: &ReconcileAction) -> &str {
+    match action {
+        ReconcileAction::Push { rel_path, .. }
+        | ReconcileAction::Pull { rel_path, .. }
+        | ReconcileAction::DeleteLocal { rel_path, .. }
+        | ReconcileAction::DeleteRemote { rel_path }
+        | ReconcileAction::Conflict { rel_path, .. }
+        | ReconcileAction::CreateDirectory { rel_path }
+        | ReconcileAction::UpToDate { rel_path } => rel_path,
     }
 }
 
@@ -2124,6 +2353,19 @@ fn split_explicit_git_dir(git_dir: &Path) -> Result<(PathBuf, Vec<std::ffi::OsSt
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_protected_root_compatibility_alias(
+    path: &Path,
+    alias_uid: u32,
+    parent_uid: u32,
+    parent_mode: u32,
+) -> bool {
+    path.parent() == Some(Path::new("/"))
+        && alias_uid == 0
+        && parent_uid == 0
+        && parent_mode & 0o022 == 0
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn validate_explicit_repo_root_spelling(repo_root: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     use std::path::Component;
@@ -2170,9 +2412,17 @@ fn validate_explicit_repo_root_spelling(repo_root: &Path) -> Result<()> {
                 parent.display()
             )
         })?;
-        let protected_root_alias = metadata.uid() == 0
-            && parent_metadata.uid() == 0
-            && (parent_metadata.mode() & 0o022 == 0 || parent_metadata.mode() & 0o1000 != 0);
+        // Permit only an OS-managed compatibility alias directly below `/`
+        // (for example macOS `/var` -> `private/var`). A broader ownership
+        // predicate is unsafe under UID 0: any nested symlink created by that
+        // process is also root-owned and would otherwise redirect repository
+        // capture through an attacker-selected tree.
+        let protected_root_alias = is_protected_root_compatibility_alias(
+            &prefix,
+            metadata.uid(),
+            parent_metadata.uid(),
+            parent_metadata.mode(),
+        );
         if !protected_root_alias {
             anyhow::bail!(
                 "explicit Git repo root contains a mutable symlink component: {}",
@@ -3149,6 +3399,7 @@ fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLoc
 
 /// Classify a single path into a reconciliation action.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn classify_path(
     rel_path: &str,
     local: Option<&PathBuf>,
@@ -3158,6 +3409,34 @@ async fn classify_path(
     remote_prefix: &str,
     device_id: &str,
     config: &ReconcileConfig,
+) -> Result<ReconcileAction> {
+    classify_path_with_context(
+        rel_path,
+        local,
+        remote,
+        tracked,
+        op,
+        remote_prefix,
+        device_id,
+        config,
+        tracked.is_some(),
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn classify_path_with_context(
+    rel_path: &str,
+    local: Option<&PathBuf>,
+    remote: Option<&RemoteIndexEntry>,
+    tracked: Option<&SyncState>,
+    op: &Operator,
+    remote_prefix: &str,
+    device_id: &str,
+    config: &ReconcileConfig,
+    tracked_is_exact: bool,
+    encryption: OptionalEncryption<'_>,
 ) -> Result<ReconcileAction> {
     let action = match (local, remote, tracked) {
         // New local file — not on remote, not previously synced
@@ -3259,7 +3538,7 @@ async fn classify_path(
 
         // Both exist — compare via vector clocks
         (Some(local_path), Some(remote_entry), tracked_opt) => {
-            return compare_both_exist(
+            return compare_both_exist_with_context(
                 rel_path,
                 local_path,
                 remote_entry,
@@ -3267,6 +3546,8 @@ async fn classify_path(
                 op,
                 remote_prefix,
                 device_id,
+                tracked_is_exact,
+                encryption,
             )
             .await;
         }
@@ -3285,6 +3566,12 @@ async fn classify_path(
 }
 
 /// Compare when both local and remote exist — uses vector clocks.
+///
+/// `tracked_is_exact` says whether `tracked` is the state record that the push
+/// path would also resolve (exact canonical key) — see
+/// `self_rewrite_retick_applies`, the only decision here that depends on it.
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn compare_both_exist(
     rel_path: &str,
     local_path: &Path,
@@ -3293,6 +3580,32 @@ async fn compare_both_exist(
     op: &Operator,
     remote_prefix: &str,
     device_id: &str,
+) -> Result<ReconcileAction> {
+    compare_both_exist_with_context(
+        rel_path,
+        local_path,
+        remote_entry,
+        tracked,
+        op,
+        remote_prefix,
+        device_id,
+        tracked.is_some(),
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compare_both_exist_with_context(
+    rel_path: &str,
+    local_path: &Path,
+    remote_entry: &RemoteIndexEntry,
+    tracked: Option<&SyncState>,
+    op: &Operator,
+    remote_prefix: &str,
+    device_id: &str,
+    tracked_is_exact: bool,
+    encryption: OptionalEncryption<'_>,
 ) -> Result<ReconcileAction> {
     // Symlinks are first-class entries: they must NOT be dereferenced and hashed
     // like regular files (that would hash the *target's* content and then fail to
@@ -3398,13 +3711,103 @@ async fn compare_both_exist(
     // clock is untouched, so re-recording the conflict each cycle stays
     // idempotent (no per-cycle clock growth). `reclassify_git_ff_conflicts` is
     // unaffected — it decides on git SHA ancestry, not on these clocks.
-    if let Some(tracked_state) = tracked {
-        if tracked_state.blake3 != local_hash
-            && local_vclock.partial_cmp_vc(&remote_manifest.vclock)
-                == Some(std::cmp::Ordering::Less)
-        {
-            local_vclock.tick(device_id);
-        }
+    //
+    // The ordering is computed ONCE, against the STORED clock, before any tick.
+    // Both out-of-band re-tick rules below key off `stored_ordering`, never off
+    // a clock a sibling rule already mutated: TIN-2584 (`Less`) and TIN-3277
+    // (`Equal`) are disjoint cases of the same stored comparison, and the
+    // `else if` makes that mutual exclusion structural. Reading a mutated clock
+    // here would let a `Less` pair be re-ticked into `Equal` and then promoted
+    // to `Greater`/`LocalNewer`, defeating the narrowing comment above.
+    let stored_ordering = local_vclock.partial_cmp_vc(&remote_manifest.vclock);
+    // TIN-3277 local-side evidence, read from the same `symlink_metadata` call
+    // that chose this comparator, before any tick.
+    let local_size = local_metadata.len();
+    let local_content_plausible = local_age_ciphertext_intact(rel_path, local_path);
+    let self_rewrite_shape = |tracked_is_exact: bool| {
+        self_rewrite_retick_applies(
+            rel_path,
+            tracked,
+            tracked_is_exact,
+            &local_hash,
+            local_size,
+            local_content_plausible,
+            &remote_manifest.file_hash,
+            stored_ordering,
+            device_id,
+            remote_device,
+        )
+    };
+    let self_rewrite_candidate = self_rewrite_shape(tracked_is_exact);
+    // The manifest's declared file hash is only a hint. Promotion is authorized
+    // by checked, decrypted payload bytes whose actual BLAKE3 equals the tracked
+    // baseline. Any missing/corrupt/foreign payload stays on the ordinary,
+    // visible Conflict path.
+    let remote_payload_is_tracked_baseline = if self_rewrite_candidate {
+        download_bytes_from_manifest(
+            op,
+            remote_prefix,
+            &remote_entry.manifest_hash,
+            remote_entry.size,
+            remote_entry.chunks,
+            rel_path,
+            encryption,
+        )
+        .await
+        .is_some_and(|bytes| {
+            tracked.is_some_and(|state| {
+                tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&bytes)) == state.blake3
+            })
+        })
+    } else {
+        false
+    };
+    if tracked.is_some_and(|tracked_state| tracked_state.blake3 != local_hash)
+        && stored_ordering == Some(std::cmp::Ordering::Less)
+    {
+        local_vclock.tick(device_id);
+    } else if self_rewrite_candidate && remote_payload_is_tracked_baseline {
+        // TIN-3277: an equal-clock self-pair whose remote content is byte-identical
+        // to our own tracked baseline is proof of a local out-of-band rewrite, not a
+        // concurrent-writer conflict. See `self_rewrite_retick_applies`.
+        //
+        // Audit trail: log the remote manifest key we intend to displace. The
+        // displaced bytes are `tracked.blake3` — this device's own last-synced
+        // content — so this line is sufficient to reconstruct what was replaced
+        // without a parked copy. It is emitted at PLAN time and the field names say
+        // so: the engine re-reads the remote before committing, so these values are
+        // the remote as observed during classification (best-effort provenance), not
+        // a post-hoc record of what the push actually overwrote. A remote that moved
+        // in between is vetoed at execute time and logged there instead.
+        info!(
+            path = %rel_path,
+            device = %device_id,
+            displaced_manifest_at_plan = %manifest_path,
+            displaced_hash_at_plan = %remote_manifest.file_hash,
+            local_hash = %local_hash,
+            "TIN-3277 self-heal: equal-clock self-pair, remote content == our tracked \
+             baseline — re-ticking as a local out-of-band rewrite and planning a push"
+        );
+        local_vclock.tick(device_id);
+    } else if self_rewrite_candidate {
+        warn!(
+            path = %rel_path,
+            device = %device_id,
+            "TIN-3277 self-heal declined: checked remote payload bytes do not exactly match the tracked baseline — recording a conflict"
+        );
+    } else if !tracked_is_exact && self_rewrite_shape(true) {
+        // Everything about the shape says "local out-of-band rewrite", but the
+        // baseline we would have proved it against is not the state record the push
+        // path would overwrite (TIN-3278 key duplication). Decline and let the
+        // ordinary Conflict arm record it — visible, and no push justified by a
+        // record that may describe a different file.
+        warn!(
+            path = %rel_path,
+            device = %device_id,
+            "TIN-3277 self-heal declined: plan-time tracked entry is not the exact-key \
+             record the push path would overwrite (TIN-3278 state-cache key duplication) \
+             — recording a conflict instead"
+        );
     }
 
     let outcome = compare_clocks(
@@ -3424,6 +3827,101 @@ async fn compare_both_exist(
         remote_entry,
         &manifest_path,
     ))
+}
+
+/// TIN-3277 prefilter for an equal-clock, local out-of-band rewrite.
+///
+/// This predicate only recognizes the narrow shape worth checking. The caller
+/// then downloads and validates the remote payload and compares its actual
+/// BLAKE3 with the exact tracked baseline before re-ticking. A corrupt payload,
+/// a foreign payload, a duplicate/fuzzy state key, a different device, an empty
+/// rewrite, implausible age ciphertext, or any Git-internal path stays on the
+/// ordinary visible `Conflict` path.
+///
+/// The tick affects only the comparison clone. A successful push persists its
+/// normal tick; a failed push leaves state untouched and can be retried without
+/// accumulating clock changes.
+#[allow(clippy::too_many_arguments)]
+fn self_rewrite_retick_applies(
+    rel_path: &str,
+    tracked: Option<&SyncState>,
+    tracked_is_exact: bool,
+    local_hash: &str,
+    local_size: u64,
+    local_content_plausible: bool,
+    remote_hash: &str,
+    stored_ordering: Option<std::cmp::Ordering>,
+    device_id: &str,
+    remote_device: &str,
+) -> bool {
+    if device_id.is_empty() || remote_device != device_id {
+        return false;
+    }
+    if local_hash == remote_hash {
+        return false;
+    }
+    if is_git_internal_path(rel_path) {
+        return false;
+    }
+    // The baseline we are about to reason about must be the record the push path
+    // will read and overwrite, not whichever duplicate the fuzzy plan-time
+    // matcher happened to return (TIN-3278).
+    if !tracked_is_exact {
+        return false;
+    }
+    let Some(tracked_state) = tracked else {
+        return false;
+    };
+    // The local file moved since the last sync ...
+    if tracked_state.blake3 == local_hash {
+        return false;
+    }
+    // ... and the remote is still exactly the bytes this device last synced, so
+    // nothing but our own history can be displaced. THE load-bearing clause.
+    if tracked_state.blake3 != remote_hash {
+        return false;
+    }
+    // The local side is the only side no tcfs-aware actor authored: refuse to
+    // publish a degenerate (emptied / non-ciphertext) out-of-band rewrite over
+    // intact remote content.
+    if local_size == 0 && tracked_state.size > 0 {
+        return false;
+    }
+    if !local_content_plausible {
+        return false;
+    }
+    stored_ordering == Some(std::cmp::Ordering::Equal)
+}
+
+/// Number of leading bytes needed to recognize either age container header.
+const AGE_HEADER_PROBE_LEN: usize = 34;
+
+/// Do the live local bytes still look like age ciphertext?
+///
+/// Only meaningful for `*.age` paths; every other path answers `true` (nothing to
+/// check). Used as a fail-closed guard on the TIN-3277 self-heal push, which is
+/// the one push in this file that no tcfs-aware writer initiated: an out-of-band
+/// materialization that failed and left a plaintext error message must not be
+/// published over the intact ciphertext currently on the remote.
+///
+/// Accepts BOTH age container forms — the binary header (`age-encryption.org/v1`,
+/// which is what neo's live enrolled `secrets/**.age` files carry) and the
+/// ASCII-armored header — so the guard cannot silently disable the fix for a
+/// legitimately armored corpus.
+fn local_age_ciphertext_intact(rel_path: &str, local_path: &Path) -> bool {
+    if !rel_path.to_ascii_lowercase().ends_with(".age") {
+        return true;
+    }
+    let Ok(file) = std::fs::File::open(local_path) else {
+        return false;
+    };
+    let mut head = Vec::with_capacity(AGE_HEADER_PROBE_LEN);
+    let mut probe = std::io::Read::take(file, AGE_HEADER_PROBE_LEN as u64);
+    if std::io::Read::read_to_end(&mut probe, &mut head).is_err() {
+        return false;
+    }
+    head.starts_with(b"age-encryption.org/v1")
+        || head.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----")
 }
 
 /// Causal metadata extracted from one fully bound remote manifest.
@@ -4472,6 +4970,37 @@ pub async fn execute_plan(
                         if !upload.skipped {
                             result.pushed += 1;
                             result.bytes_uploaded += upload.bytes;
+                        } else {
+                            // TIN-3277: a planned push the engine skipped at execute
+                            // time is neither counted in `pushed` nor pushed to
+                            // `errors`, so it used to leave no trace at all. Surface
+                            // it — but say WHICH skip it was, keyed off the engine's
+                            // own verdict rather than asserting a veto: `skipped` is
+                            // also set for benign content-dedup (`UpToDate`) and for
+                            // `RemoteNewer`. Only the `Conflict` verdict means the
+                            // remote moved between plan and execute, which for a
+                            // TIN-3277 self-heal is the signal that the entry has
+                            // reverted to a recorded conflict.
+                            let skip_reason = match &upload.outcome {
+                                Some(crate::conflict::SyncOutcome::Conflict(_)) => {
+                                    "execute-time conflict veto: remote moved since plan"
+                                }
+                                Some(crate::conflict::SyncOutcome::RemoteNewer) => {
+                                    "execute-time veto: remote is newer than the plan assumed"
+                                }
+                                Some(crate::conflict::SyncOutcome::UpToDate) => {
+                                    "no-op: remote already holds this content"
+                                }
+                                Some(crate::conflict::SyncOutcome::LocalNewer) | None => {
+                                    "engine skipped the upload without a conflict verdict"
+                                }
+                            };
+                            info!(
+                                path = %rel_path,
+                                outcome = ?upload.outcome,
+                                skip_reason,
+                                "planned push skipped by the engine"
+                            );
                         }
                     }
                     Err(e) => {
@@ -5376,7 +5905,11 @@ async fn execute_new_remote_pulls_concurrent(
 /// stays `false` so we never walk *through* a link. The fail-closed deny-set
 /// guard in the collector still screens link targets before they reach here,
 /// and the push/restore paths below are symlink-aware.
-fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap<String, PathBuf>> {
+fn collect_local_set(
+    local_root: &Path,
+    blacklist: &Blacklist,
+    authoritative_git_workspace: bool,
+) -> Result<HashMap<String, PathBuf>> {
     let config = crate::engine::CollectConfig {
         sync_git_dirs: blacklist.allows_git_dirs(),
         git_sync_mode: blacklist.git_sync_mode().to_string(),
@@ -5386,7 +5919,11 @@ fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap
         preserve_symlinks: true,
         sync_empty_dirs: false, // reconcile only cares about files
     };
-    let result = crate::engine::collect_files(local_root, &config)?;
+    let result = if authoritative_git_workspace {
+        crate::engine::collect_authoritative_git_workspace_files(local_root, &config)?
+    } else {
+        crate::engine::collect_files(local_root, &config)?
+    };
 
     let mut map = HashMap::new();
     for entry in result.files.into_iter().chain(result.symlinks) {
@@ -8931,6 +9468,35 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn protected_root_compatibility_alias_is_root_level_only() {
+        assert!(is_protected_root_compatibility_alias(
+            Path::new("/var"),
+            0,
+            0,
+            0o755,
+        ));
+        assert!(!is_protected_root_compatibility_alias(
+            Path::new("/tmp/tcfs/repo-alias"),
+            0,
+            0,
+            0o700,
+        ));
+        assert!(!is_protected_root_compatibility_alias(
+            Path::new("/var"),
+            501,
+            0,
+            0o755,
+        ));
+        assert!(!is_protected_root_compatibility_alias(
+            Path::new("/var"),
+            0,
+            0,
+            0o777,
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
     fn sanitized_git_dir_helpers_reject_symlink_chain_without_touching_victim() {
         use std::os::unix::fs::symlink;
 
@@ -9954,5 +10520,125 @@ mod tests {
              (payload + status move together), got {:?}",
             entry.status
         );
+    }
+
+    #[test]
+    fn plan_sha_is_stable_across_generation_time_and_binds_route() {
+        let mut first = plan_of(vec![ReconcileAction::UpToDate {
+            rel_path: "a.txt".into(),
+        }]);
+        let mut second = first.clone();
+        first.generated_at = 1;
+        second.generated_at = u64::MAX;
+        assert_eq!(
+            first.sha256("root=egreg").unwrap(),
+            second.sha256("root=egreg").unwrap()
+        );
+        assert_ne!(
+            first.sha256("root=egreg").unwrap(),
+            first.sha256("root=neo").unwrap()
+        );
+    }
+
+    #[test]
+    fn plan_sha_binds_planned_push_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("a.txt");
+        std::fs::write(&local, b"first").unwrap();
+        let plan = plan_of(vec![ReconcileAction::Push {
+            local_path: local.clone(),
+            rel_path: "a.txt".into(),
+            reason: PushReason::NewLocal,
+        }]);
+        let first = plan.sha256("root=egreg").unwrap();
+        std::fs::write(&local, b"second").unwrap();
+        assert_ne!(first, plan.sha256("root=egreg").unwrap());
+    }
+
+    #[tokio::test]
+    async fn authoritative_workspace_rejects_unlisted_local_paths() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("listed.txt"), b"listed").unwrap();
+        std::fs::write(dir.path().join("extra.txt"), b"extra").unwrap();
+        let state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let config = ReconcileConfig {
+            authoritative_paths: Some(BTreeSet::from(["listed.txt".to_string()])),
+            ..Default::default()
+        };
+        let error = reconcile(
+            &op,
+            dir.path(),
+            "data",
+            &state,
+            "egreg",
+            &Blacklist::default(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("outside the authoritative workspace capture"));
+    }
+
+    #[tokio::test]
+    async fn tin3277_self_heal_requires_checked_remote_payload_bytes() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let local = root.join("file.txt");
+        std::fs::write(&local, b"baseline").unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let baseline = reconcile(
+            &op, &root, "data", &state, "egreg", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
+        execute_plan(
+            &baseline, &op, &root, "data", &mut state, "egreg", None, None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(&local, b"local rewrite").unwrap();
+
+        let heal = reconcile(
+            &op, &root, "data", &state, "egreg", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
+        assert!(heal.actions.iter().any(|action| matches!(
+            action,
+            ReconcileAction::Push { rel_path, reason: PushReason::LocalNewer, .. }
+                if rel_path == "file.txt"
+        )));
+
+        let index = list_remote_index(&op, "data").await.unwrap();
+        let entry = &index["file.txt"];
+        let manifest_bytes = op
+            .read(&format!("data/manifests/{}", entry.manifest_hash))
+            .await
+            .unwrap()
+            .to_vec();
+        let manifest = SyncManifest::from_bytes(&manifest_bytes).unwrap();
+        let chunk = manifest.chunk_hashes().first().expect("baseline chunk");
+        op.write(&format!("data/chunks/{chunk}"), b"foreign bytes".to_vec())
+            .await
+            .unwrap();
+
+        let veto = reconcile(
+            &op, &root, "data", &state, "egreg", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
+        assert!(veto.actions.iter().any(|action| matches!(
+            action,
+            ReconcileAction::Conflict { rel_path, .. } if rel_path == "file.txt"
+        )));
     }
 }

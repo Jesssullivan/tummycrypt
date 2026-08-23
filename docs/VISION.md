@@ -73,7 +73,7 @@ TCFS is one range in a larger remote-first system:
 | **TCFS** | Encrypted persistent state, roam, hydration, conflict safety, and local unsync |
 | **SSH / cmux** | Terminal and live-process transport |
 | **IDE routing** | Host-aware editor connection and cwd mapping |
-| **[GloriousFlywheel](https://github.com/tinyland-inc/GloriousFlywheel)** | Remote build and execution substrate |
+| **GloriousFlywheel** (`tinyland-inc/GloriousFlywheel`, private) | Remote build and execution substrate |
 | **[prompts-enqueue](https://github.com/Jesssullivan/prompts-enqueue)** | Prompt and context library; not the file transport or dispatcher |
 | **APFS / FUSE / FileProvider / NFS / CFAPI** | Platform substrates and client surfaces |
 

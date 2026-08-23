@@ -196,3 +196,47 @@ async fn git_bundle_mode_preserves_history_on_peer() {
     let branch = git_stdout(&peer_repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(branch.trim(), "main", "peer HEAD should be on main");
 }
+
+#[test]
+fn bundle_mode_accepts_linked_worktree_without_transporting_gitfile() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+    let primary = temp.path().join("primary");
+    let linked = temp.path().join("linked");
+    std::fs::create_dir_all(&primary).unwrap();
+    init_repo_with_two_commits(&primary);
+    git(
+        &primary,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    assert!(std::fs::symlink_metadata(linked.join(".git"))
+        .unwrap()
+        .is_file());
+
+    let config = tcfs_sync::engine::CollectConfig {
+        sync_git_dirs: true,
+        git_sync_mode: "bundle".into(),
+        ..Default::default()
+    };
+    let collected = tcfs_sync::engine::collect_files(&linked, &config).unwrap();
+    let relative = collected
+        .files
+        .iter()
+        .map(|path| path.strip_prefix(&linked).unwrap().to_path_buf())
+        .collect::<Vec<_>>();
+    assert!(relative
+        .iter()
+        .any(|path| path == Path::new(".git-tcfs-bundle")));
+    assert!(!relative.iter().any(|path| path == Path::new(".git")));
+    git(
+        &linked,
+        &[
+            "bundle",
+            "verify",
+            linked.join(".git-tcfs-bundle").to_str().unwrap(),
+        ],
+    );
+}

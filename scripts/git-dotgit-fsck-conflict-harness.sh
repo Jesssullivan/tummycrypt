@@ -14,7 +14,7 @@
 # ~/git repos, never runs `tcfs reconcile --execute` against a real root, and
 # never mutates the live fleet. It reuses the existing canary scaffolds
 # (scripts/git-repo-canary.sh shadow-first inventory, and the same
-# conflict-fixture pattern as scripts/neo-honey-conflict-demo.sh) rather than
+# the same deterministic conflict-fixture pattern as the Rust conflict tests) rather than
 # reinventing them.
 #
 # What it asserts (the FACET 6 "test must check" list):

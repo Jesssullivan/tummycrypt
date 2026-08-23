@@ -3,7 +3,7 @@
 //! Before syncing .git directories, validates that no git operations
 //! are in progress (no lock files, no rebase/merge/cherry-pick).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const GIT_ROUTING_ENV: &[&str] = &[
     "GIT_DIR",
@@ -113,10 +113,10 @@ pub fn sanitized_git_readonly_command() -> std::process::Command {
 }
 
 /// Relative path (under the repo working root) where the TCFS git bundle is
-/// written and synced as a normal object. Keeping it inside the working tree
-/// (not under `.git/`) means it flows through the regular file collector and
-/// is visible to the peer pull as an ordinary path, while the raw `.git/*`
-/// internals are skipped by the collector in bundle mode.
+/// written and synced as a generated object. Keeping it inside the working
+/// tree (not under `.git/`) makes it visible to the peer pull, but the regular
+/// collector always excludes it; bundle mode adds only the result of the
+/// current successful snapshot while raw `.git/*` internals stay excluded.
 pub const GIT_BUNDLE_REL_PATH: &str = ".git-tcfs-bundle";
 
 /// Result of checking whether a .git directory is safe to sync.
@@ -185,6 +185,28 @@ pub fn git_is_safe(git_dir: &Path) -> GitSafetyCheck {
     check
 }
 
+/// Resolve the live Git directory for a normal or linked worktree without
+/// treating the `.git` pointer file itself as transportable content.
+pub fn workspace_git_dir(repo_root: &Path) -> anyhow::Result<PathBuf> {
+    let output = sanitized_git_command()
+        .args(["rev-parse", "--path-format=absolute", "--git-dir"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| anyhow::anyhow!("resolving Git directory: {error}"))?;
+    if !output.status.success() {
+        anyhow::bail!("cannot resolve Git directory for bundle capture");
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|_| anyhow::anyhow!("Git directory is not portable UTF-8"))?
+        .trim();
+    let path = PathBuf::from(text);
+    anyhow::ensure!(path.is_absolute(), "Git returned a non-absolute admin path");
+    let path = std::fs::canonicalize(&path)
+        .map_err(|error| anyhow::anyhow!("canonicalizing Git directory: {error}"))?;
+    anyhow::ensure!(path.is_dir(), "resolved Git directory is not a directory");
+    Ok(path)
+}
+
 fn collect_ref_head_locks(dir: &Path, rel: &str, check: &mut GitSafetyCheck) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -210,6 +232,20 @@ fn collect_ref_head_locks(dir: &Path, rel: &str, check: &mut GitSafetyCheck) {
 pub fn snapshot_git_for_sync(repo_root: &Path) -> anyhow::Result<std::path::PathBuf> {
     let bundle_path = repo_root.join(GIT_BUNDLE_REL_PATH);
 
+    // A bundle is evidence about the refs observed by this capture. Never let
+    // bytes from a prior cycle survive as a fallback if Git cannot produce a
+    // fresh snapshot now.
+    match std::fs::remove_file(&bundle_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "removing stale Git bundle {}: {error}",
+                bundle_path.display()
+            ));
+        }
+    }
+
     let output = sanitized_git_command()
         .args(["bundle", "create", &bundle_path.to_string_lossy(), "--all"])
         .current_dir(repo_root)
@@ -217,9 +253,17 @@ pub fn snapshot_git_for_sync(repo_root: &Path) -> anyhow::Result<std::path::Path
         .map_err(|e| anyhow::anyhow!("running git bundle: {e}"))?;
 
     if !output.status.success() {
+        let _ = std::fs::remove_file(&bundle_path);
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("git bundle failed: {stderr}");
     }
+
+    let metadata = std::fs::symlink_metadata(&bundle_path)
+        .map_err(|error| anyhow::anyhow!("stat fresh Git bundle: {error}"))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file() && metadata.len() > 0,
+        "Git bundle capture did not produce a non-empty regular file"
+    );
 
     Ok(bundle_path)
 }

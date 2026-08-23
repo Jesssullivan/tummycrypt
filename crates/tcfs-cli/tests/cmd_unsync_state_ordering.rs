@@ -5,7 +5,6 @@
 //! reflects reality so the CLI never lies to the daemon about a file being
 //! `Synced` when the hydrated copy is gone (or the stub is half-written).
 
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 use tcfs_sync::conflict::VectorClock;
@@ -41,26 +40,23 @@ async fn unsync_flips_status_before_destructive_ops() {
     // Seed state: file is Synced.
     seed_synced(&state_path, &original);
 
-    // Arrange a stub destination directory that cannot be written to so the
-    // destructive fs op fails AFTER the (correctly reordered) state flush.
-    let stub_dir = tmp.path().join("stubs_readonly");
-    std::fs::create_dir_all(&stub_dir).unwrap();
-    let mut perms = std::fs::metadata(&stub_dir).unwrap().permissions();
-    perms.set_mode(0o500);
-    std::fs::set_permissions(&stub_dir, perms).unwrap();
-
-    let stub_full = stub_dir.join("file.stub");
+    // Arrange a stub parent that is a regular file. Creating a child beneath
+    // it fails with ENOTDIR for every uid, unlike mode-bit denial, which root
+    // can bypass on sanctioned ARC runners. The failure still occurs only
+    // AFTER the (correctly reordered) state flush.
+    let stub_parent = tmp.path().join("stub_parent_file");
+    std::fs::write(&stub_parent, b"not a directory").unwrap();
+    let stub_full = stub_parent.join("file.stub");
 
     let result = tcfs_cli::commands::unsync::run_for_test(&original, &stub_full, &state_path).await;
 
-    // Restore permissions so TempDir cleanup can succeed regardless of outcome.
-    let mut restore = std::fs::metadata(&stub_dir).unwrap().permissions();
-    restore.set_mode(0o700);
-    std::fs::set_permissions(&stub_dir, restore).unwrap();
-
     assert!(
         result.is_err(),
-        "stub write into read-only dir should fail, got: {result:?}"
+        "stub write beneath a regular file should fail, got: {result:?}"
+    );
+    assert!(
+        original.exists(),
+        "stub write must fail before the original is removed"
     );
 
     // Invariant: persisted state must be NotSynced, not Synced, even though

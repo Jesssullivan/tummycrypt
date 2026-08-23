@@ -1348,6 +1348,7 @@ fn proto_root_profile(profile: tcfs_core::config::RootProfileV1) -> i32 {
     match profile {
         tcfs_core::config::RootProfileV1::GitRawV1 => RootProfileV1::GitRawV1 as i32,
         tcfs_core::config::RootProfileV1::AgentStaticV1 => RootProfileV1::AgentStaticV1 as i32,
+        tcfs_core::config::RootProfileV1::GitWorkspaceV2 => RootProfileV1::GitWorkspaceV2 as i32,
     }
 }
 
@@ -2041,6 +2042,16 @@ impl TcfsDaemonImpl {
         root: &RegisteredRootV1Config,
     ) -> RegisteredRootStatus {
         let spec = versioned_root_spec_message(root_id, root);
+        let reconcile_support = match root
+            .binding
+            .as_ref()
+            .map(|binding| binding.lifecycle_policy)
+        {
+            Some(tcfs_core::config::RootLifecyclePolicyV1::Reconcile) => {
+                ReconcileSupport::PlanAndExecute
+            }
+            _ => ReconcileSupport::None,
+        };
         let status =
             |availability: RootAvailability,
              binding: Option<RootBindingV1>,
@@ -2048,9 +2059,7 @@ impl TcfsDaemonImpl {
                 spec: Some(spec.clone()),
                 binding,
                 availability: availability as i32,
-                // B0a is inventory only. Configured lifecycle intent is descriptive
-                // and never grants plan or execute authority.
-                reconcile_support: ReconcileSupport::None as i32,
+                reconcile_support: reconcile_support as i32,
                 counts,
             };
 
@@ -5634,6 +5643,7 @@ mod tests {
                     state_path: state_path.clone(),
                     lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
                     resolution_policy: RegisteredRootPolicy::InspectOnly,
+                    git_workspace: None,
                 }),
             },
         );
@@ -8057,6 +8067,7 @@ mod tests {
                     state_path: visible_state_path,
                     lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
                     resolution_policy: RegisteredRootPolicy::InspectOnly,
+                    git_workspace: None,
                 }),
             },
         );
@@ -8075,6 +8086,7 @@ mod tests {
                     state_path: reconcile_dir.join("hidden.json"),
                     lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
                     resolution_policy: RegisteredRootPolicy::InspectOnly,
+                    git_workspace: None,
                 }),
             },
         );
@@ -8175,6 +8187,7 @@ mod tests {
                     state_path: state_path.clone(),
                     lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
                     resolution_policy: RegisteredRootPolicy::InspectOnly,
+                    git_workspace: None,
                 }),
             },
         );
@@ -8276,6 +8289,7 @@ mod tests {
                     state_path: state_path.clone(),
                     lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
                     resolution_policy: RegisteredRootPolicy::InspectOnly,
+                    git_workspace: None,
                 }),
             },
         );
@@ -8872,6 +8886,7 @@ mod tests {
             state_path: temp.path().join("outside/work.json"),
             lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
             resolution_policy: RegisteredRootPolicy::InspectOnly,
+            git_workspace: None,
         });
         let state_escape = validate_registered_roots_config(&config)
             .expect_err("V1 state caches must remain daemon-owned")

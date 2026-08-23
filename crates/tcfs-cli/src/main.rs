@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use secrecy::ExposeSecret;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -304,19 +305,30 @@ enum Commands {
     /// Diffs local tree against remote index and shows what would change.
     /// Use --execute to apply the plan (default is dry-run).
     Reconcile {
+        /// Stable ID from `[sync.root_registry]`. The daemon-enrolled binding
+        /// supplies the local root, remote prefix, state cache, and policy.
+        #[arg(
+            long,
+            value_parser = parse_registered_root_id,
+            conflicts_with_all = ["path", "prefix", "state"]
+        )]
+        root: Option<String>,
         /// Local directory to reconcile (default: sync_root from config)
-        #[arg(long, short = 'p')]
+        #[arg(long, short = 'p', conflicts_with = "root")]
         path: Option<PathBuf>,
         /// Remote prefix override
-        #[arg(long)]
+        #[arg(long, conflicts_with = "root")]
         prefix: Option<String>,
         /// Actually execute the plan (default: dry-run)
         #[arg(long)]
         execute: bool,
+        /// Exact dry-run plan SHA-256 required for named-root execution.
+        #[arg(long, requires = "execute")]
+        expect_plan: Option<String>,
         /// Path to the sync state cache JSON file (overrides config).
         /// `.db` paths are normalized to their `.json` sibling — the file the
         /// daemon owns — so the CLI and daemon always act on the same cache.
-        #[arg(long, env = "TCFS_STATE_PATH")]
+        #[arg(long, env = "TCFS_STATE_PATH", conflicts_with = "root")]
         state: Option<PathBuf>,
     },
 
@@ -388,6 +400,24 @@ enum Commands {
         /// daemon owns — so the CLI and daemon always act on the same cache.
         /// This legacy option is read-only; named roots never accept a client
         /// state path.
+        #[arg(long, env = "TCFS_STATE_PATH")]
+        state: Option<PathBuf>,
+    },
+
+    /// Repair duplicate state-cache key namespaces (TIN-3278)
+    ///
+    /// One logical file can be tracked under both its canonical absolute path
+    /// and a legacy prefix-relative key. Dry run unless `--execute` is given;
+    /// both modes take the state lock before opening the cache.
+    #[command(name = "state-migrate-keys")]
+    StateMigrateKeys {
+        /// Apply the migration under the state-cache lock.
+        #[arg(long)]
+        execute: bool,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// Path to the sync state cache JSON file (overrides config).
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -1026,16 +1056,20 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Reconcile {
+            root,
             path,
             prefix,
             execute,
+            expect_plan,
             state,
         } => {
             cmd_reconcile(
                 &config,
+                root.as_deref(),
                 path.as_deref(),
                 prefix.as_deref(),
                 execute,
+                expect_plan.as_deref(),
                 state.as_deref(),
             )
             .await
@@ -1079,6 +1113,11 @@ async fn main() -> Result<()> {
         Commands::Conflicts { json, root, state } => {
             cmd_conflicts(&config, json, root.as_deref(), state.as_deref()).await
         }
+        Commands::StateMigrateKeys {
+            execute,
+            json,
+            state,
+        } => cmd_state_migrate_keys(&config, execute, json, state.as_deref()).await,
     }
 }
 
@@ -3432,6 +3471,7 @@ fn root_profile_name(value: i32) -> Result<&'static str> {
     match profile.as_str_name() {
         "ROOT_PROFILE_V1_GIT_RAW_V1" => Ok("git-raw-v1"),
         "ROOT_PROFILE_V1_AGENT_STATIC_V1" => Ok("agent-static-v1"),
+        "ROOT_PROFILE_V1_GIT_WORKSPACE_V2" => Ok("git-workspace-v2"),
         other => anyhow::bail!("daemon returned invalid root profile {other}"),
     }
 }
@@ -3534,11 +3574,6 @@ fn registered_root_status_view(
 
     let availability = root_availability_name(root.availability)?.to_string();
     let reconcile_support = reconcile_support_name(root.reconcile_support)?.to_string();
-    anyhow::ensure!(
-        reconcile_support == "none",
-        "daemon returned unsupported B0a reconcile capability '{reconcile_support}' for root '{}'",
-        spec.root_id
-    );
     let binding = root
         .binding
         .map(|binding| {
@@ -3575,6 +3610,18 @@ fn registered_root_status_view(
             })
         })
         .transpose()?;
+    let expected_support = match binding
+        .as_ref()
+        .map(|binding| binding.lifecycle_policy.as_str())
+    {
+        Some("reconcile") => "plan-and-execute",
+        _ => "none",
+    };
+    anyhow::ensure!(
+        reconcile_support == expected_support,
+        "daemon returned reconcile capability '{reconcile_support}' inconsistent with root '{}' lifecycle policy",
+        spec.root_id
+    );
     anyhow::ensure!(
         availability != "unbound" || binding.is_none(),
         "daemon returned unbound root '{}' with a host binding",
@@ -8591,44 +8638,214 @@ async fn cmd_policy(_config: &tcfs_core::config::TcfsConfig, action: PolicyActio
 
 async fn cmd_reconcile(
     config: &tcfs_core::config::TcfsConfig,
+    root_id: Option<&str>,
     path: Option<&Path>,
     prefix: Option<&str>,
     execute: bool,
+    expect_plan: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let local_root = path
-        .map(|p| p.to_path_buf())
-        .or_else(|| config.sync.sync_root.clone())
-        .ok_or_else(|| anyhow::anyhow!("no path specified and no sync_root in config"))?;
+    anyhow::ensure!(
+        root_id.is_some() || expect_plan.is_none(),
+        "--expect-plan is reserved for --root reconciliation"
+    );
+    anyhow::ensure!(
+        !execute || root_id.is_none() || expect_plan.is_some(),
+        "named-root execution requires --expect-plan <sha256> from a fresh dry run"
+    );
+
+    let mut route_sync = config.sync.clone();
+    let mut authoritative_paths = None;
+    let (local_root, state_path, remote_prefix, route_authority) = if let Some(root_id) = root_id {
+        let root = config
+            .sync
+            .root_registry
+            .get(root_id)
+            .with_context(|| format!("registered root '{root_id}' is not configured"))?;
+        root.validate_shape(root_id)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("validating registered root '{root_id}'"))?;
+        let binding = root
+            .binding
+            .as_ref()
+            .with_context(|| format!("registered root '{root_id}' is not bound on this device"))?;
+        anyhow::ensure!(
+            binding.lifecycle_policy == tcfs_core::config::RootLifecyclePolicyV1::Reconcile,
+            "registered root '{root_id}' is inspect-only"
+        );
+
+        let configured_local = tcfs_core::config::expand_tilde(&binding.local_root);
+        let local_root = std::fs::canonicalize(&configured_local).with_context(|| {
+            format!(
+                "canonicalizing registered root '{root_id}': {}",
+                configured_local.display()
+            )
+        })?;
+        anyhow::ensure!(
+            local_root.is_dir(),
+            "registered root '{root_id}' local_root is not a directory: {}",
+            local_root.display()
+        );
+
+        let state_path = tcfs_core::config::expand_tilde(&binding.state_path);
+        anyhow::ensure!(
+            state_path
+                .extension()
+                .is_some_and(|extension| extension == "json"),
+            "registered root '{root_id}' state cache must end in .json"
+        );
+        let expected_state_dir = config
+            .sync
+            .root_state_dir
+            .as_deref()
+            .map(tcfs_core::config::expand_tilde)
+            .unwrap_or_else(|| {
+                tcfs_core::config::expand_tilde(&config.daemon.socket)
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join("reconcile")
+            });
+        let expected_state_name = format!("{root_id}.json");
+        anyhow::ensure!(
+            state_path.parent() == Some(expected_state_dir.as_path())
+                && state_path.file_name().and_then(|name| name.to_str())
+                    == Some(expected_state_name.as_str()),
+            "registered root '{root_id}' state cache must be {}",
+            expected_state_dir.join(format!("{root_id}.json")).display()
+        );
+
+        let workspace_authority = match root.spec.profile {
+            tcfs_core::config::RootProfileV1::GitRawV1 => {
+                route_sync.sync_git_dirs = true;
+                route_sync.git_sync_mode = "raw".to_string();
+                String::new()
+            }
+            tcfs_core::config::RootProfileV1::AgentStaticV1 => {
+                route_sync.sync_git_dirs = false;
+                route_sync.git_sync_mode = "bundle".to_string();
+                String::new()
+            }
+            tcfs_core::config::RootProfileV1::GitWorkspaceV2 => {
+                let workspace_binding = binding
+                    .git_workspace
+                    .as_ref()
+                    .context("git-workspace-v2 binding is missing")?;
+                let capture_path = tcfs_core::config::expand_tilde(&workspace_binding.capture_path);
+                let metadata = std::fs::symlink_metadata(&capture_path).with_context(|| {
+                    format!("inspecting Bulkload capture: {}", capture_path.display())
+                })?;
+                anyhow::ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "Bulkload capture must be one regular, non-symlink file: {}",
+                    capture_path.display()
+                );
+                let capture_bytes = std::fs::read(&capture_path).with_context(|| {
+                    format!("reading Bulkload capture: {}", capture_path.display())
+                })?;
+                let workspace = tcfs_sync::git_workspace::GitWorkspaceV2::from_agent_capture(
+                    &capture_bytes,
+                    &workspace_binding.workspace_id,
+                )?;
+                let matching_worktrees = workspace
+                    .worktrees
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, worktree)| {
+                        std::fs::canonicalize(&worktree.destination_path)
+                            .ok()
+                            .filter(|destination| destination == &local_root)
+                            .map(|_| index)
+                    })
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    matching_worktrees.len() == 1,
+                    "GitWorkspaceV2 must select exactly one worktree at registered root {}",
+                    local_root.display()
+                );
+                let selected_worktree = matching_worktrees[0];
+                let transport_files = workspace.transport_files_for_worktree(selected_worktree)?;
+                anyhow::ensure!(
+                    transport_files
+                        .iter()
+                        .all(|file| file.local_path.starts_with(&local_root)),
+                    "GitWorkspaceV2 transport escaped the registered root"
+                );
+                let git_dir = tcfs_sync::git_safety::workspace_git_dir(&local_root)?;
+                let git_safety = tcfs_sync::git_safety::git_is_safe(&git_dir);
+                anyhow::ensure!(
+                    git_safety.blocking.is_empty(),
+                    "GitWorkspaceV2 worktree has an active Git operation: {:?}",
+                    git_safety.blocking
+                );
+                authoritative_paths =
+                    Some(workspace.transport_paths_for_worktree(selected_worktree)?);
+                route_sync.sync_git_dirs = true;
+                route_sync.git_sync_mode = "bundle".to_string();
+                let capture_sha256: String = Sha256::digest(&capture_bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                format!(
+                    ";git-workspace={};capture-sha256={capture_sha256}",
+                    workspace.workspace_id
+                )
+            }
+        };
+
+        let identity = root.spec.identity_fingerprint(root_id);
+        let binding_identity = binding
+            .binding_fingerprint(&local_root, &state_path)
+            .map_err(anyhow::Error::msg)?;
+        (
+            local_root,
+            state_path,
+            root.spec.remote_prefix.clone(),
+            format!(
+                "root={root_id};spec={identity};binding={binding_identity}{workspace_authority}"
+            ),
+        )
+    } else {
+        let local_root = path
+            .map(Path::to_path_buf)
+            .or_else(|| config.sync.sync_root.clone())
+            .ok_or_else(|| anyhow::anyhow!("no path specified and no sync_root in config"))?;
+        let state_path = resolve_state_path(config, state_override);
+        let remote_prefix = prefix
+            .map(ToString::to_string)
+            .unwrap_or_else(|| config.storage.resolved_prefix().to_string());
+        let route_authority = format!(
+            "legacy;root={};state={};prefix={}",
+            local_root.display(),
+            state_path.display(),
+            remote_prefix
+        );
+        (local_root, state_path, remote_prefix, route_authority)
+    };
     // Reconcile scans before it executes, so even a dry-run must not admit a
     // directory containing the configured key into a generated plan.
     validate_sync_selection_excludes_master_key(config, &local_root)?;
 
-    let state_path = resolve_state_path(config, state_override);
     // StateCache::open can recover a missing or corrupt primary from backup
     // and flush that recovery on drop. Serialize explicit-state dry-runs too,
     // before any repair-capable open, so read-only inventory can trust the
     // same sidecar used by execute paths.
-    let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
+    let _state_lock = if root_id.is_some() {
+        Some(tcfs_sync::state::StateFileLock::acquire(&state_path)?)
+    } else {
+        lock_explicit_state_cache(&state_path, state_override)?
+    };
     let op = build_operator(config).await?;
     let device_id = load_device_id(config);
-
-    let remote_prefix = prefix.map(|s| s.to_string()).unwrap_or_else(|| {
-        config
-            .storage
-            .remote_prefix
-            .clone()
-            .unwrap_or_else(|| config.storage.bucket.clone())
-    });
 
     let state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
-    let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&config.sync);
+    let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&route_sync);
     // Enable `.git`-aware fast-forward conflict resolution for raw git-dir sync.
     let reconcile_config = tcfs_sync::reconcile::ReconcileConfig {
         git_sync_mode: blacklist.git_sync_mode().to_string(),
         git_ff_resolution: blacklist.allows_git_dirs() && blacklist.git_sync_mode() == "raw",
+        authoritative_paths,
         ..Default::default()
     };
     let orphan_chunk_cleanup_grace =
@@ -8671,6 +8888,7 @@ async fn cmd_reconcile(
     )
     .await
     .context("reconciliation failed")?;
+    let plan_sha256 = plan.sha256(&route_authority)?;
 
     // Display plan
     println!();
@@ -8684,6 +8902,7 @@ async fn cmd_reconcile(
         plan.summary.conflicts,
         plan.summary.up_to_date
     );
+    println!("Plan SHA-256: {plan_sha256}");
 
     if plan.actions.is_empty() {
         println!("Nothing to do — local and remote are in sync.");
@@ -8737,6 +8956,15 @@ async fn cmd_reconcile(
             }
         }
         return Ok(());
+    }
+
+    if let Some(expected) = expect_plan {
+        anyhow::ensure!(
+            expected.len() == 64
+                && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && expected.eq_ignore_ascii_case(&plan_sha256),
+            "plan mismatch: expected {expected}, freshly computed {plan_sha256}; nothing executed"
+        );
     }
 
     if !plan.actions.is_empty() {
@@ -9151,13 +9379,98 @@ fn conflict_age(detected_at: u64) -> String {
 /// `tcfs conflicts` — list recorded conflicts, grouped by repo for
 /// `.git`-internal paths. Named roots use the daemon-selected cache; the
 /// primary/legacy path stays an offline read.
+fn report_duplicate_cache_keys(duplicate_cache_keys: &[String], state_path: &Path) {
+    if duplicate_cache_keys.is_empty() {
+        return;
+    }
+    println!(
+        "note: {} duplicate cache key(s) collapsed for reporting; repair with:",
+        duplicate_cache_keys.len()
+    );
+    println!(
+        "  tcfs state-migrate-keys --state {} --execute",
+        state_path.display()
+    );
+}
+
+/// Explicit, lock-witnessed duplicate-key migration (TIN-3278).
+///
+/// The lock is acquired before `StateCache::open` in both modes because backup
+/// recovery can make opening the cache write on drop. No state-cache write in
+/// this command can therefore happen outside the writer lock.
+async fn cmd_state_migrate_keys(
+    config: &tcfs_core::config::TcfsConfig,
+    execute: bool,
+    json: bool,
+    state_override: Option<&Path>,
+) -> Result<()> {
+    let state_path = resolve_state_path(config, state_override);
+    let lock = tcfs_sync::state::StateFileLock::acquire(&state_path)
+        .with_context(|| format!("locking state cache: {}", state_path.display()))?;
+    let mut cache = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    let plan = if execute {
+        cache.migrate_duplicate_keys_locked(&lock)?
+    } else {
+        cache.plan_duplicate_key_migration()
+    };
+
+    if json {
+        let merges: Vec<_> = plan
+            .merges
+            .iter()
+            .map(|record| {
+                serde_json::json!({
+                    "dropped_key": record.dropped_key,
+                    "kept_key": record.kept_key,
+                    "conflict_preserved": record.conflict_preserved,
+                })
+            })
+            .collect();
+        let skipped: Vec<_> = plan
+            .skipped
+            .iter()
+            .map(|(key, reason)| serde_json::json!({"key": key, "reason": format!("{reason:?}")}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "state_path": state_path.to_string_lossy(),
+                "executed": execute,
+                "merges": merges,
+                "skipped": skipped,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("state cache: {}", state_path.display());
+    println!(
+        "{} ({} fold(s), {} left in place)",
+        if execute {
+            "applied"
+        } else {
+            "dry run — nothing written"
+        },
+        plan.merges.len(),
+        plan.skipped.len()
+    );
+    for record in &plan.merges {
+        println!("  fold {} -> {}", record.dropped_key, record.kept_key);
+    }
+    for (key, reason) in &plan.skipped {
+        println!("  keep {key}: {reason:?}");
+    }
+    Ok(())
+}
+
 async fn cmd_conflicts(
     config: &tcfs_core::config::TcfsConfig,
     json: bool,
     root_id: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let (state_path, routed_local_root, routed_remote_prefix, items) =
+    let (state_path, routed_local_root, routed_remote_prefix, items, duplicate_cache_keys) =
         if let Some(root_id) = root_id {
             let mut client = connect_daemon(&config.daemon.socket).await?;
             let response = client
@@ -9201,23 +9514,29 @@ async fn cmd_conflicts(
                 Some(response.local_root),
                 Some(response.remote_prefix),
                 items,
+                Vec::new(),
             )
         } else {
             let state_path = resolve_state_path(config, state_override);
             let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
             let state = tcfs_sync::state::StateCache::open(&state_path)
                 .with_context(|| format!("opening state cache: {}", state_path.display()))?;
-            let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = state
-                .conflicts()
-                .into_iter()
-                .filter_map(|(key, state)| {
-                    state
+            let report = state.conflicts_report();
+            let mut duplicate_cache_keys: Vec<String> = report
+                .iter()
+                .flat_map(|row| row.shadowed_keys.iter().map(|key| (*key).to_string()))
+                .collect();
+            duplicate_cache_keys.sort();
+            let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = report
+                .iter()
+                .filter_map(|row| {
+                    row.state
                         .conflict
                         .as_ref()
-                        .map(|conflict| (key.to_string(), conflict.clone()))
+                        .map(|conflict| (row.cache_key.to_string(), conflict.clone()))
                 })
                 .collect();
-            (state_path, None, None, items)
+            (state_path, None, None, items, duplicate_cache_keys)
         };
 
     let groups = group_conflicts(&items);
@@ -9257,6 +9576,7 @@ async fn cmd_conflicts(
                 "remote_prefix": routed_remote_prefix.as_deref(),
                 "state_path": state_path.to_string_lossy(),
                 "conflict_count": items.len(),
+                "duplicate_cache_keys": duplicate_cache_keys,
                 "groups": rendered,
             }))?
         );
@@ -9268,6 +9588,7 @@ async fn cmd_conflicts(
             println!("Root: {root_id}");
         }
         println!("No recorded conflicts.");
+        report_duplicate_cache_keys(&duplicate_cache_keys, &state_path);
         return Ok(());
     }
 
@@ -9286,6 +9607,7 @@ async fn cmd_conflicts(
         items.len(),
         groups.len()
     );
+    report_duplicate_cache_keys(&duplicate_cache_keys, &state_path);
     for g in &groups {
         println!();
         match &g.repo_root {
@@ -9444,6 +9766,42 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_named_reconcile_and_rejects_invalid_root_ids() {
+        let dry = Cli::try_parse_from(["tcfs", "reconcile", "--root", "egreg"]).unwrap();
+        assert!(matches!(
+            dry.command,
+            Commands::Reconcile {
+                root: Some(root),
+                execute: false,
+                expect_plan: None,
+                ..
+            } if root == "egreg"
+        ));
+        let execute = Cli::try_parse_from([
+            "tcfs",
+            "reconcile",
+            "--root",
+            "egreg",
+            "--execute",
+            "--expect-plan",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .unwrap();
+        assert!(matches!(
+            execute.command,
+            Commands::Reconcile {
+                root: Some(root),
+                execute: true,
+                expect_plan: Some(_),
+                ..
+            } if root == "egreg"
+        ));
+        for root in ["primary", "Bad-ID", "../escape"] {
+            assert!(Cli::try_parse_from(["tcfs", "reconcile", "--root", root]).is_err());
+        }
+    }
+
+    #[test]
     fn cli_rejects_incomplete_or_mutating_roots_arguments() {
         for args in [
             vec!["tcfs", "roots", "status"],
@@ -9567,7 +9925,9 @@ mod tests {
         let mut future = registered_root_wire("work", 1, None, None);
         future.reconcile_support = 2;
         let error = registered_root_status_view(future).unwrap_err();
-        assert!(error.to_string().contains("unsupported B0a reconcile"));
+        assert!(error
+            .to_string()
+            .contains("reconcile capability 'plan-only' inconsistent"));
 
         let mut malformed = registered_root_wire("work", 1, None, None);
         malformed.spec.as_mut().unwrap().identity_fingerprint = "b3v1:not-a-digest".into();
@@ -9623,9 +9983,11 @@ mod tests {
                 .expect_err("explicit offline conflicts must honor the writer sidecar");
             let reconcile_error = cmd_reconcile(
                 &config,
+                None,
                 Some(&sync_root),
                 None,
                 false,
+                None,
                 Some(&state_override),
             )
             .await
@@ -10567,7 +10929,7 @@ nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
 
         let mut config = test_config(&sync_root);
         config.crypto.master_key_file = Some(key_path);
-        let error = cmd_reconcile(&config, Some(&sync_root), None, false, None)
+        let error = cmd_reconcile(&config, None, Some(&sync_root), None, false, None, None)
             .await
             .expect_err("reconcile must reject before credential discovery");
 

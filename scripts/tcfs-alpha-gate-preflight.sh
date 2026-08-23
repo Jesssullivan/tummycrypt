@@ -317,7 +317,7 @@ fi
 printf '\n## TIN-132 Neo/Honey Fleet\n\n'
 printf -- '- status: `operator-run-required`\n'
 printf -- '- command:\n\n'
-printf '```bash\njust neo-honey-smoke\n```\n'
+printf '```bash\njust installed-runtime-acceptance linux /usr/bin/tcfs egreg\n```\n'
 printf '\n'
 printf 'Run this from the operator environment with `TCFS_E2E_LIVE=1`, live S3 credentials, and live NATS URL set. CI Live Storage remains regression coverage, not a replacement for the named neo/honey transcript.\n'
 
