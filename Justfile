@@ -126,13 +126,13 @@ fleet-check:
     @echo "Checking fleet NATS connectivity..."
     nats server info --server nats://nats.tcfs.tummycrypt.dev:4222
 
-# Canonical live fleet acceptance lane: SeaweedFS + NATS + neo↔honey sync path
-neo-honey-smoke:
-    bash scripts/neo-honey-smoke.sh
+# Installed-runtime filesystem acceptance. Add --execute in ARGS to apply the
+# exact printed plan and require a converged second plan.
+installed-runtime-acceptance platform tcfs_bin root *ARGS:
+    bash scripts/installed-runtime-acceptance.sh --platform {{platform}} --tcfs-bin {{tcfs_bin}} --root {{root}} {{ARGS}}
 
-# Regression test the neo/honey evidence-packet wrapper without live services
-neo-honey-smoke-test:
-    bash scripts/test-neo-honey-smoke.sh
+installed-runtime-acceptance-test:
+    bash scripts/test-installed-runtime-acceptance.sh
 
 # Read-only alpha productionization gate classifier
 alpha-gate-preflight *ARGS:

@@ -1,6 +1,11 @@
-# Neo-Honey Live Acceptance
+# Neo-Honey Live Acceptance (Retired Wrapper)
 
 Date: 2026-04-15
+
+Status: the packet/demo wrapper was retired on 2026-08-22. The Rust live-backend
+tests and archived evidence remain. Installed host acceptance now uses
+`scripts/installed-runtime-acceptance.sh` against a registered root; see
+[`../platform-support.md`](../platform-support.md).
 
 The canonical live fleet acceptance lane is `neo-honey`.
 
@@ -48,11 +53,7 @@ scripts/honey-backbone-preflight.sh --strict
 The preflight does not enroll devices, edit configs, restart services, or move
 data.
 
-```bash
-just neo-honey-smoke
-```
-
-Equivalent direct commands:
+The retained source-level live-backend tests are:
 
 ```bash
 cargo test -p tcfs-e2e --test fleet_live seaweedfs_health_check -- --nocapture

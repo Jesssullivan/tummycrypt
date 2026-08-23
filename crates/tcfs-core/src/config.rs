@@ -144,6 +144,8 @@ struct RedactedRootBindingV1Config<'a> {
     state_path: &'a PathBuf,
     lifecycle_policy: &'a RootLifecyclePolicyV1,
     resolution_policy: &'a RegisteredRootPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_workspace: &'a Option<GitWorkspaceBindingV2Config>,
 }
 
 #[derive(Debug, Serialize)]
@@ -441,6 +443,7 @@ impl TcfsConfig {
                         state_path,
                         lifecycle_policy,
                         resolution_policy,
+                        git_workspace,
                     } = binding;
                     RedactedRootBindingV1Config {
                         version: *version,
@@ -448,6 +451,7 @@ impl TcfsConfig {
                         state_path,
                         lifecycle_policy,
                         resolution_policy,
+                        git_workspace,
                     }
                 });
                 (
@@ -974,6 +978,17 @@ pub struct RootBindingV1Config {
     pub state_path: PathBuf,
     pub lifecycle_policy: RootLifecyclePolicyV1,
     pub resolution_policy: RegisteredRootPolicy,
+    /// Bulkload AgentCaptureV4 evidence selecting one GitWorkspaceV2. Only the
+    /// git-workspace-v2 profile accepts this binding.
+    #[serde(default)]
+    pub git_workspace: Option<GitWorkspaceBindingV2Config>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitWorkspaceBindingV2Config {
+    pub capture_path: PathBuf,
+    pub workspace_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -981,6 +996,7 @@ pub struct RootBindingV1Config {
 pub enum RootProfileV1 {
     GitRawV1,
     AgentStaticV1,
+    GitWorkspaceV2,
 }
 
 impl RootProfileV1 {
@@ -988,6 +1004,7 @@ impl RootProfileV1 {
         match self {
             Self::GitRawV1 => "git-raw-v1",
             Self::AgentStaticV1 => "agent-static-v1",
+            Self::GitWorkspaceV2 => "git-workspace-v2",
         }
     }
 }
@@ -1084,6 +1101,42 @@ impl RegisteredRootV1Config {
                     ));
                 }
             }
+            match (self.spec.profile, binding.git_workspace.as_ref()) {
+                (RootProfileV1::GitWorkspaceV2, Some(workspace)) => {
+                    let capture_path = expand_tilde(&workspace.capture_path);
+                    if !capture_path.is_absolute()
+                        || capture_path
+                            .components()
+                            .any(|component| matches!(component, std::path::Component::ParentDir))
+                    {
+                        return Err(format!(
+                            "registered root '{root_id}' GitWorkspaceV2 capture_path must be absolute without '..': {}",
+                            capture_path.display()
+                        ));
+                    }
+                    if workspace.workspace_id.len() != 64
+                        || !workspace
+                            .workspace_id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                    {
+                        return Err(format!(
+                            "registered root '{root_id}' GitWorkspaceV2 workspace_id must be lowercase SHA-256"
+                        ));
+                    }
+                }
+                (RootProfileV1::GitWorkspaceV2, None) => {
+                    return Err(format!(
+                        "registered root '{root_id}' git-workspace-v2 profile requires binding.git_workspace"
+                    ));
+                }
+                (_, Some(_)) => {
+                    return Err(format!(
+                        "registered root '{root_id}' binding.git_workspace requires the git-workspace-v2 profile"
+                    ));
+                }
+                (_, None) => {}
+            }
         }
         Ok(())
     }
@@ -1167,6 +1220,25 @@ impl RootBindingV1Config {
             "resolution_policy",
             self.resolution_policy.canonical_name().as_bytes(),
         );
+        if let Some(workspace) = &self.git_workspace {
+            let capture_path = expand_tilde(&workspace.capture_path);
+            let capture_path = capture_path.to_str().ok_or_else(|| {
+                format!(
+                    "GitWorkspaceV2 capture_path is not valid UTF-8: {}",
+                    capture_path.display()
+                )
+            })?;
+            update_root_fingerprint_field(
+                &mut hasher,
+                "git_workspace.capture_path",
+                capture_path.as_bytes(),
+            );
+            update_root_fingerprint_field(
+                &mut hasher,
+                "git_workspace.workspace_id",
+                workspace.workspace_id.as_bytes(),
+            );
+        }
         Ok(finish_root_fingerprint(hasher))
     }
 }
@@ -1877,6 +1949,46 @@ generation = 1
     }
 
     #[test]
+    fn git_workspace_v2_binding_is_strict_and_profile_scoped() {
+        let digest = "a".repeat(64);
+        let text = format!(
+            r#"
+[sync.root_registry.egreg.spec]
+version = 1
+remote_prefix = "roots/egreg"
+profile = "git-workspace-v2"
+generation = 1
+
+[sync.root_registry.egreg.binding]
+version = 1
+local_root = "/Users/jess/git/project"
+state_path = "/var/lib/tcfs/reconcile/egreg.json"
+lifecycle_policy = "reconcile"
+resolution_policy = "inspect-only"
+
+[sync.root_registry.egreg.binding.git_workspace]
+capture_path = "/var/lib/bulkload/agent-capture-v4.json"
+workspace_id = "{digest}"
+"#
+        );
+        let config: TcfsConfig = toml::from_str(&text).unwrap();
+        let root = &config.sync.root_registry["egreg"];
+        root.validate_shape("egreg").unwrap();
+        assert_eq!(root.spec.profile, RootProfileV1::GitWorkspaceV2);
+        assert_eq!(
+            root.binding.as_ref().unwrap().lifecycle_policy,
+            RootLifecyclePolicyV1::Reconcile
+        );
+
+        let wrong_profile = text.replace("git-workspace-v2", "agent-static-v1");
+        let wrong: TcfsConfig = toml::from_str(&wrong_profile).unwrap();
+        assert!(wrong.sync.root_registry["egreg"]
+            .validate_shape("egreg")
+            .unwrap_err()
+            .contains("requires the git-workspace-v2 profile"));
+    }
+
+    #[test]
     fn versioned_root_registry_rejects_invalid_generation_profile_version_and_fields() {
         for invalid in [
             r#"
@@ -1965,6 +2077,7 @@ resolution_policy = "inspect-only"
             state_path: PathBuf::from("/unused/configured/state.json"),
             lifecycle_policy: RootLifecyclePolicyV1::InspectOnly,
             resolution_policy: RegisteredRootPolicy::InspectOnly,
+            git_workspace: None,
         };
         let neo = binding
             .binding_fingerprint(
@@ -2062,6 +2175,7 @@ resolution_policy = "inspect-only"
                     state_path: PathBuf::from("/var/lib/tcfs/reconcile/agent-root.json"),
                     lifecycle_policy: RootLifecyclePolicyV1::InspectOnly,
                     resolution_policy: RegisteredRootPolicy::InspectOnly,
+                    git_workspace: None,
                 }),
             },
         );
@@ -2465,6 +2579,7 @@ require_session = false
                     state_path: temp.path().join("reconcile/versioned.json"),
                     lifecycle_policy: RootLifecyclePolicyV1::InspectOnly,
                     resolution_policy: RegisteredRootPolicy::InspectOnly,
+                    git_workspace: None,
                 }),
             },
         );

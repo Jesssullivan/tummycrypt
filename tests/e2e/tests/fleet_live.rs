@@ -18,7 +18,7 @@
 //!   cargo test -p tcfs-e2e --test fleet_live -- --nocapture
 //!
 //! Or run the named smoke lane wrapper:
-//!   just neo-honey-smoke
+//!   just installed-runtime-acceptance linux /usr/bin/tcfs egreg
 
 use std::time::Duration;
 

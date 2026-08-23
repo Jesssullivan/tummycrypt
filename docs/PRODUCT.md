@@ -1,11 +1,9 @@
 # TCFS product sequence and root-identity decision
 
 Status: **accepted 2026-07-14**. Strategy **A → B → C** is the product order.
-This record was grounded against tummycrypt `origin/main` at
-`21f8df303596d1b9f6f90cc7953eb8f65f353ac3`, the live Linear/GitHub lanes,
-and the named fleet evidence in [`ops/current.md`](ops/current.md).
-The stable-root source boundary was refreshed on 2026-07-19 after PR #551
-landed; this does not refresh or widen the live fleet evidence.
+The stable-root source boundary was refreshed on 2026-08-22 against
+`origin/main` at `dfe8282a4d93af0ca1c495065ec82002352d4d86`. This does not
+refresh or widen live fleet evidence.
 
 ## Decision
 
@@ -73,12 +71,13 @@ contains no credentials, and is loaded from the daemon's trusted configuration.
 The V1 fleet spec and host binding have separate domain-separated BLAKE3
 fingerprints so a host-path change cannot silently change the fleet identity.
 
-B0a is an immutable, authorized read surface only. It supports
-`git-raw-v1` and `agent-static-v1`, reports descriptor/binding availability and
-persisted state counts, and always reports reconcile support as `NONE`. It adds
-no mutation, MCP tool, enrollment, or live deployment. The precise contract is
-recorded in
-[the B0a root-registry ADR](design/versioned-root-registry-status-b0a-2026-07-19.md).
+The V1 registry remains configuration-owned. A binding with
+`lifecycle_policy = "inspect-only"` is read-only. A binding explicitly set to
+`reconcile` may use the CLI lifecycle below. `git-workspace-v2` consumes only a
+complete Bulkload `dev.tinyland.bulkload.git-workspace.v2` record, rejects
+unknown schema fields or active Git operations, and treats raw source `.git`,
+Git-admin, and linked-worktree paths as device-local evidence rather than
+transport instructions. Git content continues through the bundle/ref mode.
 
 Required invariants for the complete B0 lifecycle (not claims that every item
 is implemented by PR #551):
@@ -149,14 +148,13 @@ candidate. It bypasses daemon session authentication, cannot make `--root`
 select the correct prefix by itself, and only handles the Git group while
 ordinary file conflicts remain.
 
-### Minimal A and B0a surfaces
+### Minimal registered-root lifecycle
 
-Status on 2026-07-19: PR #551 is landed and implements named conflict
-inspection and the bounded Git keep-both resolve path. TIN-2863 adds the
-source-only, immutable V1 inventory/status seam. Neither surface implements
-`reconcile --root`, named-root ordinary-file resolution, or Lab
-enrollment/rendering. Reconcile planning and execution remain staged behind
-the later B0 gates.
+The root ID selects the local root, remote prefix, state cache, profile, and
+lifecycle policy from trusted configuration. Planning is the default. Execute
+requires the exact SHA-256 printed by a fresh plan; a changed route, capture,
+state, remote namespace, or local content changes the plan and stops execution.
+Delete-local and delete-remote remain disabled by default.
 
 ```bash
 # Landed source from PR #551 (legacy conflict-only registry)
@@ -170,11 +168,16 @@ tcfs resolve --root git-roam-tool-daemon \
 tcfs roots list
 tcfs roots status git-roam-tool-daemon
 
-# Staged B0b plan surface; not implemented yet
+# Deterministic plan
 tcfs reconcile --root git-roam-tool-daemon
 
-# Later execution gate; not B0a or B0b
-tcfs reconcile --root git-roam-tool-daemon --execute
+# Apply exactly that plan
+tcfs reconcile --root git-roam-tool-daemon \
+  --execute --expect-plan <sha256>
+
+# Explicit, locked TIN-3278 state-key repair
+tcfs state-migrate-keys --state /var/lib/tcfs/reconcile/git-roam-tool-daemon.json
+tcfs state-migrate-keys --state /var/lib/tcfs/reconcile/git-roam-tool-daemon.json --execute
 ```
 
 For the implemented named resolver, an authenticated pull-only session may run
@@ -183,14 +186,10 @@ and a root with `policy = "resolve"`; `policy = "inspect-only"` never permits
 execute. These are source-tested semantics, not evidence that a new live auth
 or resolver ceremony occurred during the TIN-2856 freeze.
 
-Lab must eventually render an accepted versioned descriptor and host binding
-into daemon config. Today `resolve --root` selects the legacy
-daemon-trusted tuple, `conflicts --root` is read-only, and V1 `roots
-list/status` cannot reconcile or resolve anything. A future privileged
-root-add/update surface belongs to B. `conflicts --state` remains a diagnostic
-command. Legacy `push`, `pull`, `rm`, and executing `reconcile` with an
-explicit `--state` are still mutation routes; PR #551 serializes them with the
-same state lock, but they are not V1 root-registry authorization surfaces.
+Lab must render the accepted descriptor and device-local binding into config;
+there is no privileged root-add/update RPC. `conflicts --state` remains a
+diagnostic command. Legacy explicit-path routes are not V1 root-registry
+authorization surfaces.
 
 ## TIN-2658 live evidence and residual closure
 

@@ -4766,6 +4766,24 @@ async fn push_regular_files_concurrently(
 /// contain no files (after exclusion rules) so callers can create `.tcfs_dir`
 /// marker objects in the remote index.
 pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResult> {
+    collect_files_with_bundle_scope(root, config, false)
+}
+
+/// Collect one Bulkload-selected GitWorkspaceV2 worktree. Bundle mode is
+/// deliberately root-only: nested repositories are separate captured
+/// workspaces and must never be smuggled into this root's transport.
+pub(crate) fn collect_authoritative_git_workspace_files(
+    root: &Path,
+    config: &CollectConfig,
+) -> Result<CollectResult> {
+    collect_files_with_bundle_scope(root, config, true)
+}
+
+fn collect_files_with_bundle_scope(
+    root: &Path,
+    config: &CollectConfig,
+    root_bundle_only: bool,
+) -> Result<CollectResult> {
     let mut files = Vec::new();
     let mut symlinks = Vec::new();
     let mut empty_dirs = Vec::new();
@@ -4803,14 +4821,25 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResul
     )?;
 
     // Bundle mode: for every enrolled git repo, capture `.git` as a single
-    // `git bundle` and add the bundle to the upload set as a normal object.
-    // The raw `.git/*` internals were skipped by `collect_files_inner`.
+    // fresh `git bundle` and add only that generated bundle to the upload set.
+    // The raw `.git/*` internals and any stale `.git-tcfs-bundle` bytes were
+    // skipped by `collect_files_inner`. Generation and safety failures must
+    // fail the collection so an older artifact can never stand in for this
+    // capture.
     if config.sync_git_dirs && config.git_sync_mode == "bundle" {
-        collect_git_bundles(root, &mut files);
+        if root_bundle_only {
+            if is_git_workspace_root(root) {
+                collect_one_git_bundle(root, &mut files)?;
+            }
+        } else {
+            collect_git_bundles(root, &mut files)?;
+        }
     }
 
     files.sort(); // deterministic order
+    files.dedup();
     symlinks.sort();
+    symlinks.dedup();
     empty_dirs.sort();
     Ok(CollectResult {
         files,
@@ -4841,6 +4870,14 @@ fn collect_files_inner(
         let ft = entry.file_type().context("file_type dir entry")?;
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            // This path is a generated transport artifact, never ordinary
+            // workspace content. Bundle mode adds it back only after a fresh,
+            // successful Git safety check and snapshot.
+            if name == crate::git_safety::GIT_BUNDLE_REL_PATH {
+                debug!(path = %path.display(), "skipping stale generated Git bundle");
+                continue;
+            }
+
             // Full-path check (not just the name): the fail-closed
             // `.git/worktrees/` fence needs path context so the per-worktree
             // admin area is never collected even in raw mode (G5 / TIN-1620).
@@ -4995,41 +5032,54 @@ fn collect_files_inner(
 /// directory) and, for each one that is safe to snapshot, create a git bundle
 /// and append its path to `files` so it is uploaded as a normal TCFS object.
 ///
-/// Repos with in-progress operations (rebase, merge, lockfiles) are skipped
-/// this cycle and will be retried on the next sync once the operation settles.
-/// Bundle staleness is handled implicitly: `git bundle create --all` always
-/// reflects current refs, and the resulting object only re-uploads chunks that
-/// actually changed (content-addressed dedup).
-fn collect_git_bundles(root: &Path, files: &mut Vec<PathBuf>) {
+/// Any repo whose safety check or snapshot fails aborts collection. Returning a
+/// partial set would allow a previously generated bundle to masquerade as a
+/// current authoritative capture.
+fn collect_git_bundles(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     let mut repos = Vec::new();
     find_git_repos(root, &mut repos);
     for repo_root in repos {
-        let git_dir = repo_root.join(".git");
-        let safety = crate::git_safety::git_is_safe(&git_dir);
-        if !safety.blocking.is_empty() {
-            warn!(
-                repo = %repo_root.display(),
-                blocking = ?safety.blocking,
-                "skipping git bundle: active git operation in progress"
-            );
-            continue;
-        }
-        match crate::git_safety::snapshot_git_for_sync(&repo_root) {
-            Ok(bundle_path) => {
-                debug!(repo = %repo_root.display(), bundle = %bundle_path.display(), "captured git bundle");
-                files.push(bundle_path);
-            }
-            Err(e) => {
-                warn!(repo = %repo_root.display(), "git bundle failed: {e}");
-            }
-        }
+        collect_one_git_bundle(&repo_root, files)?;
     }
+    Ok(())
 }
 
-/// Recursively find directories under `root` that contain a `.git` directory
-/// (i.e. git working-tree roots). Does not descend into `.git` itself.
+fn collect_one_git_bundle(repo_root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    let git_dir = crate::git_safety::workspace_git_dir(repo_root).with_context(|| {
+        format!(
+            "resolving Git admin path for bundle capture: {}",
+            repo_root.display()
+        )
+    })?;
+    let safety = crate::git_safety::git_is_safe(&git_dir);
+    if !safety.blocking.is_empty() {
+        anyhow::bail!(
+            "Git bundle capture is unsafe for {}: {}",
+            repo_root.display(),
+            safety.blocking.join(", ")
+        );
+    }
+    let bundle_path = crate::git_safety::snapshot_git_for_sync(repo_root)
+        .with_context(|| format!("capturing fresh Git bundle for {}", repo_root.display()))?;
+    debug!(repo = %repo_root.display(), bundle = %bundle_path.display(), "captured git bundle");
+    files.push(bundle_path);
+    Ok(())
+}
+
+fn is_git_workspace_root(dir: &Path) -> bool {
+    let marker = dir.join(".git");
+    std::fs::symlink_metadata(marker)
+        .ok()
+        .is_some_and(|metadata| {
+            !metadata.file_type().is_symlink()
+                && (metadata.file_type().is_dir() || metadata.file_type().is_file())
+        })
+}
+
+/// Recursively find normal and linked worktrees. The `.git` directory or
+/// pointer is only a discovery marker and is never added to the upload set.
 fn find_git_repos(dir: &Path, out: &mut Vec<PathBuf>) {
-    if dir.join(".git").is_dir() {
+    if is_git_workspace_root(dir) {
         out.push(dir.to_path_buf());
         // Still descend to catch nested submodule/worktree repos.
     }
@@ -6414,6 +6464,141 @@ mod tests {
                 .iter()
                 .all(|f| f != "wt-linked/.git" && f != "repo/vendor/dep/.git"),
             "gitfile pointers must never be collected: {files:?}"
+        );
+    }
+
+    #[test]
+    fn authoritative_git_workspace_bundles_only_the_selected_root() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("selected");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        for repo in [&root, &nested] {
+            git(repo, &["init", "--quiet"]);
+            git(repo, &["config", "user.email", "test@tcfs.local"]);
+            git(repo, &["config", "user.name", "TCFS Test"]);
+            git(repo, &["config", "commit.gpgsign", "false"]);
+            std::fs::write(repo.join("tracked.txt"), b"tracked\n").unwrap();
+            git(repo, &["add", "tracked.txt"]);
+            git(repo, &["commit", "--quiet", "-m", "initial"]);
+        }
+        std::fs::write(root.join(crate::git_safety::GIT_BUNDLE_REL_PATH), b"stale").unwrap();
+
+        let result = collect_authoritative_git_workspace_files(
+            &root,
+            &CollectConfig {
+                sync_git_dirs: true,
+                git_sync_mode: "bundle".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let files = rel_names(&result.files, &root);
+        assert!(files.contains(&".git-tcfs-bundle".to_string()));
+        assert!(!files.contains(&"nested/.git-tcfs-bundle".to_string()));
+        assert!(!nested.join(".git-tcfs-bundle").exists());
+        assert_ne!(
+            std::fs::read(root.join(crate::git_safety::GIT_BUNDLE_REL_PATH)).unwrap(),
+            b"stale",
+            "authoritative presence must come from this capture, not old bytes"
+        );
+    }
+
+    #[test]
+    fn stale_bundle_cannot_mask_authoritative_capture_failure() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("selected");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let stale_bundle = root.join(crate::git_safety::GIT_BUNDLE_REL_PATH);
+        std::fs::write(&stale_bundle, b"stale bundle bytes").unwrap();
+
+        let ordinary = collect_files(
+            &root,
+            &CollectConfig {
+                sync_hidden_dirs: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !ordinary.files.contains(&stale_bundle),
+            "generated bundle artifacts are never ordinary workspace content"
+        );
+
+        let index_lock = root.join(".git/index.lock");
+        std::fs::write(&index_lock, b"locked").unwrap();
+        let safety_error = collect_authoritative_git_workspace_files(
+            &root,
+            &CollectConfig {
+                sync_git_dirs: true,
+                git_sync_mode: "bundle".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{safety_error:#}").contains("index.lock"),
+            "{safety_error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&stale_bundle).unwrap(),
+            b"stale bundle bytes",
+            "the stale artifact exists, but the failed collection cannot return it"
+        );
+
+        std::fs::remove_file(index_lock).unwrap();
+        let generation_error = collect_authoritative_git_workspace_files(
+            &root,
+            &CollectConfig {
+                sync_git_dirs: true,
+                git_sync_mode: "bundle".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{generation_error:#}").contains("git bundle failed"),
+            "{generation_error:#}"
+        );
+        assert!(
+            !stale_bundle.exists(),
+            "a failed fresh snapshot must not leave prior bytes available"
         );
     }
 

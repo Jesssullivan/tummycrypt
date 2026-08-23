@@ -1,9 +1,9 @@
 # Current TCFS workstream
 
-Source boundary last verified: **2026-07-19** against tummycrypt `origin/main`
-`febd285f3ab34c4f93756aefde8ebf7071f88bdf`. The live
-`neo`/`honey`/`sting` rows retain their 2026-07-14 verification boundary; this
-source refresh does not claim a new deployment or ceremony.
+Source boundary last verified: **2026-08-22** against tummycrypt `origin/main`
+`dfe8282a4d93af0ca1c495065ec82002352d4d86`. The live host rows retain their
+older evidence boundaries; this source refresh claims no deployment or
+ceremony.
 
 This is the living blocker list. Dated plans and evidence packets remain useful
 history, but they do not override this page.
@@ -22,6 +22,7 @@ product threshold.
 | Fleet | Honey runs `v0.12.17`; neo has a managed `v0.12.17` build | Neo's effective interactive PATH still selects `v0.12.12`; sting remains `v0.12.16`; Bumble is the formal R6 host |
 | Security | Stored content is encrypted; TOTP is enrolled on honey | Production S3 uses plaintext HTTP; headless sessions and invitation persistence are incomplete |
 | Packaging | Tagged Nix release and several artifact lanes exist | Homebrew stale; Rocky RPM/FUSE and vendor acceptance unproven |
+| Registered roots | Source supports deterministic `reconcile --root <id>` and exact-plan execution for explicitly reconcile-enabled bindings; TIN-3277/3278 regressions and Bulkload GitWorkspaceV2 decoding are covered in Rust | Installed eGreg pilot, host activation, and live convergence evidence |
 
 ## Closed and corrected
 
@@ -93,10 +94,11 @@ The full evidence boundary and root invariants are in
 4. **TLS.** Move the credential-bearing SeaweedFS/S3 path from the current
    internal plaintext HTTP endpoint to an authenticated TLS hostname and enable
    `storage.enforce_tls`.
-5. **Stable root identity.** Keep landed PR #551's conflict-only route
-   unchanged while TIN-2863/B0a adds the separate authorized V1
-   `roots list/status` source seam. B0a reports immutable persisted state and
-   reconcile support `NONE`; it adds no MCP, mutation, or live deployment.
+5. **Stable root lifecycle.** Render one eGreg binding with lifecycle policy
+   `reconcile`, run the installed binary's dry plan, then execute only the
+   emitted SHA-256. Git-workspace roots require a complete Bulkload
+   GitWorkspaceV2 capture and use bundle/ref transport; raw `.git` admin paths
+   are never transported.
 6. **TIN-2658 residual closure.** After TIN-2856 clears live work, adjudicate
    the two user-content conflicts and stale ref pair, then capture final
    Git/content/state convergence evidence. Do not repeat the already completed
@@ -124,8 +126,9 @@ The full evidence boundary and root invariants are in
 
 - Per-device-only crypto. A client that cannot unwrap content must fail closed,
   never surface ciphertext as a file.
-- Linked-worktree roaming. Gitfiles and shared worktree metadata need explicit
-  reconstruction semantics.
+- Installed linked-worktree recovery. The source adapter now consumes the
+  Bulkload GitWorkspaceV2 logical topology and bundle/ref content, but eGreg
+  activation and recovery evidence remain open.
 - Broad `~/git`, dotdir, Documents, or home takeover.
 - WebAuthn and unattended enrollment.
 - NFS, Windows, and iOS product parity.
@@ -153,5 +156,8 @@ directory-health and strict remote-builder verifier are green.
   results.
 - A source-only, dry-run-only, readiness-only, or package-build result must be
   labeled as such.
+- The installed-runtime acceptance entry point is
+  `scripts/installed-runtime-acceptance.sh`; retired Neo/Honey packet scripts
+  are historical evidence, not current acceptance commands.
 - No daily-driver, platform, or packaging claim is current unless this page or
   a newer named evidence packet promotes it.

@@ -131,8 +131,10 @@ just tcfs-e2e-test honey petting-zoo-mini
 just tcfs-golden-test honey
 ```
 
-Use `neo-honey-smoke` from this repo for the live backend lane, and use the
-`lab` repo recipes for host-backed acceptance. They answer different questions.
+Use the retained `fleet_live` Rust test for the historical live-backend lane.
+For a shipped host capability, run `scripts/installed-runtime-acceptance.sh`
+against the installed binary and its registered root. The `lab` recipes still
+own host activation and placement.
 
 ## Evidence To Capture
 

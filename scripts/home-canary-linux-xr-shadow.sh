@@ -28,7 +28,7 @@ Options:
                           existing shadow as the pushed snapshot
   --create-bucket        Best-effort bucket creation before push/lifecycle
   --run-honey            Emit/copy/run honey mounted traversal smoke
-  --run-linux-lifecycle  Run Linux lifecycle companion on honey under <remote>/linux-lifecycle
+  --run-linux-lifecycle  Retired; use scripts/installed-runtime-acceptance.sh
   --honey-host <host>    SSH host label. Default: honey
   --honey-mount-root <path>
                           Honey mountpoint. Default: /tmp/tcfs-linux-xr-shadow-<UTC>/mount
@@ -219,8 +219,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --run-linux-lifecycle)
-      run_linux_lifecycle=1
-      shift
+      fail "--run-linux-lifecycle was retired; run scripts/installed-runtime-acceptance.sh against a registered root"
       ;;
     --honey-host)
       [[ $# -ge 2 ]] || fail "--honey-host requires a value"
@@ -1327,31 +1326,10 @@ elif [[ "$run_honey" == "1" ]]; then
   cleanup_remote_env
 fi
 
-linux_lifecycle_remote="${remote%/}/linux-lifecycle"
 if [[ "$run_linux_lifecycle" == "1" && "$push_remote" == "1" && "$push_rc" -ne 0 ]]; then
   linux_lifecycle_status_label=skipped-push-failed
 elif [[ "$run_linux_lifecycle" == "1" ]]; then
-  args=(
-    --remote "$linux_lifecycle_remote"
-    --evidence-dir "$evidence_dir/linux-lifecycle"
-    --honey-host "$honey_host"
-    --honey-remote-dir "$honey_remote_dir/linux-lifecycle"
-    --honey-tcfs-bin "$honey_tcfs_bin"
-    --run-linux-lifecycle
-  )
-  if [[ "$create_bucket" == "1" ]]; then
-    args+=(--create-bucket)
-  fi
-  if [[ "$forward_aws_env" == "1" ]]; then
-    args+=(--forward-aws-env)
-  fi
-  bash "$REPO_ROOT/scripts/fleet-parity-pilot-demo.sh" "${args[@]}" \
-    >"$evidence_dir/linux-lifecycle-companion.log" 2>&1 || linux_lifecycle_rc=$?
-  linux_lifecycle_status_label=$linux_lifecycle_rc
-  write_run_metadata
-  if [[ "$linux_lifecycle_rc" -ne 0 ]]; then
-    write_result "$linux_lifecycle_rc" linux-lifecycle-companion-failed
-  fi
+  fail "Linux lifecycle packets were retired; use scripts/installed-runtime-acceptance.sh"
 fi
 
 write_run_metadata
