@@ -1,109 +1,143 @@
-# CI runner enrollment: why `runs-on` was NOT migrated to a `tummycrypt-*` class
+# CI runner enrollment: `tummycrypt-*` is a scale-set anchor, not a `runs-on` label
 
 Date: 2026-08-28. Measured on neo against `origin/main` c782bb9, ci-templates
-v3.1.0 (`d8d178c022a0f84853d53a2c8fe0fc90115f0949`), and
-GloriousFlywheel `main`.
+v3.1.0 (`d8d178c022a0f84853d53a2c8fe0fc90115f0949`), GloriousFlywheel `main`,
+and `Jesssullivan/jesssullivan-infra` `HEAD`.
 
-Lane 4 of the release-flow migration was specified as, among other things,
-"`release.yml` `runs-on` → `tummycrypt-*` class". That instruction is not
-executable as written, and executing it would break the release lane. This note
-records what was measured, so the next person does not re-derive it.
+Lane 4 of the release-flow migration was specified as "`release.yml` `runs-on`
+→ `tummycrypt-*` class". Taken literally that is wrong and would strand every
+job. Taken as intended it is right, already provisioned, and partly executed by
+this PR. This note records the difference, because the first two hours of the
+investigation went to the wrong conclusion and the receipts are worth keeping.
 
-## 1. There is no `tummycrypt-*` runner set
-
-`GloriousFlywheel tofu/stacks/arc-runners/honey.tfvars` defines seven runner
-sets. Every one carries a `tinyland-*` `runner_label`:
-
-| `runner_label` | line |
-|---|---|
-| `tinyland-nix-operator` | 836 |
-| `tinyland-nix-merge-gate` | 952 |
-| `tinyland-nix` | 1074 |
-| `tinyland-dind` | 1166 |
-| `tinyland-nix-heavy` | 1270 |
-| `tinyland-nix-kvm` | 1374 |
-| `tinyland-nix-gpu` | 1479 |
-
-There is no `tummycrypt` anywhere in the file.
-
-## 2. A `tummycrypt-*` label is forbidden by the taxonomy authority
+## 1. `tummycrypt-*` cannot be a `runs-on` label
 
 `GloriousFlywheel scripts/validate-arc-runner-taxonomy.py` — the authority for
 tinyland tfvars `runner_label` values — lists `tummycrypt` explicitly in
-`PROJECT_IDENTITY_TOKENS`, and rejects any label whose first token is not
-`tinyland` (`label_errors()`, lines 304-332).
+`PROJECT_IDENTITY_TOKENS`, and its `label_errors()` (lines 304-332) rejects any
+label whose first token is not `tinyland`.
 
-The Ruby port that `ci-templates lint-runs-on` uses
-(`scripts/runner_label_taxonomy.rb`) carries the same
-`PROJECT_IDENTITY_TOKENS` list, and its action description names the failure
-class directly: "FAILS known repo-shaped / project-identity self-hosted
-fossils (e.g. `dollhouse-farm-nix`, `jesssullivan-nix-heavy`)".
+The Ruby port used by `ci-templates lint-runs-on`
+(`scripts/runner_label_taxonomy.rb`) carries the same list, and the action
+description names the class directly: it "FAILS known repo-shaped /
+project-identity self-hosted fossils (e.g. `dollhouse-farm-nix`,
+`jesssullivan-nix-heavy`)".
 
-The `tummycrypt-*` name in the delivery-stack map is best read as an ARS
-**anchor** name (`tfvars_anchor`), not a `runs-on` label. That distinction is
-already load-bearing elsewhere: in `GloriousFlywheel config/consumer-registry.json`,
+## 2. `tummycrypt-*` IS the scale-set anchor, and it is live
+
+`Jesssullivan/jesssullivan-infra`,
+`tofu/stacks/arc-runners/jesssullivan.tfvars`, `extra_runner_sets` (TIN-2538):
+
+```hcl
+tummycrypt-nix = {
+  github_config_url     = "https://github.com/Jesssullivan/tummycrypt"
+  runner_label          = "tinyland-nix"
+  runner_scale_set_name = "tummycrypt-nix"
+  max_runners           = 3
+  runner_image          = "ghcr.io/tinyland-inc/actions-runner-nix@sha256:1ccce66d…"
+  node_selector         = { "kubernetes.io/hostname" = "honey" }
+}
+
+tummycrypt-dind = {
+  github_config_url     = "https://github.com/Jesssullivan/tummycrypt"
+  runner_label          = "tinyland-dind"
+  runner_scale_set_name = "tummycrypt-dind"
+  max_runners           = 1
+}
+```
+
+The anchor's own comment states the reason it exists: *"Personal-account
+repositories cannot consume the tinyland-inc org-scoped scale sets directly, so
+these two registration identities expose only the shared workflow-facing
+capability labels."*
+
+**Anchor name ≠ label.** The same split is load-bearing across the estate:
 `Jesssullivan/bulkload` has `tfvars_anchor: bulkload-nix` but
-`runner_class: tinyland-nix`, and `Jesssullivan/bulkload/.github/workflows/ci.yml`
-line 20 reads `runs-on: tinyland-nix`.
+`runner_class: tinyland-nix`, and its `ci.yml` line 20 reads
+`runs-on: tinyland-nix`.
 
-## 3. Even `tinyland-nix` is unreachable from this repo today
+**Liveness, not just declaration.** `jesssullivan-infra` run
+[33140300433](https://github.com/Jesssullivan/jesssullivan-infra/actions/runs/33140300433)
+("Deploy ARC Runners v2", success, 2026-08-28T03:55Z) logs at 04:00:11Z and
+04:00:29Z:
 
-Every runner set in `honey.tfvars` registers against
-`github_config_url = "https://github.com/tinyland-inc"` (line 32). GitHub
-organization runners serve repositories **in that organization**.
-`Jesssullivan/tummycrypt` is a personal-account repository.
+```
+module.extra_runners["tummycrypt-dind"].helm_release.arc_runner: Refreshing state... [id=tummycrypt-dind]
+module.extra_runners["tummycrypt-nix"].helm_release.arc_runner: Refreshing state... [id=tummycrypt-nix]
+```
 
-Measured:
+Both Helm releases exist in tofu state. The lane is live today.
+
+## 3. The probe that nearly produced the wrong answer
 
 ```
 GET /repos/Jesssullivan/tummycrypt/actions/runners
   -> {"total_count":0,"runners":[]}
 ```
 
-`Jesssullivan/legalab` has already hit this and committed the finding into its
-own CI workflow header: *"Personal private repositories cannot consume the
-tinyland-inc runner group. TIN-4050 tracks a future repo-scoped PZM/Flywheel
-enrollment."*
+This does **not** mean "no runners". ARC scale sets with `min_runners = 0`
+register *ephemeral* runners that exist only while a job is assigned, so the
+idle steady state is an empty list. Read alone, this reading supports a
+confident and completely wrong conclusion that the repo has no enrollment.
+`GET /repos/Jesssullivan/bulkload/actions/runners` returns the same empty list,
+and bulkload has been running on `tinyland-nix` for months.
 
-Flipping any `runs-on:` in this repo to a `tinyland-*` label today would queue
-those jobs forever.
+**Use the tofu apply log as the liveness oracle, not the runners API.**
 
-## 4. The darwin jobs have no destination even after enrollment
+## 4. What moved, and what did not
 
-ARC runs on the honey Kubernetes cluster: Linux only. The taxonomy permits
-`macos`/`darwin` **suffixes** on a constructed label, but no such runner set
-exists. `release.yml`'s `build-fileprovider` and `build-pkg` jobs, and
-`nix-ci.yml`'s `build-macos-aarch64`, need real macOS with Xcode and
-notarization credentials. The only self-hosted Mac in the estate is
-`petting-zoo-mini`, which is itself a repo-shaped fossil label and currently has
-zero runners registered against this repository.
+Migrated to `tinyland-nix` in this PR:
 
-So even a successful enrollment closes the Linux half only.
+| workflow | job | why it was chosen first |
+|---|---|---|
+| `nix-ci.yml` | `flake-check` | pure `nix`; fires on every push and PR, so the anchor gets exercised immediately rather than only at release time |
+| `nix-ci.yml` | `build-linux-x86_64` | pure `nix`; the runner image is `actions-runner-nix` |
+| `release.yml` | `nix-build` | pure `nix`, and a LEAF — nothing `needs:` it, so a bad first run cannot take a release with it |
 
-## 5. What was done instead
+Deferred, with the specific blocker:
 
-- `runs-on:` values are unchanged. Changing them to a nonexistent label strands
-  the release lane; it does not migrate it.
-- The waiver is written into the header of `release.yml` and `nix-ci.yml`, where
-  CI is actually read, rather than left as tribal knowledge.
-- `.github/workflows/runs-on-contract.yml` (series PR-b) adopts `lint-runs-on`
-  as a **ratchet** against `.github/runs-on-baseline`, so the existing debt is a
-  single reviewable number and any *new* hosted or repo-shaped `runs-on` fails
-  the PR.
+| job | blocker |
+|---|---|
+| `release.yml` `build-binaries` | `sudo apt-get install` for fuse3/protobuf; the nix runner image is not Ubuntu |
+| `release.yml` `create-release` | `sudo dpkg -i` / `sudo rpm -i` / `brew` verification steps |
+| `release.yml` `build-image` | needs qemu + buildx; belongs on `tinyland-dind`, and multi-arch qemu inside dind is untested here |
+| `release.yml` `plan`, `generate-installers`, `update-homebrew` | depend on hosted-image tooling (`jq`, `gh`, `brew`) that the nix runner image is not known to carry |
 
-## 6. Exit path
+No destination at all:
 
-1. A GloriousFlywheel PR adding `Jesssullivan/tummycrypt` to
-   `config/consumer-registry.json` with `runner_class: tinyland-nix` and
-   `tfvars_anchor: tummycrypt-nix` — the bulkload shape. Drafted as series PR-d.
-2. The matching owner-overlay extra runner set (`jesssullivan-infra`), so a
-   runner actually registers against this repository. Verify with
-   `GET /repos/Jesssullivan/tummycrypt/actions/runners` returning a non-zero
-   `total_count` carrying the `tinyland-nix` label.
-3. Then, and only then, flip the Linux `runs-on:` values, lower
-   `.github/runs-on-baseline` in the same commit, and drop the waiver headers
-   for the jobs that moved.
-4. The darwin jobs stay on hosted runners until a darwin capability class
-   exists. Track separately; do not fold it into the Linux flip.
+- `release.yml` `build-fileprovider`, `build-pkg`; `nix-ci.yml`
+  `build-macos-aarch64`. ARC is Linux-on-Kubernetes. The taxonomy permits
+  `macos`/`darwin` **suffixes** on a constructed label, but no such scale set
+  exists, and these jobs need real macOS with Xcode and notarization
+  credentials. The only self-hosted Mac in the estate is `petting-zoo-mini`,
+  itself a repo-shaped fossil label. These stay hosted indefinitely; track
+  separately and do not fold them into the Linux flip.
 
-Related: TIN-3914 (hosted-runner ruling), TIN-4050 (repo-scoped enrollment).
+## 5. Sequencing for the rest
+
+1. Let the three migrated jobs run green on `tinyland-nix` at least once.
+2. Then move `plan`, `generate-installers`, `update-homebrew` one at a time,
+   each with a `command -v` preflight for the tools it assumes.
+3. `build-image` → `tinyland-dind` once qemu-in-dind is proven.
+4. `build-binaries` and `create-release` need their apt/dpkg/rpm steps replaced
+   with nix equivalents first. That is a real piece of work, not a label swap.
+5. Lower `.github/runs-on-baseline` in the same commit as each move.
+
+## 6. What this is NOT
+
+Not a GloriousFlywheel `config/consumer-registry.json` entry. That registry is
+for Bazel RBE / container-image-builder repos, and its validator
+(`scripts/validate-consumer-registry.py`) requires `build_targets` to be a
+non-empty list of Bazel labels beginning with `//`, and restricts
+`substrate_mode` to `{executor-backed, shared-cache-backed}`. tummycrypt has no
+Bazel wiring at all — no `MODULE.bazel`, `BUILD.bazel`, `WORKSPACE.bazel`,
+`.bazelrc` or `.bazelversion` anywhere in the tree — so any entry would have to
+invent targets, which is precisely the "internal honesty" the registry exists
+to enforce. GF's own `docs/build-system/enrollment.md` §6 says it outright:
+*"Runner provisioning is outside this registry."*
+
+Runner provisioning for this repo is the owner-overlay anchor in §2, and it is
+already done.
+
+Related: TIN-2538 (the anchors), TIN-3914 (hosted-runner ruling), TIN-4050
+(personal-repo enrollment).

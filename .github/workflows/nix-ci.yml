@@ -21,6 +21,13 @@
 # starts compiling from source days later. A push branch with no token, a
 # broken login, or a failed push now fails the job.
 #
+# RUNNERS. The two Linux jobs run on `tinyland-nix`, served to this repository
+# by the `tummycrypt-nix` ARC scale set in the jesssullivan-infra owner overlay
+# (TIN-2538). These are the estate's first-choice canary for that anchor: they
+# fire on every push and PR rather than only on a release tag, and the runner
+# image (ghcr.io/tinyland-inc/actions-runner-nix) is built for exactly this
+# workload. The macOS job has no self-hosted destination and stays hosted.
+#
 # Required secrets:
 #   ATTIC_TOKEN — obtained from `attic login tinyland <server> <token>`
 
@@ -45,7 +52,7 @@ env:
 jobs:
   flake-check:
     name: Flake Check
-    runs-on: ubuntu-latest # TIN-3914 waiver — see docs/ops/ci-runner-enrollment-2026-08-28.md
+    runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -64,7 +71,7 @@ jobs:
 
   build-linux-x86_64:
     name: Build Linux x86_64
-    runs-on: ubuntu-latest # TIN-3914 waiver — see docs/ops/ci-runner-enrollment-2026-08-28.md
+    runs-on: tinyland-nix
     needs: flake-check
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -128,7 +135,10 @@ jobs:
 
   build-macos-aarch64:
     name: Build macOS aarch64
-    runs-on: macos-14 # TIN-3914 waiver — see docs/ops/ci-runner-enrollment-2026-08-28.md
+    # No darwin capability class exists — ARC is Linux-on-Kubernetes — so this
+    # job stays hosted. TIN-3914 waiver; see
+    # docs/ops/ci-runner-enrollment-2026-08-28.md
+    runs-on: macos-14
     # Hard stop under the 6h hosted-runner ceiling: a wedged job must fail loud
     # with hours to spare rather than silently eat the whole window. The two
     # 6h00m deaths this bound was added for were both inside "Set up FlakeHub

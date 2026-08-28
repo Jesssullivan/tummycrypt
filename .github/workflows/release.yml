@@ -22,18 +22,21 @@
 #   - Container image (GHCR, linux/amd64 + linux/arm64/v8)
 #   - SHA256SUMS.txt
 #
-# RUNNERS — TIN-3914 waiver, deliberate and documented.
-# The estate rule is "GF cache-fronted self-hosted runners only", and every
-# `runs-on:` below violates it. There is no compliant alternative for this
-# repo: Jesssullivan/tummycrypt is a PERSONAL-account repository, every
-# autoscaling runner set in GloriousFlywheel tofu/stacks/arc-runners/
-# honey.tfvars registers against https://github.com/tinyland-inc, and
-# GET /repos/Jesssullivan/tummycrypt/actions/runners returns total_count 0.
-# There is also no self-hosted darwin capability class anywhere in the
-# taxonomy, so the macos-14 notarization/pkg jobs have no destination even
-# after enrollment. Do not "fix" these by pointing them at a label that does
-# not exist — that strands the release lane, it does not migrate it.
-# Full reasoning and the exit path: docs/ops/ci-runner-enrollment-2026-08-28.md
+# RUNNERS — partially migrated; the rest are a documented TIN-3914 waiver.
+# The correct labels for this repo are `tinyland-nix` and `tinyland-dind`,
+# served by the `tummycrypt-nix` / `tummycrypt-dind` ARC scale sets in the
+# jesssullivan-infra owner overlay (TIN-2538). `tummycrypt-*` is the scale-set
+# ANCHOR name, never a `runs-on` label — the taxonomy authority rejects
+# project-identity labels outright.
+#   MIGRATED: nix-build -> tinyland-nix.
+#   DEFERRED, with reasons, per job below: build-binaries and create-release
+#     apt-get/dpkg/rpm against Ubuntu; build-image needs qemu+buildx on dind;
+#     plan/generate-installers/update-homebrew depend on hosted-image tooling
+#     that the nix runner image is not known to carry.
+#   NO DESTINATION: the macos-14 jobs. ARC is Linux-on-Kubernetes and no darwin
+#     capability class exists, so notarization/pkg stay hosted indefinitely.
+# Sequencing and the evidence behind each call:
+# docs/ops/ci-runner-enrollment-2026-08-28.md
 
 name: Release
 
@@ -68,7 +71,7 @@ jobs:
 
   plan:
     name: Plan release
-    runs-on: ubuntu-latest # TIN-3914 waiver — see header
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -490,7 +493,7 @@ jobs:
 
   build-image:
     name: Build container image
-    runs-on: ubuntu-latest # TIN-3914 waiver — see header
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: plan
     timeout-minutes: 120
     steps:
@@ -550,7 +553,14 @@ jobs:
 
   nix-build:
     name: Nix Build + Attic Push
-    runs-on: ubuntu-latest # TIN-3914 waiver — see header
+    # MIGRATED (TIN-2538). tinyland-nix is served to this repository by the
+    # `tummycrypt-nix` ARC scale set in the jesssullivan-infra owner overlay
+    # (tofu/stacks/arc-runners/jesssullivan.tfvars), whose helm_release is live
+    # in tofu state as of the 2026-08-28T04:00Z apply. The runner image is
+    # ghcr.io/tinyland-inc/actions-runner-nix, so a job that does nothing but
+    # run `nix` is the right first job to move — and it is a LEAF (nothing
+    # `needs:` it), so a bad first run cannot take the release with it.
+    runs-on: tinyland-nix
     needs: plan
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -603,7 +613,7 @@ jobs:
 
   generate-installers:
     name: Generate installer scripts
-    runs-on: ubuntu-latest # TIN-3914 waiver — see header
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: plan
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -698,7 +708,7 @@ jobs:
 
   build-fileprovider:
     name: Build FileProvider (macOS)
-    runs-on: macos-14 # TIN-3914 waiver — see header
+    runs-on: macos-14 # TIN-3914 waiver — no darwin class exists, see header
     needs: plan
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -852,7 +862,7 @@ jobs:
 
   build-pkg:
     name: Build macOS installer (.pkg)
-    runs-on: macos-14 # TIN-3914 waiver — see header
+    runs-on: macos-14 # TIN-3914 waiver — no darwin class exists, see header
     needs: [plan, build-binaries, build-fileprovider]
     if: |
       success() && (
@@ -981,7 +991,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest # TIN-3914 waiver — see header
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: [plan, build-binaries, generate-installers, build-fileprovider, build-pkg]
     if: |
       success() && (
@@ -1116,7 +1126,7 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew formula
-    runs-on: ubuntu-latest # TIN-3914 waiver — see header
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: [plan, create-release]
     if: |
       success() && (
