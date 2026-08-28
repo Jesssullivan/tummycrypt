@@ -1,0 +1,27 @@
+# lint-runs-on ratchet baseline for .github/workflows/runs-on-contract.yml.
+#
+# Number of FAIL findings ci-templates lint-runs-on reports across this repo's
+# workflows. The gate FAILS if the count goes UP; a DROP is only a warning
+# asking you to lower this number (good news should not turn CI red).
+#
+# Measured on neo 2026-08-28 against ci-templates v3.1.0
+# (d8d178c022a0f84853d53a2c8fe0fc90115f0949):
+#
+#   origin/main c782bb9 as-is ...................... 25 FAIL / 8 WARN / 15 files
+#   + this PR's runs-on-contract.yml ............... 26 FAIL / 8 WARN / 16 files
+#   + series PR-a's repo-contract.yml .............. 27 FAIL / 8 WARN / 17 files
+#
+# The declared baseline is 27: the count once the a -> b review order has
+# landed both new gate workflows. Until PR-a merges this reads 26 and the gate
+# emits the "lower the baseline" warning, which is correct and not a failure.
+#
+# All FAILs are the same finding. TIN-3914 forbids GitHub-hosted labels, and
+# Jesssullivan/tummycrypt is a PERSONAL-account repository that cannot consume
+# the tinyland-inc org runner group: every autoscaling runner set in
+# GloriousFlywheel tofu/stacks/arc-runners/honey.tfvars registers against
+# https://github.com/tinyland-inc, and
+# GET /repos/Jesssullivan/tummycrypt/actions/runners returns total_count 0.
+# No compliant label is available to this repo today, so this number cannot
+# reach 0 from inside this repo. It reaches 0 in the PR that follows the
+# repo-scoped Flywheel enrollment (TIN-4050, series PR-d).
+27
