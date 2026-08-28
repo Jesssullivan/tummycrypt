@@ -6,17 +6,16 @@
 # wiring, pinned to ci-templates v3.1.0
 # (d8d178c022a0f84853d53a2c8fe0fc90115f0949).
 #
-# TIN-3914 WAIVER (runs-on): the estate rule is "GF cache-fronted self-hosted
-# runners only", but Jesssullivan/tummycrypt is a PERSONAL-account repository
-# and personal repos cannot consume the tinyland-inc org runner group. Every
-# autoscaling runner set in GloriousFlywheel tofu/stacks/arc-runners/honey.tfvars
-# registers against https://github.com/tinyland-inc, and
-# `GET /repos/Jesssullivan/tummycrypt/actions/runners` returns total_count 0.
-# Same standing waiver Jesssullivan/legalab carries in its own CI workflow
-# ("Personal private repositories cannot consume the tinyland-inc runner
-# group. TIN-4050 tracks a future repo-scoped PZM/Flywheel enrollment.").
-# Re-enrollment for this repo is PR-d of this series (a GloriousFlywheel
-# consumer-registry + owner-overlay anchor PR); see TIN-4050.
+# TIN-3914 DEFERRAL (runs-on): the estate rule is "GF cache-fronted self-hosted
+# runners only". A compliant label DOES exist for this repo — `tinyland-nix`,
+# served by the live `tummycrypt-nix` ARC scale set in the jesssullivan-infra
+# owner overlay (TIN-2538) — so this is a deferral with a named next step, not
+# a dead end. What is not established is whether the nix runner image
+# (ghcr.io/tinyland-inc/actions-runner-nix) carries `jq`, which the authority
+# assertion below needs. Move this job in the same pass that moves release.yml
+# `plan` and `generate-installers`, behind a `command -v` preflight, and lower
+# .github/runs-on-baseline in that commit.
+# Evidence and sequencing: docs/ops/ci-runner-enrollment-2026-08-28.md
 name: Repo Contract
 
 on:
