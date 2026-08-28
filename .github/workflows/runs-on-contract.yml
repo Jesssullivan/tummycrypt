@@ -4,14 +4,17 @@
 # (d8d178c022a0f84853d53a2c8fe0fc90115f0949).
 #
 # Why a ratchet and not a hard gate. A hard gate is red on day one: this repo
-# has 26 FAIL findings once this file is added, all of them the same TIN-3914 finding, and none of them
-# fixable from inside this repo (see .github/runs-on-baseline). A gate that is
-# permanently red teaches reviewers to ignore it. A ratchet is enforceable
-# today: existing debt is declared in one reviewable number, and any NEW hosted
-# `runs-on` — the drift this lint exists to stop — fails the PR.
+# has 26 FAIL findings once this file is added. Some are fixable — the pure-nix
+# jobs move to tinyland-nix in series PR-c — but the rest are not, in this PR
+# or any near one: release.yml build-binaries and create-release shell out to
+# apt-get/dpkg/rpm/brew, and the four macOS jobs have no self-hosted
+# destination at all (see .github/runs-on-baseline). A gate that is permanently
+# red teaches reviewers to ignore it. A ratchet is enforceable today: existing
+# debt is declared in one reviewable number, and any NEW hosted `runs-on` — the
+# drift this lint exists to stop — fails the PR.
 #
-# Flip to a hard gate (drop the ratchet, drop `continue-on-error`) in the same
-# PR that lands the repo-scoped Flywheel enrollment and takes the baseline to 0.
+# Flip to a hard gate (drop the ratchet, drop `continue-on-error`) if and when
+# the baseline reaches 0.
 name: runs-on Contract
 
 on:

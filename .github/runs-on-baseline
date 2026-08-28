@@ -15,13 +15,19 @@
 # landed both new gate workflows. Until PR-a merges this reads 26 and the gate
 # emits the "lower the baseline" warning, which is correct and not a failure.
 #
-# All FAILs are the same finding. TIN-3914 forbids GitHub-hosted labels, and
-# Jesssullivan/tummycrypt is a PERSONAL-account repository that cannot consume
-# the tinyland-inc org runner group: every autoscaling runner set in
-# GloriousFlywheel tofu/stacks/arc-runners/honey.tfvars registers against
-# https://github.com/tinyland-inc, and
-# GET /repos/Jesssullivan/tummycrypt/actions/runners returns total_count 0.
-# No compliant label is available to this repo today, so this number cannot
-# reach 0 from inside this repo. It reaches 0 in the PR that follows the
-# repo-scoped Flywheel enrollment (TIN-4050, series PR-d).
+# All FAILs are TIN-3914: GitHub-hosted labels, which the estate forbids.
+#
+# A compliant label DOES exist for this repo — `tinyland-nix`, served by the
+# live `tummycrypt-nix` ARC scale set in the jesssullivan-infra owner overlay
+# (TIN-2538) — so this number is reducible, not stuck. Series PR-c moves the
+# three pure-nix jobs and takes it to 22 (24 with both gate workflows present).
+#
+# It does not reach 0 soon, and not from inside a single PR:
+#   - release.yml build-binaries and create-release shell out to
+#     apt-get / dpkg / rpm / brew. Those are ports, not label swaps.
+#   - The four macOS jobs have NO destination. ARC is Linux-on-Kubernetes, no
+#     darwin capability class exists, and notarization needs real macOS.
+#
+# Whichever of series PR-b / PR-c lands second should lower this number.
+# Evidence and sequencing: docs/ops/ci-runner-enrollment-2026-08-28.md
 27
