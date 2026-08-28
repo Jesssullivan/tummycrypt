@@ -1,8 +1,25 @@
 # Nix CI with Attic binary cache push
 #
-# Builds all tcfs packages with Nix and pushes results to the
-# tinyland Attic binary cache. Consuming machines can then
-# `nix profile install` or `nix build` with near-instant cache hits.
+# Builds all tcfs packages with Nix and pushes results to the tinyland Attic
+# binary cache. Consuming machines can then `nix profile install` or `nix build`
+# with near-instant cache hits — this is the leg that keeps macbook-neo
+# SUBSTITUTING the aarch64-darwin closure instead of compiling it.
+#
+# ONE CACHE. This workflow used to publish to two: Attic and FlakeHub Cache.
+# Attic is the survivor, because it is the one the repo actually declares —
+# flake.nix `nixConfig` names the Attic substituter and nothing else, and all
+# four workflows already configure it. The FlakeHub leg was never proven here:
+# it was pinned to a moving `@main` ref, marked `continue-on-error: true`, and
+# it HUNG to the 6h runner ceiling twice with every build step skipped. Nothing
+# is lost by dropping it — the darwin Attic push below already covers the full
+# closure (cli, tui, mcp, tcfsd, tcfsd-app, staticlib), which is exactly what
+# neo needs to substitute.
+#
+# FAIL LOUD. Every cache step here used to degrade to a `::warning::` — missing
+# token, failed `attic use`, failed push. A green run that published nothing is
+# the worst outcome available: the damage is invisible until some machine
+# starts compiling from source days later. A push branch with no token, a
+# broken login, or a failed push now fails the job.
 #
 # Required secrets:
 #   ATTIC_TOKEN — obtained from `attic login tinyland <server> <token>`
@@ -16,20 +33,24 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
-  # Public Attic endpoint shared with flake.nix and other workflows.
+  # Public Attic endpoint shared with flake.nix and the other workflows.
   ATTIC_SERVER: https://nix-cache.tinyland.dev
   ATTIC_CACHE: main
+  ATTIC_PUBLIC_KEY: main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
 jobs:
   flake-check:
     name: Flake Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # TIN-3914 waiver — see docs/ops/ci-runner-enrollment-2026-08-28.md
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Bootstrap Nix CLI
-        uses: cachix/install-nix-action@v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             extra-substituters = https://nix-cache.tinyland.dev/main
@@ -43,13 +64,13 @@ jobs:
 
   build-linux-x86_64:
     name: Build Linux x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # TIN-3914 waiver — see docs/ops/ci-runner-enrollment-2026-08-28.md
     needs: flake-check
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Bootstrap Nix CLI
-        uses: cachix/install-nix-action@v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             extra-substituters = https://nix-cache.tinyland.dev/main
@@ -59,19 +80,30 @@ jobs:
         run: |
           echo "ATTIC_SERVER=${ATTIC_SERVER}"
           echo "ATTIC_CACHE=${ATTIC_CACHE}"
-          echo "BAZEL_REMOTE_CACHE=${BAZEL_REMOTE_CACHE:-unset}"
 
       - name: Configure Attic
+        id: attic
+        env:
+          # Token via env, not argv: an argv secret is readable from /proc and
+          # from any `ps` running in a concurrent step.
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
+          set -euo pipefail
           nix profile install nixpkgs#attic-client
-          if [ -n "${{ secrets.ATTIC_TOKEN }}" ]; then
-            attic login tinyland "${{ env.ATTIC_SERVER }}" "${{ secrets.ATTIC_TOKEN }}"
-            attic use "${{ env.ATTIC_CACHE }}" || echo "::warning::Failed to configure Attic substituter"
-            echo "ATTIC_CONFIGURED=true" >> "$GITHUB_ENV"
-          else
-            echo "::warning::ATTIC_TOKEN not set, skipping cache push"
-            echo "ATTIC_CONFIGURED=false" >> "$GITHUB_ENV"
+          if [ -z "${ATTIC_TOKEN}" ]; then
+            # A fork PR legitimately has no secrets. A push to main/dev with no
+            # token is a broken cache lane and must not pass quietly.
+            if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+              echo "::error::ATTIC_TOKEN is not set on a push to ${GITHUB_REF_NAME}. Nothing would reach ${ATTIC_SERVER}, and the fleet would fall back to compiling from source."
+              exit 1
+            fi
+            echo "::notice::ATTIC_TOKEN unavailable on this ${GITHUB_EVENT_NAME}; building without a cache push."
+            echo "push_enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          attic login tinyland "${ATTIC_SERVER}" "${ATTIC_TOKEN}"
+          attic use "${ATTIC_CACHE}"
+          echo "push_enabled=true" >> "$GITHUB_OUTPUT"
 
       - name: Build tcfsd
         run: nix build --accept-flake-config --fallback .#tcfsd
@@ -86,69 +118,60 @@ jobs:
         run: nix build --accept-flake-config --fallback .#tcfs-mcp
 
       - name: Push to Attic
-        if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
+        if: steps.attic.outputs.push_enabled == 'true' && github.event_name == 'push'
         run: |
+          set -euo pipefail
           for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
             nix build --accept-flake-config --fallback ".#${pkg}" -o "result-${pkg}"
-            attic push "${{ env.ATTIC_CACHE }}" "result-${pkg}" || echo "::warning::Failed to push ${pkg} to Attic"
+            attic push "${ATTIC_CACHE}" "result-${pkg}"
           done
 
   build-macos-aarch64:
     name: Build macOS aarch64
-    runs-on: macos-14
-    # Hard stop well under the 6h hosted-runner ceiling: a wedged job must fail
-    # loud with hours to spare, not silently eat the whole window (both prior
-    # runs of this job died at exactly 6h00m inside "Set up FlakeHub Cache").
+    runs-on: macos-14 # TIN-3914 waiver — see docs/ops/ci-runner-enrollment-2026-08-28.md
+    # Hard stop under the 6h hosted-runner ceiling: a wedged job must fail loud
+    # with hours to spare rather than silently eat the whole window. The two
+    # 6h00m deaths this bound was added for were both inside "Set up FlakeHub
+    # Cache", which is gone as of this commit; the bound stays because a cold
+    # darwin closure build is genuinely long and a wedge is still possible.
     timeout-minutes: 300
     needs: flake-check
-    # id-token: write is required for FlakeHub Cache OIDC push (below).
-    permissions:
-      contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             extra-substituters = https://nix-cache.tinyland.dev/main
             extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
-      # FlakeHub Cache is the canonical nix cache the fleet substitutes from
-      # (lab nix/home-manager/nix.nix: "Attic replaced by FlakeHub"; macbook-neo
-      # trusts cache.flakehub.com). This action sets up a post-build push hook so
-      # EVERY darwin store path built below is published to FlakeHub Cache — which
-      # is what lets neo `nix-switch` SUBSTITUTE the aarch64-darwin closure
-      # (incl. tcfsd) instead of ever compiling locally. Requires this repo to be
-      # enrolled in FlakeHub Cache; no-ops with a warning if not yet enrolled.
-      # continue-on-error alone is not enough: when un-enrolled this action can
-      # HANG rather than fail (observed twice: job cancelled at exactly the 6h
-      # ceiling with every build step still skipped) — timeout-minutes converts
-      # the hang into the warning this comment always assumed.
-      - name: Set up FlakeHub Cache
-        uses: DeterminateSystems/flakehub-cache-action@main
-        timeout-minutes: 10
-        continue-on-error: true
-
       - name: Configure Attic
+        id: attic
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
+          set -euo pipefail
           nix profile install nixpkgs#attic-client
-          if [ -n "${{ secrets.ATTIC_TOKEN }}" ]; then
-            attic login tinyland "${{ env.ATTIC_SERVER }}" "${{ secrets.ATTIC_TOKEN }}"
-            attic use "${{ env.ATTIC_CACHE }}" || echo "::warning::Failed to configure Attic substituter"
-            echo "ATTIC_CONFIGURED=true" >> "$GITHUB_ENV"
-          else
-            echo "::warning::ATTIC_TOKEN not set, skipping cache push"
-            echo "ATTIC_CONFIGURED=false" >> "$GITHUB_ENV"
+          if [ -z "${ATTIC_TOKEN}" ]; then
+            if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+              echo "::error::ATTIC_TOKEN is not set on a push to ${GITHUB_REF_NAME}. The aarch64-darwin closure would not be published, and macbook-neo would compile tcfsd locally (2026-07-04 incident)."
+              exit 1
+            fi
+            echo "::notice::ATTIC_TOKEN unavailable on this ${GITHUB_EVENT_NAME}; building without a cache push."
+            echo "push_enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          attic login tinyland "${ATTIC_SERVER}" "${ATTIC_TOKEN}"
+          attic use "${ATTIC_CACHE}"
+          echo "push_enabled=true" >> "$GITHUB_OUTPUT"
 
       # NOTE: the aarch64-darwin DAEMON closure (tcfsd/tcfsd-app/staticlib) was
-      # previously NOT built here — only cli/tui/mcp — so macbook-neo could not
+      # once NOT built here — only cli/tui/mcp — so macbook-neo could not
       # substitute a new tcfsd and silently fell back to a LOCAL compile
-      # (2026-07-04 incident: a full day of neo compilation). Build the full set
-      # here on the GitHub macos-14 runner (off-neo, off-PZM) so the whole
-      # darwin closure lands in the caches and neo only ever substitutes.
+      # (2026-07-04 incident: a full day of neo compilation). The full set is
+      # built here on the GitHub macos-14 runner (off-neo, off-PZM) so the whole
+      # darwin closure lands in the cache and neo only ever substitutes.
       - name: Build tcfs-cli (no FUSE on macOS)
         run: nix build --accept-flake-config --fallback .#tcfs-cli
 
@@ -168,9 +191,10 @@ jobs:
         run: nix build --accept-flake-config --fallback .#tcfs-file-provider-staticlib
 
       - name: Push to Attic
-        if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
+        if: steps.attic.outputs.push_enabled == 'true' && github.event_name == 'push'
         run: |
+          set -euo pipefail
           for pkg in tcfs-cli tcfs-tui tcfs-mcp tcfsd tcfsd-app tcfs-file-provider-staticlib; do
             nix build --accept-flake-config --fallback ".#${pkg}" -o "result-${pkg}"
-            attic push "${{ env.ATTIC_CACHE }}" "result-${pkg}" || echo "::warning::Failed to push ${pkg} to Attic"
+            attic push "${ATTIC_CACHE}" "result-${pkg}"
           done
