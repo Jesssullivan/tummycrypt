@@ -1418,6 +1418,25 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 );
             }
 
+            // One freshness memo for the whole loop: it is only worth anything
+            // when it stays warm across cycles, which is exactly what a
+            // long-lived daemon can offer and a one-shot CLI cannot. In-memory
+            // on purpose — the daemon re-proves everything after a restart, and
+            // the sidecar on disk belongs to the CLI, which owns the state-file
+            // lock while it runs.
+            let recon_freshness = Arc::new(tcfs_sync::freshness::FreshnessCache::in_memory());
+            // Escape hatch for an operator who suspects the memo. Off by default;
+            // a durable `[sync]` knob is the follow-up.
+            let recon_paranoid = std::env::var("TCFS_RECONCILE_PARANOID")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            if recon_paranoid {
+                warn!(
+                    "TCFS_RECONCILE_PARANOID is set: every reconcile cycle will re-hash and \
+                     re-read every both-exist path"
+                );
+            }
+
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(recon_interval));
                 let orphan_chunk_cleanup_grace =
@@ -1460,6 +1479,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         git_sync_mode: recon_blacklist.git_sync_mode().to_string(),
                         git_ff_resolution: recon_blacklist.allows_git_dirs()
                             && recon_blacklist.git_sync_mode() == "raw",
+                        paranoid: recon_paranoid,
+                        freshness: Some(Arc::clone(&recon_freshness)),
                         ..Default::default()
                     };
 
