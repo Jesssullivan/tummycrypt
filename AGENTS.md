@@ -58,16 +58,20 @@ nix develop
 # Or let direnv load the committed .envrc once:
 direnv allow
 
-# Build / test / lint — cargo comes from the devShell or the pinned toolchain
+# Build / test / lint. On `neo` these run on `sting` or `honey`, never
+# locally — see "Machines that run this repo" below.
 cargo build --workspace
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets
 
-# Same lanes through the task runner
-task build
+# Related lanes through the task runner. The flags are NOT identical to the
+# cargo block or to CI: `task lint` adds `-D warnings` but omits
+# `--all-targets`, so it never compiles tests/benches/examples; CI clippy is
+# `--all-targets` without `-D warnings`. Green in one does not imply the other.
+task build         # cargo build --workspace
 task test          # cargo test --workspace
-task lint          # cargo clippy -D warnings + cargo fmt --check
+task lint          # cargo clippy --workspace -D warnings + cargo fmt --check
 
 # Local dev stack: 8 containers (3 SeaweedFS masters + volume + filer, NATS,
 # Prometheus, Grafana) via docker-compose. Linux host only — see below.
@@ -79,45 +83,74 @@ task dev
 ### Toolchain
 
 - **Rust**: edition 2021; workspace `rust-version = "1.93"`; pinned to
-  `1.93.0` by `rust-toolchain.toml`. `.envrc` fails loud when the active
-  `rustc` is below the minimum or does not match the pin.
+  `1.93.0` by `rust-toolchain.toml`. `.envrc` prints a loud direnv error when
+  the active `rustc` is below the minimum or does not match the pin — but
+  `log_error` does not abort the load, so the mismatched `rustc` stays on
+  `PATH`. Check `rustc --version` yourself; do not treat a successful direnv
+  load as proof.
 - **Invoke plain `cargo`.** It is expected to come from the pinned toolchain or
   the Nix devShell (`Justfile` header; `flake.nix` `shellHook`). Do not
   hardcode `~/.cargo/bin/cargo` — that path is only the rustup fallback
-  `.envrc` adds when `nix` is absent.
-- **Linker**: `mold` ships in the Nix devShell; outside Nix the default system
-  linker is used. Do not add a `mold` entry to `.cargo/config.toml`; opt in
-  per-shell with `RUSTFLAGS="-C link-arg=-fuse-ld=mold"`.
+  `.envrc` adds when `nix` is absent. Known drift: `Taskfile.yaml` `bench`
+  still hardcodes `~/.cargo/bin/cargo bench`, so `task bench` fails on a
+  Nix-only machine.
+- **Linker**: there is no `mold` in the Nix devShell or in any system
+  toolchain this repo assumes — `flake.nix` does not package it. The default
+  system linker is used everywhere. The `mold` comment at the top of
+  `.cargo/config.toml` is stale; do not act on it, and do not add a `mold`
+  entry to `.cargo/config.toml`.
 - **PATH ordering**: the devShell and `.envrc` both put `target/debug` and
   `target/release` ahead of installed packages, so a stale workspace build can
-  shadow the deployed `tcfs`/`tcfsd`. Smoke harnesses print the resolved binary
-  path — check it before believing a version string.
+  shadow the deployed `tcfs`/`tcfsd`. Separately, on `neo` an unmanaged
+  `v0.12.12` install currently shadows the managed build in the effective
+  interactive `PATH` (`docs/ops/current.md`, Fleet row; an attended cleanup is
+  queued). Smoke harnesses print the resolved binary path — check it before
+  believing a version string.
 
 ### Machines that run this repo
 
+Not exhaustive: acceptance and storage hosts are a separate pool, listed in
+[docs/ops/lab-host-acceptance-matrix.md](docs/ops/lab-host-acceptance-matrix.md).
+
 | Host | What it is | How agents use it |
 | --- | --- | --- |
-| `neo` | macOS (Darwin) maintainer workstation, 8 GiB RAM | Orchestration, review, editing, and the release-adjacent `neo → honey` live lane. **No local compile/test/`task dev` here** — the estate build-placement ruling sends heavy toolchain work to a remote host, and an unbounded local build takes every session on the machine down with it. Login shell is `bash`. |
-| `honey` | Rocky Linux 10 control-plane voter; canonical Linux control point | High-volume push/pull, daemon and service checks, conflict and stress lanes, Linux-first operator truth. Login shell is **`fish`**, which has no `export VAR=VALUE`; use `env VAR=VALUE command` or wrap in `bash -c '...'`. |
-| `sting` | Rocky Linux 10.2 voter; headless remote-dev seat driven from `neo` | The dev seat for build/test work that must not run on `neo`. Login shell is POSIX `bash` with an interactive-only fish handoff, so a non-interactive SSH command lands in `bash`. |
+| `neo` | macOS (Darwin) maintainer workstation, resource-constrained | Orchestration, review, editing, and the release-adjacent `neo → honey` live lane. **No local compile/test/`task dev` here** — the estate build-placement ruling sends heavy toolchain work to a remote host, and an unbounded local build takes every session on the machine down with it. Login shell is `bash`, so agent and SSH commands land in bash; interactive terminals re-enter fish from emulator config, so `export VAR=VALUE` fails at a `neo` prompt too. |
+| `honey` | Rocky Linux 10; canonical Linux control point | High-volume push/pull, daemon and service checks, conflict and stress lanes, Linux-first operator truth. Login shell is **`fish`**, which has no `export VAR=VALUE`; use `env VAR=VALUE command` or wrap in `bash -c '...'`. |
+| `sting` | Rocky Linux 10.2; headless remote-dev seat driven from `neo` | The dev seat for build/test work that must not run on `neo` — under the bounded readmission below. Login shell is POSIX `bash` with an interactive-only fish handoff, so a non-interactive SSH command lands in `bash`. |
 
-Host facts and shell settings above are owned by `tinyland-inc/lab`
-(`AGENTS.md`, `inventory/host_vars/{macbook-neo,honey,sting}.yml`); that repo
-is authoritative if it disagrees with this table.
+Host facts, shell settings, and every hold state above are owned by
+`tinyland-inc/lab` (`AGENTS.md`, `inventory/host_vars/{macbook-neo,honey,sting}.yml`,
+`vars/fleet_switch_targets.json`); that repo is authoritative if it disagrees
+with this table.
 
 - **Rocky-specific (`honey`, `sting`)**: a rustup install lands in
   `~/.cargo/bin`, which is not on `PATH` by default. `.envrc`'s non-Nix
   fallback adds it. Inside `nix develop` the pinned toolchain leads and this
   does not apply.
-- **`sting` is a dev seat, not a TCFS target.** The lab-side continuity hold
-  readmitted interactive SSH, tmux, and dev work under `~/git`; the
-  `tcfs_runtime` role stays disabled. Build and test this repo there; do not
-  drive daemon, enrollment, or fleet operations against it.
+- **`sting` is under an open continuity hold.** The lab-side machine hold
+  (`STING_CONTINUITY_INCIDENT_2026-08-17`) is still active; `hold.active` is
+  `true` and the host stays out of every rendered switch scope. An attended
+  2026-08-22 operator ruling readmitted the **dev-seat role only** —
+  interactive SSH, tmux, and dev work under `~/git`. That readmission lifts no
+  other role. Before using `sting`, read `hold.roles` in lab's
+  `vars/fleet_switch_targets.json`. `sting` also carries production roles owned
+  by lab and outside this repo's scope, so unbounded resource use, reboots, and
+  any host-level change there are not this repo's call.
+- **`sting`'s `tcfs_runtime` role is held disabled** — `tcfsd` and
+  `tcfsd-health` are inactive and disabled/masked/not-found. Do not start a
+  daemon or drive enrollment there. That is narrower than "not a TCFS target":
+  `docs/ops/current.md` still queues `sting` for release/root-topology
+  convergence and for candidate/activation invariants, so fleet-coherence work
+  against it is sequenced, not forbidden — it just needs its own attended
+  readmission first.
 - **Acceptance hosts are a different question.** The host pool, lane order, and
   reset contract for real-host acceptance live in
   [docs/ops/lab-host-acceptance-matrix.md](docs/ops/lab-host-acceptance-matrix.md)
   and [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md).
-  A dev seat is not an acceptance target.
+  A dev seat is not an acceptance target. That matrix's `sting` row still reads
+  "none yet / blocked on lab-side hardware stabilization"; it predates the
+  dev-seat ratification and correcting it is an operator call, not a
+  docs-hygiene one.
 - **Live-work freezes outrank convenience.** `docs/ops/current.md` records
   which live resolver, enrollment, deploy, and crypto ceremonies are frozen.
   Source review, tests, and landing continue during a freeze; new fleet claims
@@ -182,16 +215,33 @@ Prefer the `lazy:test-*` regression recipes when changing a harness script.
 
 ## CI
 
-- `ci.yml`: `check` (fmt, FileProvider surface contract, clippy, `cargo test`,
-  feature-isolated and wire-up tests, then workspace/`k8s-worker`/no-FUSE
-  builds), plus `cloudfilter-windows`, `nix`, `fileprovider-staticlib`,
-  `ios-typecheck`, `deny` (cargo-deny), and `secret-scan` (gitleaks).
+Always-on lanes (every PR):
+
+- `ci.yml`: `check` (`cargo check --workspace --locked` first — a dependency
+  edit that leaves `Cargo.lock` stale fails here before anything else — then
+  fmt, FileProvider surface contract, clippy, `cargo test`, feature-isolated
+  and wire-up tests, then workspace/`k8s-worker`/no-FUSE builds), plus
+  `cloudfilter-windows`, `nix`, `fileprovider-staticlib`, `ios-typecheck`,
+  `deny` (cargo-deny), and `secret-scan` (gitleaks).
 - `nix-ci.yml`: `flake-check`, `build-linux-x86_64`, `build-macos-aarch64`.
-- `docs.yml`: lychee link check, tectonic PDF build, GitHub Pages deploy. The
-  repo's only pre-commit hook is the same lychee check, so a broken relative
-  link in a Markdown edit fails locally and in CI.
-- `release.yml`: 9 jobs — plan, binaries, container image, nix build,
-  installers, FileProvider, `.pkg`, release creation, Homebrew update.
+- `docs.yml`: `check-links` (lychee), `build-pdf` (tectonic), `deploy` (GitHub
+  Pages). The repo's only pre-commit hook is the same lychee check, so a broken
+  relative link in a Markdown edit fails locally and in CI.
+
+Path-scoped lanes that also fire on a PR — check `.github/workflows/` rather
+than assuming the list above is complete:
+
+- `ci-live-storage.yml`: real-storage lane on `crates/**`, `tests/**`,
+  `Cargo.toml`, `Cargo.lock`, `docker-compose.yml`, `config/**`. It exists
+  because `ci.yml` can stay green while a sync path is broken, so a code PR
+  that passes `ci.yml` is not yet proven.
+- `linux-package-container-smoke.yml`: on `scripts/install-smoke.sh` and its
+  own workflow/test files.
+
+Release: `release.yml` has 9 jobs — `plan`, `build-binaries`, `build-image`,
+`nix-build`, `generate-installers`, `build-fileprovider`, `build-pkg`,
+`create-release`, `update-homebrew`. The remaining workflows are
+`workflow_dispatch`-only.
 
 ## Agent Coordination
 
