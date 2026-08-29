@@ -5035,6 +5035,201 @@ struct InitOptions<'a> {
     password: Option<String>,
 }
 
+// ── `tcfs init` interactive wizard (TIN-1425) ───────────────────────────────
+//
+// Boundary: authored under a no-local-cargo-build constraint (NEO FENCE) --
+// not compiled, run, or otherwise verified locally. Needs a CI
+// `cargo check`/`cargo test` pass before it can be trusted. Deliberately
+// uses plain stdin/rpassword prompts (matching the existing mnemonic-
+// confirmation prompt just below) rather than adding a new prompt-library
+// dependency (dialoguer/inquire) whose API this pass can't verify against.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WizardStorageChoice {
+    endpoint: String,
+    bucket: String,
+    region: String,
+    enforce_tls: bool,
+}
+
+/// Reads a line from stdin with a shown default; empty input keeps the
+/// default.
+fn prompt_with_default(prompt: &str, default: &str) -> Result<String> {
+    if default.is_empty() {
+        print!("{prompt}: ");
+    } else {
+        print!("{prompt} [{default}]: ");
+    }
+    std::io::stdout().flush().context("failed to flush prompt")?;
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read prompt input")?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool> {
+    let hint = if default_yes { "Y/n" } else { "y/N" };
+    let answer = prompt_with_default(&format!("{prompt} [{hint}]"), "")?;
+    Ok(parse_yes_no(&answer, default_yes))
+}
+
+/// Pure parsing half of `prompt_yes_no`, split out so it's testable without
+/// stdin. An empty or unrecognized answer keeps the caller's default rather
+/// than erroring -- a first-run wizard should never hard-fail on a typo.
+fn parse_yes_no(answer: &str, default_yes: bool) -> bool {
+    match answer.trim().to_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        _ => default_yes,
+    }
+}
+
+/// Prompts for the storage backend, endpoint, bucket, region, and
+/// (optionally) S3 credentials. `existing` supplies the current values as
+/// editable defaults, so re-running `tcfs init --force-config` against an
+/// already-configured setup shows what's there instead of forcing the user
+/// to retype it; choosing "use existing configuration" skips the rest of
+/// the prompts entirely and returns `existing` unchanged.
+fn run_storage_wizard(
+    existing: &tcfs_core::config::StorageConfig,
+) -> Result<WizardStorageChoice> {
+    println!();
+    println!("── Storage backend ─────────────────────────────────────────");
+    println!("  1) SeaweedFS (self-hosted S3-compatible)");
+    println!("  2) S3-compatible (AWS S3, Cloudflare R2, Backblaze B2, etc.)");
+    println!("  3) Use existing configuration (skip these prompts)");
+    let default_choice = if existing.endpoint.is_empty() { "1" } else { "3" };
+    let choice = prompt_with_default("Choice", default_choice)?;
+
+    if choice.trim() == "3" {
+        println!("Keeping existing storage configuration.");
+        return Ok(WizardStorageChoice {
+            endpoint: existing.endpoint.clone(),
+            bucket: existing.bucket.clone(),
+            region: existing.region.clone(),
+            enforce_tls: existing.enforce_tls,
+        });
+    }
+
+    let default_endpoint = if !existing.endpoint.is_empty() {
+        existing.endpoint.clone()
+    } else if choice.trim() == "1" {
+        "http://localhost:8333".to_string()
+    } else {
+        "https://s3.amazonaws.com".to_string()
+    };
+    let endpoint = prompt_with_default("S3 endpoint URL", &default_endpoint)?;
+    let default_bucket = if existing.bucket.is_empty() {
+        "tcfs"
+    } else {
+        existing.bucket.as_str()
+    };
+    let bucket = prompt_with_default("Bucket name", default_bucket)?;
+    let default_region = if existing.region.is_empty() {
+        "us-east-1"
+    } else {
+        existing.region.as_str()
+    };
+    let region = prompt_with_default("Region", default_region)?;
+    let enforce_tls = prompt_yes_no(
+        "Require HTTPS for this endpoint?",
+        endpoint.starts_with("https://"),
+    )?;
+
+    println!();
+    if prompt_yes_no("Enter S3 access key / secret key now?", true)? {
+        let access_key = prompt_with_default("Access key ID", "")?;
+        let secret_key = rpassword::prompt_password("Secret access key: ")
+            .context("failed to read secret access key")?;
+        if !access_key.trim().is_empty() && !secret_key.trim().is_empty() {
+            match write_aws_credentials_file(access_key.trim(), secret_key.trim()) {
+                Ok(path) => println!("  wrote credentials to {}", path.display()),
+                Err(error) => {
+                    eprintln!("  warning: failed to write credentials file: {error:#}");
+                    eprintln!(
+                        "  set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY instead, or configure storage.credentials_file"
+                    );
+                }
+            }
+        } else {
+            println!(
+                "  skipping empty credentials; configure storage.credentials_file or ~/.aws/credentials before starting tcfsd."
+            );
+        }
+    } else {
+        println!(
+            "  skipping credentials; tcfsd will look for ~/.aws/credentials, AWS_* env vars, or storage.credentials_file."
+        );
+    }
+
+    Ok(WizardStorageChoice {
+        endpoint,
+        bucket,
+        region,
+        enforce_tls,
+    })
+}
+
+/// Writes the standard AWS shared credentials file's `[default]` profile,
+/// which `tcfs_secrets::parse_aws_credentials_file` already falls back to
+/// when no SOPS `storage.credentials_file` is configured
+/// (crates/tcfs-secrets/src/lib.rs). Reusing that existing fallback path
+/// means the wizard doesn't need to invent a new credential format or a
+/// SOPS enrollment ceremony just to get a first run working.
+///
+/// This rewrites the whole file rather than attempting an ini-preserving
+/// merge (safer to get right without being able to compile-test the merge),
+/// so an existing file is first copied to a timestamped
+/// `credentials.tcfs-backup-<unix_s>` sibling and the backup path is
+/// printed. A first-run wizard must never be the reason a user loses
+/// unrelated AWS profiles.
+fn write_aws_credentials_file(access_key: &str, secret_key: &str) -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME is not set")?;
+    let aws_dir = PathBuf::from(home).join(".aws");
+    std::fs::create_dir_all(&aws_dir).with_context(|| format!("creating {}", aws_dir.display()))?;
+    let credentials_path = aws_dir.join("credentials");
+    if credentials_path.exists() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let backup_path = aws_dir.join(format!("credentials.tcfs-backup-{stamp}"));
+        std::fs::copy(&credentials_path, &backup_path).with_context(|| {
+            format!(
+                "backing up {} to {} before rewriting it",
+                credentials_path.display(),
+                backup_path.display()
+            )
+        })?;
+        eprintln!(
+            "  note: {} already existed; backed it up to {} before rewriting the [default] profile.",
+            credentials_path.display(),
+            backup_path.display()
+        );
+        eprintln!(
+            "  any other profiles it held are preserved in that backup, not in the rewritten file."
+        );
+    }
+    let contents =
+        format!("[default]\naws_access_key_id = {access_key}\naws_secret_access_key = {secret_key}\n");
+    std::fs::write(&credentials_path, contents)
+        .with_context(|| format!("writing {}", credentials_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&credentials_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", credentials_path.display()))?;
+    }
+    Ok(credentials_path)
+}
+
 async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'_>) -> Result<()> {
     let InitOptions {
         device_name,
@@ -5070,6 +5265,32 @@ async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'
             config_path.display()
         );
     }
+
+    // TIN-1425: interactive first-run wizard. Every installer drops
+    // binaries and expects the user to hand-write config.toml plus S3
+    // credentials; when running interactively (not --non-interactive, not
+    // --skip-config) prompt for the storage backend/endpoint/bucket/creds
+    // instead of silently carrying over whatever `config` already has
+    // (almost always nothing, on a fresh install).
+    let wizard_config = if !non_interactive && !skip_config {
+        match run_storage_wizard(&config.storage) {
+            Ok(choice) => {
+                let mut adjusted = config.clone();
+                adjusted.storage.endpoint = choice.endpoint;
+                adjusted.storage.bucket = choice.bucket;
+                adjusted.storage.region = choice.region;
+                adjusted.storage.enforce_tls = choice.enforce_tls;
+                Some(adjusted)
+            }
+            Err(error) => {
+                eprintln!("warning: storage wizard failed ({error:#}); falling back to the existing/default configuration");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let config_for_init = wizard_config.as_ref().unwrap_or(config);
 
     // Step 2-4: Derive or generate master key
     let master_key = if let Some(ref pw) = password {
@@ -5149,7 +5370,8 @@ async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'
     // very first registry on disk is signed (no migration window for new setups).
     registry.save_signed(&registry_path, master_key.as_bytes())?;
 
-    let init_config = build_init_config(config, &master_key_path, &registry_path, &device_name);
+    let init_config =
+        build_init_config(config_for_init, &master_key_path, &registry_path, &device_name);
     if !skip_config {
         write_init_config(&config_path, &init_config, force_config)?;
     }
@@ -5199,7 +5421,49 @@ async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'
         );
     }
 
+    // TIN-1425: best-effort `tcfs status` verification. tcfsd is almost
+    // never already running immediately after `tcfs init` on a fresh
+    // install, so this never fails the wizard -- it only upgrades the final
+    // line from "here's how to check" to an actual verified `[ok]`/`[NOT
+    // ok yet]` when a daemon happens to already be reachable (e.g.
+    // re-running `tcfs init --force-config` against a live setup).
+    if !skip_config {
+        println!();
+        if verify_status_after_init(&init_config).await {
+            println!("Verified: tcfs status reports storage [ok].");
+        } else {
+            println!(
+                "tcfsd is not reachable yet, so storage could not be verified as [ok]. \
+                 That's expected on a fresh install -- start tcfsd, then run \
+                 tcfs --config {} status to check.",
+                config_path.display()
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// Best-effort `tcfs status`-equivalent check run at the end of `tcfs init`
+/// (TIN-1425). Returns `false` on any failure to reach or query tcfsd --
+/// this is advisory only, never a hard gate on the wizard completing.
+async fn verify_status_after_init(config: &tcfs_core::config::TcfsConfig) -> bool {
+    let socket = &config.daemon.socket;
+    if !socket.exists() {
+        return false;
+    }
+    let Ok(mut client) = connect_daemon_without_session(socket).await else {
+        return false;
+    };
+    let Ok(Ok(response)) = tokio::time::timeout(
+        Duration::from_secs(3),
+        client.status(tonic::Request::new(StatusRequest {})),
+    )
+    .await
+    else {
+        return false;
+    };
+    response.into_inner().storage_ok
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11125,6 +11389,25 @@ nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
             cli_state.get(&file).is_some(),
             "daemon write must be visible to a `--state …/state.db` CLI read"
         );
+    }
+
+    #[test]
+    fn parse_yes_no_accepts_common_answers() {
+        assert!(parse_yes_no("y", false));
+        assert!(parse_yes_no("Y", false));
+        assert!(parse_yes_no("yes", false));
+        assert!(parse_yes_no("YES", false));
+        assert!(!parse_yes_no("n", true));
+        assert!(!parse_yes_no("no", true));
+    }
+
+    #[test]
+    fn parse_yes_no_empty_or_unrecognized_keeps_default() {
+        assert!(parse_yes_no("", true));
+        assert!(!parse_yes_no("", false));
+        assert!(parse_yes_no("   ", true));
+        assert!(parse_yes_no("sure", true));
+        assert!(!parse_yes_no("bogus", false));
     }
 
     #[test]
