@@ -5060,7 +5060,9 @@ fn prompt_with_default(prompt: &str, default: &str) -> Result<String> {
     } else {
         print!("{prompt} [{default}]: ");
     }
-    std::io::stdout().flush().context("failed to flush prompt")?;
+    std::io::stdout()
+        .flush()
+        .context("failed to flush prompt")?;
     let mut line = String::new();
     std::io::stdin()
         .read_line(&mut line)
@@ -5097,15 +5099,17 @@ fn parse_yes_no(answer: &str, default_yes: bool) -> bool {
 /// already-configured setup shows what's there instead of forcing the user
 /// to retype it; choosing "use existing configuration" skips the rest of
 /// the prompts entirely and returns `existing` unchanged.
-fn run_storage_wizard(
-    existing: &tcfs_core::config::StorageConfig,
-) -> Result<WizardStorageChoice> {
+fn run_storage_wizard(existing: &tcfs_core::config::StorageConfig) -> Result<WizardStorageChoice> {
     println!();
     println!("── Storage backend ─────────────────────────────────────────");
     println!("  1) SeaweedFS (self-hosted S3-compatible)");
     println!("  2) S3-compatible (AWS S3, Cloudflare R2, Backblaze B2, etc.)");
     println!("  3) Use existing configuration (skip these prompts)");
-    let default_choice = if existing.endpoint.is_empty() { "1" } else { "3" };
+    let default_choice = if existing.endpoint.is_empty() {
+        "1"
+    } else {
+        "3"
+    };
     let choice = prompt_with_default("Choice", default_choice)?;
 
     if choice.trim() == "3" {
@@ -5217,8 +5221,9 @@ fn write_aws_credentials_file(access_key: &str, secret_key: &str) -> Result<Path
             "  any other profiles it held are preserved in that backup, not in the rewritten file."
         );
     }
-    let contents =
-        format!("[default]\naws_access_key_id = {access_key}\naws_secret_access_key = {secret_key}\n");
+    let contents = format!(
+        "[default]\naws_access_key_id = {access_key}\naws_secret_access_key = {secret_key}\n"
+    );
     std::fs::write(&credentials_path, contents)
         .with_context(|| format!("writing {}", credentials_path.display()))?;
     #[cfg(unix)]
@@ -5370,8 +5375,12 @@ async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'
     // very first registry on disk is signed (no migration window for new setups).
     registry.save_signed(&registry_path, master_key.as_bytes())?;
 
-    let init_config =
-        build_init_config(config_for_init, &master_key_path, &registry_path, &device_name);
+    let init_config = build_init_config(
+        config_for_init,
+        &master_key_path,
+        &registry_path,
+        &device_name,
+    );
     if !skip_config {
         write_init_config(&config_path, &init_config, force_config)?;
     }
