@@ -253,10 +253,15 @@ What this slice does **not** cover, still per the open items above:
   behavior (plain render + typed "yes" confirmation) unchanged and did not
   touch the `--password` Argon2id path's visibility.
 
-Boundary: authored under a no-local-cargo-build constraint (NEO FENCE) --
-not compiled, run, or otherwise verified locally. Two pure-logic unit tests
+Boundary: authored without a local toolchain, so CI was the first place
+`cargo fmt` / `clippy` / `cargo test` ever ran against it. The branch's
+`Build + Lint + Test` job is green, so it compiles, lints, and passes the
+suite -- including the two pure-logic unit tests added here
 (`parse_yes_no_accepts_common_answers`,
-`parse_yes_no_empty_or_unrecognized_keeps_default`) were added and should
-run under plain `cargo test` once someone can build; the interactive
-prompt/wizard flow itself has no automated coverage and needs a manual or
-scripted (e.g. `expect`-driven) fresh-install smoke before it's trusted.
+`parse_yes_no_empty_or_unrecognized_keeps_default`).
+
+What green does **not** cover: the interactive prompt/wizard flow itself has
+no automated coverage. Nothing exercises the actual prompt sequence, the
+`~/.aws/credentials` write (or its pre-write backup), or the post-init
+status check. Those need a manual or scripted (e.g. `expect`-driven)
+fresh-install smoke before the wizard is trusted on a real first run.
