@@ -2,8 +2,9 @@
 
 ## Program context — where truth lives
 
-This file covers build/test/navigation only. For what is true and what ships
-next, read these in order (each owns a distinct layer; none is duplicated here):
+This file covers build/test/navigation and the machines that run them. For what
+is true and what ships next, read these in order (each owns a distinct layer;
+none is duplicated here):
 
 1. [docs/VISION.md](docs/VISION.md) — north star + the claim-tier legend.
 2. [docs/PRODUCT.md](docs/PRODUCT.md) — the accepted A→B→C delivery sequence,
@@ -14,43 +15,113 @@ next, read these in order (each owns a distinct layer; none is duplicated here):
 5. [docs/release/evidence/README.md](docs/release/evidence/README.md) —
    evidence corpus index.
 
+Operational ladders an agent should read rather than re-derive:
+
+- **Gate ladder (G0–G6).**
+  [docs/ops/large-workdir-daily-driver-sequencing-2026-05-30.md](docs/ops/large-workdir-daily-driver-sequencing-2026-05-30.md)
+  owns the gate definitions and their dependency order (`G1 + G2 → G3 → G4`,
+  with `G5`/`G6` following). It is explicitly superseded for *live status* by
+  `docs/ops/current.md` — read it for sequencing, not for state.
+- **Repo-roam program.**
+  [docs/ops/repo-roam-test-plan-2026-06-08.md](docs/ops/repo-roam-test-plan-2026-06-08.md)
+  is the G5 dev-env zero-diff ladder over `neo`/`honey`;
+  [docs/ops/git-roam-daily-driver-acceptance-2026-06-08.md](docs/ops/git-roam-daily-driver-acceptance-2026-06-08.md)
+  is the "machine does not matter" acceptance plan.
+- **Per-device crypto is sequenced, not a config flip.**
+  [docs/ops/per-device-crypto-identity-design-2026-05-18.md](docs/ops/per-device-crypto-identity-design-2026-05-18.md)
+  is the design;
+  [docs/ops/per-device-crypto-migration-2026-06-06.md](docs/ops/per-device-crypto-migration-2026-06-06.md)
+  owns the expand/contract ordering and the tri-state `crypto.wrap_mode` gate
+  that replaces the shipped-but-never-flipped `crypto.per_device_wrapping`
+  bool; and
+  [docs/ops/shared-master-fleet-migration-runbook-2026-07-28.md](docs/ops/shared-master-fleet-migration-runbook-2026-07-28.md)
+  owns how to execute one step. Every host is still `wrap_mode = master`. Do
+  not flip a wrapping mode as a side effect of a code change, and treat
+  `tcfs key rotate <prefix>` as a rebuild gate rather than an available
+  operator remedy.
+
 Tracked work: Linear initiative "Tummycrypt — Daily Driver Track"
 (https://linear.app/tinyland/initiative/tummycrypt-daily-driver-track-95eeeb5e7493),
 umbrella "Cordillera - Tinyland Remote-Everything Program"
 (https://linear.app/tinyland/initiative/cordillera-tinyland-remote-everything-program-15f56b187c19).
 Sibling repos: tinyland-inc/rockies (OS adoption seed, TIN-2300),
-tinyland-inc/lab (fleet deploy/pins), Jesssullivan/prompts-enqueue
+tinyland-inc/lab (fleet deploy/pins, host inventory, and the estate's
+build-placement and host-hold rulings), Jesssullivan/prompts-enqueue
 (program ledger, prompts 47/60).
 
 ## Quick Start
 
 ```bash
-# Enter Nix devShell (recommended)
+# Enter the Nix devShell (recommended). Its shellHook puts the pinned
+# toolchain ahead of any Home Manager rustc/cargo already on PATH.
 nix develop
-# Or with direnv:
+# Or let direnv load the committed .envrc once:
 direnv allow
 
-# Build
-~/.cargo/bin/cargo build --workspace
+# Build / test / lint — cargo comes from the devShell or the pinned toolchain
+cargo build --workspace
+cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets
 
-# Test
-~/.cargo/bin/cargo test --workspace
+# Same lanes through the task runner
+task build
+task test          # cargo test --workspace
+task lint          # cargo clippy -D warnings + cargo fmt --check
 
-# Lint
-~/.cargo/bin/cargo fmt --all -- --check
-~/.cargo/bin/cargo clippy --workspace --all-targets
-
-# Start dev infrastructure (SeaweedFS + NATS + Prometheus + Grafana)
+# Local dev stack: 8 containers (3 SeaweedFS masters + volume + filer, NATS,
+# Prometheus, Grafana) via docker-compose. Linux host only — see below.
 task dev
 ```
 
 ## Environment Notes
 
-- **Shell**: fish (does NOT support `export VAR=VALUE`; use `env VAR=VALUE command`)
-- **Cargo**: Not in PATH on Rocky Linux — always use `~/.cargo/bin/cargo`
-- **Linker**: mold is NOT installed outside Nix; do not add to `.cargo/config.toml`
-- **Docker**: Do not run docker-compose on yoga (resource-constrained)
-- **Rust edition**: 2021 (Rust >= 1.93 required for workspace)
+### Toolchain
+
+- **Rust**: edition 2021; workspace `rust-version = "1.93"`; pinned to
+  `1.93.0` by `rust-toolchain.toml`. `.envrc` fails loud when the active
+  `rustc` is below the minimum or does not match the pin.
+- **Invoke plain `cargo`.** It is expected to come from the pinned toolchain or
+  the Nix devShell (`Justfile` header; `flake.nix` `shellHook`). Do not
+  hardcode `~/.cargo/bin/cargo` — that path is only the rustup fallback
+  `.envrc` adds when `nix` is absent.
+- **Linker**: `mold` ships in the Nix devShell; outside Nix the default system
+  linker is used. Do not add a `mold` entry to `.cargo/config.toml`; opt in
+  per-shell with `RUSTFLAGS="-C link-arg=-fuse-ld=mold"`.
+- **PATH ordering**: the devShell and `.envrc` both put `target/debug` and
+  `target/release` ahead of installed packages, so a stale workspace build can
+  shadow the deployed `tcfs`/`tcfsd`. Smoke harnesses print the resolved binary
+  path — check it before believing a version string.
+
+### Machines that run this repo
+
+| Host | What it is | How agents use it |
+| --- | --- | --- |
+| `neo` | macOS (Darwin) maintainer workstation, 8 GiB RAM | Orchestration, review, editing, and the release-adjacent `neo → honey` live lane. **No local compile/test/`task dev` here** — the estate build-placement ruling sends heavy toolchain work to a remote host, and an unbounded local build takes every session on the machine down with it. Login shell is `bash`. |
+| `honey` | Rocky Linux 10 control-plane voter; canonical Linux control point | High-volume push/pull, daemon and service checks, conflict and stress lanes, Linux-first operator truth. Login shell is **`fish`**, which has no `export VAR=VALUE`; use `env VAR=VALUE command` or wrap in `bash -c '...'`. |
+| `sting` | Rocky Linux 10.2 voter; headless remote-dev seat driven from `neo` | The dev seat for build/test work that must not run on `neo`. Login shell is POSIX `bash` with an interactive-only fish handoff, so a non-interactive SSH command lands in `bash`. |
+
+Host facts and shell settings above are owned by `tinyland-inc/lab`
+(`AGENTS.md`, `inventory/host_vars/{macbook-neo,honey,sting}.yml`); that repo
+is authoritative if it disagrees with this table.
+
+- **Rocky-specific (`honey`, `sting`)**: a rustup install lands in
+  `~/.cargo/bin`, which is not on `PATH` by default. `.envrc`'s non-Nix
+  fallback adds it. Inside `nix develop` the pinned toolchain leads and this
+  does not apply.
+- **`sting` is a dev seat, not a TCFS target.** The lab-side continuity hold
+  readmitted interactive SSH, tmux, and dev work under `~/git`; the
+  `tcfs_runtime` role stays disabled. Build and test this repo there; do not
+  drive daemon, enrollment, or fleet operations against it.
+- **Acceptance hosts are a different question.** The host pool, lane order, and
+  reset contract for real-host acceptance live in
+  [docs/ops/lab-host-acceptance-matrix.md](docs/ops/lab-host-acceptance-matrix.md)
+  and [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md).
+  A dev seat is not an acceptance target.
+- **Live-work freezes outrank convenience.** `docs/ops/current.md` records
+  which live resolver, enrollment, deploy, and crypto ceremonies are frozen.
+  Source review, tests, and landing continue during a freeze; new fleet claims
+  do not.
 
 ## Workspace Crates (19 members)
 
@@ -89,24 +160,38 @@ task dev
 
 ```bash
 # All tests
-~/.cargo/bin/cargo test --workspace
+cargo test --workspace
 
 # Specific crate
-~/.cargo/bin/cargo test -p tcfs-sync
+cargo test -p tcfs-sync
+
+# Feature-gated lane CI also runs
+cargo test -p tcfs-sync --features nats,crypto
 
 # Property-based tests
-~/.cargo/bin/cargo test -p tcfs-sync -- conflict
-~/.cargo/bin/cargo test -p tcfs-sync --test multi_machine_sim
+cargo test -p tcfs-sync -- conflict
+cargo test -p tcfs-sync --test multi_machine_sim
 
 # With output
-~/.cargo/bin/cargo test -- --nocapture
+cargo test -- --nocapture
 ```
+
+Shell-harness and proof lanes are `task` recipes, not cargo tests — see
+`task --list` (for example `task lazy:check`, `task lazy:dev-env-fingerprint`).
+Prefer the `lazy:test-*` regression recipes when changing a harness script.
 
 ## CI
 
-- GitHub Actions: fmt, clippy, test, build, cargo-deny, security audit, nix build
-- Docs CI: lychee link check + tectonic PDF build + Jekyll GitHub Pages
-- Release: 9 build targets (5 platforms + container + nix + installers + plan)
+- `ci.yml`: `check` (fmt, FileProvider surface contract, clippy, `cargo test`,
+  feature-isolated and wire-up tests, then workspace/`k8s-worker`/no-FUSE
+  builds), plus `cloudfilter-windows`, `nix`, `fileprovider-staticlib`,
+  `ios-typecheck`, `deny` (cargo-deny), and `secret-scan` (gitleaks).
+- `nix-ci.yml`: `flake-check`, `build-linux-x86_64`, `build-macos-aarch64`.
+- `docs.yml`: lychee link check, tectonic PDF build, GitHub Pages deploy. The
+  repo's only pre-commit hook is the same lychee check, so a broken relative
+  link in a Markdown edit fails locally and in CI.
+- `release.yml`: 9 jobs — plan, binaries, container image, nix build,
+  installers, FileProvider, `.pkg`, release creation, Homebrew update.
 
 ## Agent Coordination
 
@@ -131,6 +216,10 @@ concurrently. Adapted from the GFTB multi-agent orchestration pattern
   clean head; each "fix round" cited a fresh adversarial pass but none
   re-ran a local build/test. Verify before stacking; don't self-certify onto
   someone else's lane.
+- **`README.md` and `AGENTS.md` are live roam fixtures.** `docs/ops/current.md`
+  tracks deliberate user-content conflicts on these two paths for the TIN-2658
+  production resolver gate. Editing them in a PR is fine; do not "resolve" the
+  live host-side divergence as a side effect of a docs change.
 - **Durable notes over scratchpad.** Findings that matter beyond the current
   session go in dated files under `docs/ops/` (the existing ~30-file
   convention), never only in an ephemeral scratchpad or chat context a
