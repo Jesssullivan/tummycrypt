@@ -5,6 +5,7 @@ pub mod blacklist;
 pub mod conflict;
 pub mod conflict_git;
 pub mod engine;
+pub mod freshness;
 pub mod git_safety;
 pub mod git_workspace;
 pub mod index_entry;

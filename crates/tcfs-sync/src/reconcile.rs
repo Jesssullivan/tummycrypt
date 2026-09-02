@@ -23,6 +23,9 @@ use crate::blacklist::Blacklist;
 use crate::conflict::{compare_clocks, ConflictInfo, VectorClock};
 use crate::conflict_git;
 use crate::engine::{self, OptionalEncryption, ProgressFn};
+use crate::freshness::{
+    FreshnessCache, FreshnessInputs, FreshnessRecord, InputFingerprint, PathFingerprint,
+};
 use crate::git_safety;
 use crate::index_entry::{
     manifest_key, parse_index_entry_record, portable_casefold_path, read_exact_index_path_state,
@@ -649,6 +652,39 @@ pub struct ReconcileConfig {
     /// inventory contract. Any local, remote, or tracked path outside it makes
     /// planning fail closed instead of creating a parallel transport.
     pub authoritative_paths: Option<BTreeSet<String>>,
+    /// Re-derive every both-exist classification from scratch: full-file BLAKE3
+    /// plus a remote manifest GET for every path, exactly as reconcile behaved
+    /// before the freshness memo existed.
+    ///
+    /// The memo is a *performance* mechanism, not an integrity boundary (see
+    /// [`crate::freshness`]). `paranoid` is the operator's escape hatch when
+    /// that distinction matters — a suspected stat-forging restore tool, a
+    /// post-incident audit, or simply proving the memo is not the cause of
+    /// something. It costs the full unoptimized pass.
+    pub paranoid: bool,
+    /// Memo of both-exist pairs whose full classification already converged on
+    /// `UpToDate`. `None` disables the fast path outright.
+    ///
+    /// Shared behind an `Arc` because the daemon keeps one cache warm across
+    /// every cycle of its reconcile loop, while the CLI opens a JSON sidecar
+    /// beside the state cache so a `--expect-plan` dry run warms the execute
+    /// pass that follows it.
+    pub freshness: Option<Arc<FreshnessCache>>,
+}
+
+impl ReconcileConfig {
+    /// The freshness memo, if this configuration may use it at all.
+    ///
+    /// Refused for `--paranoid`, and refused whenever an authoritative
+    /// workspace capture is in play: those paths live in an ephemeral
+    /// materialization directory, so memoizing them would fill the sidecar with
+    /// records that can never hit again.
+    fn freshness_gate(&self) -> Option<&FreshnessCache> {
+        if self.paranoid || self.authoritative_paths.is_some() {
+            return None;
+        }
+        self.freshness.as_deref()
+    }
 }
 
 /// Result of executing a reconciliation plan.
@@ -1897,6 +1933,24 @@ pub async fn reconcile(
             .then_with(|| git_apply_rank(a).cmp(&git_apply_rank(b)))
             .then_with(|| action_rel_path(a).cmp(action_rel_path(b)))
     });
+
+    // 6. Close the freshness memo for this cycle: drop records for paths that
+    //    have left the corpus, persist the sidecar if one is configured, and
+    //    report the hit rate so an operator can see whether the memo is working
+    //    without reading a profile. All of it is best-effort — a memo failure
+    //    must never fail a plan.
+    if let Some(cache) = config.freshness_gate() {
+        cache.retain_touched();
+        cache.flush_best_effort();
+        let stats = cache.stats();
+        info!(
+            hits = stats.hits,
+            misses = stats.misses,
+            capped = stats.capped,
+            entries = stats.entries,
+            "reconcile freshness memo"
+        );
+    }
 
     info!(
         pushes = summary.pushes,
@@ -3548,6 +3602,7 @@ async fn classify_path_with_context(
                 device_id,
                 tracked_is_exact,
                 encryption,
+                config.freshness_gate(),
             )
             .await;
         }
@@ -3591,6 +3646,7 @@ async fn compare_both_exist(
         device_id,
         tracked.is_some(),
         None,
+        None,
     )
     .await
 }
@@ -3606,6 +3662,7 @@ async fn compare_both_exist_with_context(
     device_id: &str,
     tracked_is_exact: bool,
     encryption: OptionalEncryption<'_>,
+    freshness: Option<&FreshnessCache>,
 ) -> Result<ReconcileAction> {
     // Symlinks are first-class entries: they must NOT be dereferenced and hashed
     // like regular files (that would hash the *target's* content and then fail to
@@ -3647,6 +3704,45 @@ async fn compare_both_exist_with_context(
     }
     if remote_entry.symlink_target.is_some() {
         anyhow::bail!("regular remote index entry carries a symlink target at {rel_path:?}");
+    }
+
+    // ── Stat-gated freshness memo ────────────────────────────────────────────
+    //
+    // Everything past this point costs one full-file BLAKE3 plus one sequential
+    // S3 manifest GET, for EVERY path present on both sides. At the measured
+    // 29 ms/file that is ~10.1 h for one 1.26 M-file estate pass against a 300 s
+    // cadence — the 122x blocker, and it is this function, not registry
+    // validation and not the status cache.
+    //
+    // When a previous cycle already carried this exact pair through the full
+    // comparison and it converged on `UpToDate`, and every input that decision
+    // was a function of is still bit-identical, replay the verdict. The memo can
+    // only ever return `UpToDate`: it replays a proof, it never invents one, and
+    // an `UpToDate` action contributes nothing to `ReconcilePlan::sha256` beyond
+    // its path, so `--expect-plan` is unaffected. `crate::freshness` carries the
+    // soundness argument and the ctime/darwin caveats.
+    let live_stat = crate::freshness::stat_identity(&local_metadata);
+    // Only pay the canonicalization when the memo is actually enabled; under
+    // `--paranoid` this whole block costs nothing.
+    let canonical_key = freshness.map(|_| crate::state::canonical_path_key(local_path));
+    if let (Some(cache), Some(canonical_key)) = (freshness, canonical_key.as_deref()) {
+        let key = PathFingerprint::of(canonical_key);
+        if let Some(action) = replay_freshness_memo(
+            cache,
+            key,
+            canonical_key,
+            rel_path,
+            live_stat,
+            tracked,
+            tracked_is_exact,
+            remote_entry,
+            remote_prefix,
+            device_id,
+        ) {
+            cache.note_hit(key);
+            return Ok(action);
+        }
+        cache.note_miss(key);
     }
 
     // Get local hash
@@ -3820,13 +3916,196 @@ async fn compare_both_exist_with_context(
         remote_device,
     );
 
-    Ok(outcome_to_action(
-        outcome,
+    let action = outcome_to_action(outcome, rel_path, local_path, remote_entry, &manifest_path);
+
+    // Memoize ONLY a converged pair. Push/Pull/Conflict verdicts are never
+    // cached: they describe work still to do, and the very next execute changes
+    // the inputs they were derived from.
+    if let (Some(cache), Some(canonical_key), ReconcileAction::UpToDate { .. }) =
+        (freshness, canonical_key.as_deref(), &action)
+    {
+        install_freshness_memo(
+            cache,
+            canonical_key,
+            rel_path,
+            local_path,
+            live_stat,
+            &local_hash,
+            tracked,
+            tracked_is_exact,
+            remote_entry,
+            remote_prefix,
+            device_id,
+        );
+    }
+
+    Ok(action)
+}
+
+/// True when a path may participate in the freshness memo at all.
+///
+/// Git ref-class paths are excluded outright. They are the one corpus rewritten
+/// out of band, in place, at the same size, within the same second — `git
+/// commit` moving a 41-byte branch head — and they are the corpus whose
+/// misclassification TIN-2584 and the `.git` fast-forward machinery exist to
+/// prevent. `ctime` would in fact catch that rewrite, but refs are a few hundred
+/// paths against ~1.26 M: buying nothing measurable in exchange for reasoning
+/// about the most delicate arm in this file is a bad trade.
+///
+/// Immutable, content-addressed Git objects and packs stay eligible, and that is
+/// where the estate's volume actually lives.
+fn path_is_memo_eligible(rel_path: &str) -> bool {
+    !is_git_ref_class_path(rel_path)
+}
+
+/// Replay a memoized `UpToDate` verdict, or `None` to fall through to the full
+/// comparison.
+///
+/// Every early return here is a *miss*, which costs one ordinary full
+/// evaluation. No branch can produce a verdict other than `UpToDate`.
+#[allow(clippy::too_many_arguments)]
+fn replay_freshness_memo(
+    cache: &FreshnessCache,
+    key: PathFingerprint,
+    canonical_key: &str,
+    rel_path: &str,
+    live_stat: Option<crate::freshness::StatIdentity>,
+    tracked: Option<&SyncState>,
+    tracked_is_exact: bool,
+    remote_entry: &RemoteIndexEntry,
+    remote_prefix: &str,
+    device_id: &str,
+) -> Option<ReconcileAction> {
+    let (stat, tracked_state) =
+        memo_preconditions(rel_path, live_stat, tracked, tracked_is_exact, remote_entry)?;
+    let now = crate::freshness::now_unix();
+    let record = cache.lookup(key, now)?;
+    let inputs = InputFingerprint::of(&FreshnessInputs {
+        canonical_key,
         rel_path,
-        local_path,
+        remote_prefix,
+        tracked_blake3: &tracked_state.blake3,
+        tracked_vclock: &tracked_state.vclock,
+        remote_manifest_hash: &remote_entry.manifest_hash,
+        remote_size: remote_entry.size,
+        device_id,
+    });
+    if !crate::freshness::memo_still_holds(&record, stat, inputs, now) {
+        return None;
+    }
+    debug!(
+        path = %rel_path,
+        "freshness memo hit: skipping the full-file hash and the remote manifest read"
+    );
+    Some(ReconcileAction::UpToDate {
+        rel_path: rel_path.to_string(),
+    })
+}
+
+/// Install a memo for a pair whose full comparison converged on `UpToDate`.
+///
+/// Best-effort throughout: every refusal simply means the next cycle re-proves
+/// this path.
+#[allow(clippy::too_many_arguments)]
+fn install_freshness_memo(
+    cache: &FreshnessCache,
+    canonical_key: &str,
+    rel_path: &str,
+    local_path: &Path,
+    stat_before_hash: Option<crate::freshness::StatIdentity>,
+    local_hash: &str,
+    tracked: Option<&SyncState>,
+    tracked_is_exact: bool,
+    remote_entry: &RemoteIndexEntry,
+    remote_prefix: &str,
+    device_id: &str,
+) {
+    let Some((before, tracked_state)) = memo_preconditions(
+        rel_path,
+        stat_before_hash,
+        tracked,
+        tracked_is_exact,
         remote_entry,
-        &manifest_path,
-    ))
+    ) else {
+        return;
+    };
+    // The memo vouches for "the local bytes hash to the tracked baseline". If
+    // the bytes we just hashed disagree with the state cache, the pair did not
+    // converge on a shared baseline and the record would be a lie.
+    if tracked_state.blake3 != local_hash {
+        return;
+    }
+    // TOCTOU: the file may have been rewritten between the `symlink_metadata`
+    // that produced `before` and the `hash_file` that produced `local_hash`.
+    // Binding a record to `before` would then vouch for bytes we never read.
+    // Re-stat, and install only if the identity is unmoved across the read.
+    let Ok(metadata_after) = std::fs::symlink_metadata(local_path) else {
+        return;
+    };
+    let Some(after) = crate::freshness::stat_identity(&metadata_after) else {
+        return;
+    };
+    if after != before {
+        debug!(
+            path = %rel_path,
+            "local file changed while it was being hashed; not memoizing this cycle"
+        );
+        return;
+    }
+
+    cache.record(
+        PathFingerprint::of(canonical_key),
+        FreshnessRecord {
+            stat: after,
+            inputs: InputFingerprint::of(&FreshnessInputs {
+                canonical_key,
+                rel_path,
+                remote_prefix,
+                tracked_blake3: &tracked_state.blake3,
+                tracked_vclock: &tracked_state.vclock,
+                remote_manifest_hash: &remote_entry.manifest_hash,
+                remote_size: remote_entry.size,
+                device_id,
+            }),
+            verified_at: crate::freshness::now_unix(),
+        },
+    );
+}
+
+/// Conditions a path must meet before it may be looked up in, or installed
+/// into, the freshness memo.
+///
+/// Shared by both directions on purpose: a lookup that admitted a shape the
+/// install refuses (or the reverse) would be a silent asymmetry in the one
+/// predicate that has to stay closed.
+fn memo_preconditions<'a>(
+    rel_path: &str,
+    live_stat: Option<crate::freshness::StatIdentity>,
+    tracked: Option<&'a SyncState>,
+    tracked_is_exact: bool,
+    remote_entry: &RemoteIndexEntry,
+) -> Option<(crate::freshness::StatIdentity, &'a SyncState)> {
+    if !path_is_memo_eligible(rel_path) {
+        return None;
+    }
+    // A non-regular file, or a platform without POSIX inode metadata.
+    let stat = live_stat?;
+    if !matches!(remote_entry.kind, RemoteEntryKind::RegularFile) {
+        return None;
+    }
+    // The baseline must be the exact-key record the push path would also read
+    // (TIN-3278): a fuzzy suffix match may describe a different file entirely.
+    if !tracked_is_exact {
+        return None;
+    }
+    let tracked_state = tracked?;
+    // A path carrying a recorded conflict is exactly where an operator needs
+    // live truth, not a replayed verdict (TIN-2658 resolve-blindness). Never
+    // memo one.
+    if tracked_state.conflict.is_some() {
+        return None;
+    }
+    Some((stat, tracked_state))
 }
 
 /// TIN-3277 prefilter for an equal-clock, local out-of-band rewrite.
@@ -6319,6 +6598,288 @@ mod tests {
             RemoteIndexEntry::new_symlink(object_id, target),
             engine::symlink_manifest_hash(target),
         )
+    }
+
+    // ── stat-gated freshness memo ─────────────────────────────────────────
+
+    /// Warm the memo on a converged pair and hand back everything a second
+    /// classification needs.
+    async fn converged_memo_fixture(
+        op: &Operator,
+        dir: &Path,
+        rel_path: &str,
+        content: &[u8],
+    ) -> (PathBuf, RemoteIndexEntry, SyncState, Arc<FreshnessCache>) {
+        let local_path = dir.join(rel_path);
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&local_path, content).unwrap();
+        let clock = causal_test_clock(&[("peer", 1)]);
+        let (entry, content_hash) =
+            write_causal_test_regular_manifest(op, rel_path, content, clock.clone()).await;
+        let tracked = causal_test_state(content_hash, clock);
+        let cache = Arc::new(FreshnessCache::in_memory());
+        (local_path, entry, tracked, cache)
+    }
+
+    async fn classify_with_memo(
+        op: &Operator,
+        rel_path: &str,
+        local_path: &Path,
+        entry: &RemoteIndexEntry,
+        tracked: &SyncState,
+        cache: &FreshnessCache,
+    ) -> Result<ReconcileAction> {
+        compare_both_exist_with_context(
+            rel_path,
+            local_path,
+            entry,
+            Some(tracked),
+            op,
+            "data",
+            "neo",
+            true,
+            None,
+            Some(cache),
+        )
+        .await
+    }
+
+    /// Rewrite a file in place at the SAME length with different bytes, then put
+    /// mtime back exactly where it was. This is the `(size, mtime)` blind spot
+    /// the classifier documents at its push execute site — a 41-byte `git
+    /// commit` ref rewrite — reproduced deterministically.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn rewrite_same_size_and_forge_mtime(path: &Path, replacement: &[u8]) {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+
+        let before = std::fs::symlink_metadata(path).unwrap();
+        let (mtime_sec, mtime_nsec) = (before.mtime(), before.mtime_nsec());
+        assert_eq!(
+            before.len() as usize,
+            replacement.len(),
+            "the forgery is only interesting at an identical size"
+        );
+        std::fs::write(path, replacement).unwrap();
+
+        let times = [
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT as _,
+            },
+            libc::timespec {
+                tv_sec: mtime_sec as libc::time_t,
+                tv_nsec: mtime_nsec as _,
+            },
+        ];
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` outlives the call and `times` is the two-element
+        // `timespec` array utimensat expects.
+        let rc = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c_path.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(rc, 0, "utimensat: {}", std::io::Error::last_os_error());
+    }
+
+    /// The memo must actually eliminate the S3 GET, not merely short-circuit
+    /// some later branch. Proved by DELETING the remote manifest object between
+    /// the two classifications: a second `UpToDate` is only possible if nothing
+    /// read it.
+    #[tokio::test]
+    async fn freshness_memo_skips_the_remote_manifest_read_entirely() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let (local_path, entry, tracked, cache) =
+            converged_memo_fixture(&op, dir.path(), "doc.txt", b"converged bytes").await;
+
+        let first = classify_with_memo(&op, "doc.txt", &local_path, &entry, &tracked, &cache)
+            .await
+            .expect("a converged pair classifies");
+        assert!(matches!(first, ReconcileAction::UpToDate { .. }));
+        assert_eq!(cache.stats().entries, 1, "the verdict should be memoized");
+        assert_eq!(cache.stats().misses, 1);
+
+        op.delete(&format!("data/manifests/{}", entry.manifest_hash))
+            .await
+            .unwrap();
+
+        let second = classify_with_memo(&op, "doc.txt", &local_path, &entry, &tracked, &cache)
+            .await
+            .expect("the memo replays without touching the remote");
+        assert!(matches!(second, ReconcileAction::UpToDate { .. }));
+        assert_eq!(cache.stats().hits, 1);
+    }
+
+    /// THE property: a path whose content changed is never skipped. Same size,
+    /// same inode, mtime forged back byte-for-byte — only ctime moved.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn freshness_memo_refuses_a_same_size_rewrite_with_a_forged_mtime() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let (local_path, entry, tracked, cache) =
+            converged_memo_fixture(&op, dir.path(), "ref-shaped", b"aaaaaaaaaaaa").await;
+
+        let first = classify_with_memo(&op, "ref-shaped", &local_path, &entry, &tracked, &cache)
+            .await
+            .unwrap();
+        assert!(matches!(first, ReconcileAction::UpToDate { .. }));
+
+        rewrite_same_size_and_forge_mtime(&local_path, b"bbbbbbbbbbbb");
+
+        let second = classify_with_memo(&op, "ref-shaped", &local_path, &entry, &tracked, &cache)
+            .await
+            .unwrap();
+        assert!(
+            !matches!(second, ReconcileAction::UpToDate { .. }),
+            "a same-size rewrite with a forged mtime must never be skipped, got {second:?}"
+        );
+    }
+
+    /// A peer publishing a new manifest moves the content-addressed
+    /// `manifest_hash`, which is how the memo notices a remote that advanced
+    /// while the local side sat still.
+    #[tokio::test]
+    async fn freshness_memo_refuses_an_advanced_remote_manifest() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let (local_path, entry, tracked, cache) =
+            converged_memo_fixture(&op, dir.path(), "doc.txt", b"converged bytes").await;
+
+        let first = classify_with_memo(&op, "doc.txt", &local_path, &entry, &tracked, &cache)
+            .await
+            .unwrap();
+        assert!(matches!(first, ReconcileAction::UpToDate { .. }));
+
+        let (advanced, _) = write_causal_test_regular_manifest(
+            &op,
+            "doc.txt",
+            b"a peer moved this",
+            causal_test_clock(&[("peer", 2)]),
+        )
+        .await;
+        assert_ne!(advanced.manifest_hash, entry.manifest_hash);
+
+        let second = classify_with_memo(&op, "doc.txt", &local_path, &advanced, &tracked, &cache)
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, ReconcileAction::Pull { .. }),
+            "an advanced remote must be pulled, got {second:?}"
+        );
+    }
+
+    /// A path carrying a recorded conflict is where an operator most needs live
+    /// truth (TIN-2658 resolve-blindness), so it is never memoized.
+    #[tokio::test]
+    async fn freshness_memo_refuses_a_path_carrying_a_recorded_conflict() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let (local_path, entry, mut tracked, cache) =
+            converged_memo_fixture(&op, dir.path(), "doc.txt", b"converged bytes").await;
+        tracked.conflict = Some(crate::conflict::ConflictInfo {
+            rel_path: "doc.txt".into(),
+            local_vclock: VectorClock::new(),
+            remote_vclock: VectorClock::new(),
+            local_blake3: "local".into(),
+            remote_blake3: "remote".into(),
+            local_device: "neo".into(),
+            remote_device: "peer".into(),
+            detected_at: 1,
+            times_recorded: 1,
+            remote_manifest_key: None,
+        });
+
+        let action = classify_with_memo(&op, "doc.txt", &local_path, &entry, &tracked, &cache)
+            .await
+            .unwrap();
+        assert!(matches!(action, ReconcileAction::UpToDate { .. }));
+        assert_eq!(
+            cache.stats().entries,
+            0,
+            "a conflicted entry must never be memoized"
+        );
+    }
+
+    /// Git ref-class paths are excluded from the memo outright.
+    #[tokio::test]
+    async fn freshness_memo_never_covers_git_ref_class_paths() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let (local_path, entry, tracked, cache) =
+            converged_memo_fixture(&op, dir.path(), rel_path, b"0123456789abcdef").await;
+        assert!(is_git_ref_class_path(rel_path));
+
+        let action = classify_with_memo(&op, rel_path, &local_path, &entry, &tracked, &cache)
+            .await
+            .unwrap();
+        assert!(matches!(action, ReconcileAction::UpToDate { .. }));
+        assert_eq!(
+            cache.stats().entries,
+            0,
+            "ref-class paths must stay on the full comparison"
+        );
+    }
+
+    /// A fuzzy (non-exact-key) state match is not a baseline the push path would
+    /// agree with (TIN-3278), so it cannot back a memo either.
+    #[tokio::test]
+    async fn freshness_memo_requires_the_exact_key_state_record() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let (local_path, entry, tracked, cache) =
+            converged_memo_fixture(&op, dir.path(), "doc.txt", b"converged bytes").await;
+
+        let action = compare_both_exist_with_context(
+            "doc.txt",
+            &local_path,
+            &entry,
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+            false,
+            None,
+            Some(cache.as_ref()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, ReconcileAction::UpToDate { .. }));
+        assert_eq!(cache.stats().entries, 0);
+    }
+
+    #[test]
+    fn paranoid_and_authoritative_capture_both_disable_the_memo() {
+        let cache = Arc::new(FreshnessCache::in_memory());
+        let enabled = ReconcileConfig {
+            freshness: Some(Arc::clone(&cache)),
+            ..Default::default()
+        };
+        assert!(enabled.freshness_gate().is_some());
+
+        let paranoid = ReconcileConfig {
+            freshness: Some(Arc::clone(&cache)),
+            paranoid: true,
+            ..Default::default()
+        };
+        assert!(paranoid.freshness_gate().is_none());
+
+        let captured = ReconcileConfig {
+            freshness: Some(Arc::clone(&cache)),
+            authoritative_paths: Some(BTreeSet::new()),
+            ..Default::default()
+        };
+        assert!(captured.freshness_gate().is_none());
+
+        assert!(ReconcileConfig::default().freshness_gate().is_none());
     }
 
     #[tokio::test]
