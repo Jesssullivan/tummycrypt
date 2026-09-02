@@ -1,0 +1,26 @@
+[package]
+name = "tcfs-bulkload-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs bulkload M0 real-corpus A/B harness"
+publish = false
+
+[[bin]]
+name = "tcfs-bulkload-bench"
+path = "src/main.rs"
+
+[dependencies]
+tcfs-bulkload-agent = { path = "../tcfs-bulkload-agent" }
+tcfs-bulkload-proto = { path = "../tcfs-bulkload-proto" }
+clap = { workspace = true }
+
+[lints.clippy]
+# R33 deny-panics wall. Refusals are Results, never panics.
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"

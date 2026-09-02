@@ -19,6 +19,9 @@ members = [
     "crates/tcfs-file-provider",
     "crates/tcfs-dbus",
     "crates/tcfs-auth",
+    "crates/tcfs-bulkload-proto",
+    "crates/tcfs-bulkload-agent",
+    "crates/tcfs-bulkload-bench",
     "tests/e2e",
 ]
 
@@ -130,6 +133,14 @@ prometheus-client = { version = "0.24" }
 
 # Parallelism
 rayon = { version = "1" }
+
+# Bulkload rebuild (R32-R35): the agent half is held to a deliberately small
+# dependency set enforced by the tcfs-bulkload-agent dep-graph test.
+postcard = { version = "1", features = ["use-std"] }
+libc = { version = "0.2" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+ignore = { version = "0.4" }
+crc32c = { version = "0.6" }
 
 # UUID
 uuid = { version = "1", features = ["v4"] }
