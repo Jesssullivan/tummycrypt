@@ -21,6 +21,22 @@
 #   - Homebrew formula
 #   - Container image (GHCR, linux/amd64 + linux/arm64/v8)
 #   - SHA256SUMS.txt
+#
+# RUNNERS — partially migrated; the rest are a documented TIN-3914 waiver.
+# The correct labels for this repo are `tinyland-nix` and `tinyland-dind`,
+# served by the `tummycrypt-nix` / `tummycrypt-dind` ARC scale sets in the
+# jesssullivan-infra owner overlay (TIN-2538). `tummycrypt-*` is the scale-set
+# ANCHOR name, never a `runs-on` label — the taxonomy authority rejects
+# project-identity labels outright.
+#   MIGRATED: nix-build -> tinyland-nix.
+#   DEFERRED, with reasons, per job below: build-binaries and create-release
+#     apt-get/dpkg/rpm against Ubuntu; build-image needs qemu+buildx on dind;
+#     plan/generate-installers/update-homebrew depend on hosted-image tooling
+#     that the nix runner image is not known to carry.
+#   NO DESTINATION: the macos-14 jobs. ARC is Linux-on-Kubernetes and no darwin
+#     capability class exists, so notarization/pkg stay hosted indefinitely.
+# Sequencing and the evidence behind each call:
+# docs/ops/ci-runner-enrollment-2026-08-28.md
 
 name: Release
 
@@ -39,6 +55,11 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: tcfsd  # Prefixed with lowercase $REGISTRY/$GITHUB_REPOSITORY_OWNER in tags
   RUST_TOOLCHAIN: 1.93.0
+  # The one nix binary cache. Same names and values as nix-ci.yml and
+  # flake.nix nixConfig, stated here rather than inlined per step.
+  ATTIC_SERVER: https://nix-cache.tinyland.dev
+  ATTIC_CACHE: main
+  ATTIC_PUBLIC_KEY: main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
 permissions:
   contents: write
@@ -50,7 +71,7 @@ jobs:
 
   plan:
     name: Plan release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -171,16 +192,21 @@ jobs:
           #   rpm: false
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # dtolnay/rust-toolchain publishes no semver release tag, so this pins
+        # the `stable` BRANCH head instead of a version. That is safe here only
+        # because both call sites pass `toolchain:` explicitly — with this
+        # action the ref selects the default toolchain, so pinning a SHA without
+        # an explicit toolchain would silently change which Rust gets installed.
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch, 2026-08-05
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
           cache-bin: false
@@ -223,7 +249,7 @@ jobs:
 
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -453,7 +479,7 @@ jobs:
       # ── Upload artifacts ──────────────────────────────────────────────────
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.name }}
           path: |
@@ -467,30 +493,30 @@ jobs:
 
   build-image:
     name: Build container image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: plan
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU for arm64 image builds
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build and push image
         id: build_image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: .
           file: ./Containerfile
@@ -507,7 +533,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Sign container image with Cosign (keyless)
         env:
@@ -527,52 +553,70 @@ jobs:
 
   nix-build:
     name: Nix Build + Attic Push
-    runs-on: ubuntu-latest
+    # MIGRATED (TIN-2538). tinyland-nix is served to this repository by the
+    # `tummycrypt-nix` ARC scale set in the jesssullivan-infra owner overlay
+    # (tofu/stacks/arc-runners/jesssullivan.tfvars), whose helm_release is live
+    # in tofu state as of the 2026-08-28T04:00Z apply. The runner image is
+    # ghcr.io/tinyland-inc/actions-runner-nix, so a job that does nothing but
+    # run `nix` is the right first job to move — and it is a LEAF (nothing
+    # `needs:` it), so a bad first run cannot take the release with it.
+    runs-on: tinyland-nix
     needs: plan
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             extra-substituters = https://nix-cache.tinyland.dev/main
             extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
+      # This job is named "Nix Build + Attic Push" and it runs only on a release
+      # tag. Every step below used to degrade to a ::warning:: — a missing
+      # token, a failed `attic use`, a failed push — so a release could go out
+      # green having published NOTHING to the cache that the fleet substitutes
+      # from. The failure that matters is invisible at the moment it happens and
+      # only surfaces later, as a machine compiling from source. Fail loud here.
       - name: Configure Attic
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
+          set -euo pipefail
           nix profile install nixpkgs#attic-client
-          if [ -n "${{ secrets.ATTIC_TOKEN }}" ]; then
-            attic login tinyland https://nix-cache.tinyland.dev ${{ secrets.ATTIC_TOKEN }}
-            attic use main || echo "::warning::Failed to configure Attic substituter"
-            echo "ATTIC_CONFIGURED=true" >> $GITHUB_ENV
-          else
-            echo "::warning::ATTIC_TOKEN not set, skipping Attic push"
-            echo "ATTIC_CONFIGURED=false" >> $GITHUB_ENV
+          if [ -z "${ATTIC_TOKEN}" ]; then
+            echo "::error::ATTIC_TOKEN is not set. This is the release lane; a release that pushes nothing to ${ATTIC_SERVER} leaves the fleet compiling from source. Set the secret or remove this job deliberately."
+            exit 1
           fi
+          # Token passed via env, not argv: an argv secret is readable from
+          # /proc and from any `ps` in a concurrent step.
+          attic login tinyland "${ATTIC_SERVER}" "${ATTIC_TOKEN}"
+          attic use "${ATTIC_CACHE}"
 
       - name: Build all Nix packages
         run: |
+          set -euo pipefail
           for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
             echo "Building ${pkg}..."
-            nix build --accept-flake-config .#${pkg} -o result-${pkg}
+            nix build --accept-flake-config ".#${pkg}" -o "result-${pkg}"
           done
 
       - name: Push to Attic cache
-        if: env.ATTIC_CONFIGURED == 'true'
         run: |
+          set -euo pipefail
           for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
-            attic push main result-${pkg} || echo "::warning::Failed to push ${pkg}"
+            echo "Pushing ${pkg}..."
+            attic push "${ATTIC_CACHE}" "result-${pkg}"
           done
 
   # ── Generate installer scripts ────────────────────────────────────────────
 
   generate-installers:
     name: Generate installer scripts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: plan
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Generate shell installer
         run: |
@@ -652,7 +696,7 @@ jobs:
           sed -i "s|__TAG__|${{ needs.plan.outputs.tag }}|g" install.ps1
 
       - name: Upload installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-installers
           path: |
@@ -664,17 +708,17 @@ jobs:
 
   build-fileprovider:
     name: Build FileProvider (macOS)
-    runs-on: macos-14
+    runs-on: macos-14 # TIN-3914 waiver — no darwin class exists, see header
     needs: plan
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch, 2026-08-05
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-bin: false
 
@@ -801,7 +845,7 @@ jobs:
             "TCFSProvider-${VERSION}-macos-aarch64.zip"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-fileprovider
           path: build/TCFSProvider-*.zip
@@ -818,7 +862,7 @@ jobs:
 
   build-pkg:
     name: Build macOS installer (.pkg)
-    runs-on: macos-14
+    runs-on: macos-14 # TIN-3914 waiver — no darwin class exists, see header
     needs: [plan, build-binaries, build-fileprovider]
     if: |
       success() && (
@@ -826,16 +870,16 @@ jobs:
         (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
       )
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Download macOS CLI binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist-macos-aarch64
           path: cli-dist/
 
       - name: Download FileProvider app
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist-fileprovider
           path: fp-dist/
@@ -930,7 +974,7 @@ jobs:
             --require-stapled-ticket
 
       - name: Upload .pkg artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-pkg
           path: "*.pkg"
@@ -947,7 +991,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: [plan, build-binaries, generate-installers, build-fileprovider, build-pkg]
     if: |
       success() && (
@@ -957,7 +1001,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist/
 
@@ -980,7 +1024,7 @@ jobs:
           sha256sum * > SHA256SUMS.txt
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Sign checksums with Cosign (keyless)
         run: |
@@ -992,7 +1036,7 @@ jobs:
           echo "Cosign signature created for SHA256SUMS.txt"
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           token: ${{ secrets.GH_RELEASE_TOKEN || github.token }}
           tag_name: ${{ needs.plan.outputs.tag }}
@@ -1082,7 +1126,7 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew formula
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # TIN-3914 waiver — deferred, see header
     needs: [plan, create-release]
     if: |
       success() && (
@@ -1091,7 +1135,7 @@ jobs:
       )
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Download release checksums
         run: |
