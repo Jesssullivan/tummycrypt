@@ -12,12 +12,12 @@
 //! | variant family        | representative Python prose                       |
 //! |-----------------------|---------------------------------------------------|
 //! | `SnapshotCustody*`    | "live snapshot custody is unavailable"             |
-//! | `Digest*`             | "AgentCaptureV4 catalog digest mismatch"           |
+//! | `Digest*`             | "`AgentCaptureV4` catalog digest mismatch"           |
 //! | `Git*`                | "Git authority changed during live snapshot"       |
-//! | `Sqlite*`             | "SQLite quick_check failed"                        |
+//! | `Sqlite*`             | "`SQLite` `quick_check` failed"                        |
 //! | `Path*`               | "control and format characters are forbidden ..."  |
 //! | `Rollback*`           | "rollback end-state differs from its exact ..."    |
-//! | `Budget*`             | "SQLite row capture budget exceeded"               |
+//! | `Budget*`             | "`SQLite` row capture budget exceeded"               |
 //!
 //! Every variant is a *refusal*: the operation declined to proceed and made no
 //! partial mutation. Refusals are values, never panics (R33).
@@ -190,7 +190,7 @@ mod tests {
     use super::BulkloadRefusal;
 
     /// Codes are the wire identity of a refusal: they must be unique and
-    /// SCREAMING_SNAKE_CASE.
+    /// `SCREAMING_SNAKE_CASE`.
     #[test]
     fn codes_are_unique_and_well_formed() {
         let all = [

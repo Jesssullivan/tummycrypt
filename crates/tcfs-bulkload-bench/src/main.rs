@@ -127,6 +127,11 @@ fn run(cli: &Cli) -> Result<(), BulkloadRefusal> {
 
 /// The `rclone check`-style arm: a plain recursive stat walk with no cache and
 /// no parallelism. This is the bar the agent has to beat.
+///
+/// The `Result` is not currently reachable in the error direction -- this arm
+/// swallows per-entry I/O errors the way `rclone check` does -- but the
+/// signature has to match [`agent_walk`] so both can be handed to [`measure`].
+#[allow(clippy::unnecessary_wraps)]
 fn baseline_walk(root: &Path) -> Result<Rep, BulkloadRefusal> {
     let started = Instant::now();
     let mut files = 0_u64;

@@ -46,7 +46,7 @@ pub struct WalkOptions {
 impl WalkOptions {
     /// A stat-only walk of `root`, staying on one device.
     #[must_use]
-    pub fn new(root: PathBuf) -> Self {
+    pub const fn new(root: PathBuf) -> Self {
         Self {
             root,
             hash_policy: HashPolicy::Never,
@@ -125,10 +125,7 @@ pub fn walk<C: FreshnessCache>(options: &WalkOptions, cache: &mut C) -> Result<W
         .build();
 
     for entry in walker {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path == options.root {
             continue;

@@ -142,7 +142,7 @@ impl FreshnessCache for MemoryCache {
     }
 }
 
-/// A cache persisted in SQLite.
+/// A cache persisted in `SQLite`.
 ///
 /// M1 ships the schema and the round-trip only; the M3 lane wires this to the
 /// on-disk agent state directory and adds the eviction policy.
@@ -170,7 +170,7 @@ impl SqliteCache {
     ///
     /// # Errors
     ///
-    /// Refuses if SQLite declines to open or to create the schema.
+    /// Refuses if `SQLite` declines to open or to create the schema.
     pub fn open_in_memory() -> Result<Self> {
         let conn =
             rusqlite::Connection::open_in_memory().map_err(|_| BulkloadRefusal::Io(None))?;
@@ -181,7 +181,7 @@ impl SqliteCache {
     ///
     /// # Errors
     ///
-    /// Refuses if SQLite declines to open the file or to create the schema.
+    /// Refuses if `SQLite` declines to open the file or to create the schema.
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn = rusqlite::Connection::open(path).map_err(|_| BulkloadRefusal::Io(None))?;
         Self::from_connection(conn)
@@ -193,7 +193,7 @@ impl SqliteCache {
         Ok(Self { conn })
     }
 
-    /// SQLite stores signed 64-bit integers; nanosecond timestamps wider than
+    /// `SQLite` stores signed 64-bit integers; nanosecond timestamps wider than
     /// that are a value this schema cannot carry, not a rounding opportunity.
     fn narrow(value: i128) -> Result<i64> {
         i64::try_from(value).map_err(|_| BulkloadRefusal::SqliteUnsupportedValue)

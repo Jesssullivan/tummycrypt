@@ -6,7 +6,7 @@
 //! subcommand.
 
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use tcfs_bulkload_agent::freshness::{Freshness, FreshnessCache as _, MemoryCache, StatIdentity};
@@ -30,13 +30,14 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let outcome = match args.next().as_deref() {
         Some("selftest") => selftest(),
-        Some("walk") => match args.next() {
-            Some(path) => walk_command(PathBuf::from(path)),
-            None => {
+        Some("walk") => {
+            if let Some(path) = args.next() {
+                walk_command(Path::new(&path))
+            } else {
                 eprintln!("tcfs-bulkload-agent: walk requires a PATH\n\n{USAGE}");
                 return ExitCode::from(2);
             }
-        },
+        }
         Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -111,8 +112,8 @@ fn selftest() -> Result<()> {
     Ok(())
 }
 
-fn walk_command(root: PathBuf) -> Result<()> {
-    let root = std::fs::canonicalize(&root)?;
+fn walk_command(root: &Path) -> Result<()> {
+    let root = std::fs::canonicalize(root)?;
     let mut cache = MemoryCache::new();
     let options = WalkOptions {
         hash_policy: HashPolicy::Never,
