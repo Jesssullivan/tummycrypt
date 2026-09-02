@@ -1,0 +1,16 @@
+$ tcfs status
+Error: status RPC timed out
+
+Caused by:
+    deadline has elapsed
+
+Stack backtrace:
+   0: __mh_execute_header
+   1: __mh_execute_header
+   2: __mh_execute_header
+   3: __mh_execute_header
+   4: __mh_execute_header
+   5: __mh_execute_header
+   6: __mh_execute_header
+   7: __mh_execute_header
+   8: __mh_execute_header
