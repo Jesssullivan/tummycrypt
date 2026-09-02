@@ -1,0 +1,20 @@
+[package]
+name = "tcfs-bulkload-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs bulkload wire protocol: postcard frame codec, row schema, refusal taxonomy"
+
+[dependencies]
+serde = { workspace = true }
+postcard = { workspace = true }
+
+[lints.clippy]
+# R33 deny-panics wall. Refusals are Results, never panics.
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"

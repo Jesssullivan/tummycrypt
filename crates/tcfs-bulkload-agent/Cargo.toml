@@ -1,0 +1,37 @@
+[package]
+name = "tcfs-bulkload-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs bulkload agent: the thin darwin-side walker/hasher half"
+
+[[bin]]
+name = "tcfs-bulkload-agent"
+path = "src/main.rs"
+
+# R34 dependency wall. This list is closed: the `dep_graph` integration test
+# asserts that tokio, opendal, reqwest, ring and tonic are absent from
+# `cargo tree -p tcfs-bulkload-agent -e normal`. Adding an async runtime, an
+# object-store abstraction, an HTTP client or a TLS stack to the agent half is
+# a design change, not a dependency bump -- take it back to the plan first.
+[dependencies]
+tcfs-bulkload-proto = { path = "../tcfs-bulkload-proto" }
+rayon = { workspace = true }
+blake3 = { workspace = true }
+fastcdc = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+libc = { workspace = true }
+rusqlite = { workspace = true }
+ignore = { workspace = true }
+crc32c = { workspace = true }
+
+[lints.clippy]
+# R33 deny-panics wall. Refusals are Results, never panics.
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
