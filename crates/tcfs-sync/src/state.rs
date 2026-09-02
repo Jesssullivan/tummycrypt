@@ -1945,6 +1945,13 @@ impl StateCacheBackend for StateBackend {
 /// macOS) but preserves the final path component. That keeps first-class
 /// symlinks keyed by the link path instead of the link target, while still
 /// making delete/remove lookups stable after the file itself is gone.
+/// Canonical state-cache key for a local path, exposed so side caches keyed on
+/// the same identity (see [`crate::freshness`]) cannot drift from the state
+/// cache's own notion of "the same file".
+pub fn canonical_path_key(path: &Path) -> String {
+    path_key(path)
+}
+
 fn path_key(path: &Path) -> String {
     path.parent()
         .and_then(|parent| std::fs::canonicalize(parent).ok())

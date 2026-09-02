@@ -330,6 +330,16 @@ enum Commands {
         /// daemon owns — so the CLI and daemon always act on the same cache.
         #[arg(long, env = "TCFS_STATE_PATH", conflicts_with = "root")]
         state: Option<PathBuf>,
+        /// Re-derive every classification from scratch: full-file BLAKE3 plus a
+        /// remote manifest read for every path present on both sides.
+        ///
+        /// Reconcile normally memoizes pairs whose full comparison already
+        /// converged, keyed on `(dev, ino, size, mtime_ns, ctime_ns)` plus the
+        /// content-addressed remote manifest hash, and re-proves each memo at
+        /// least daily. That memo is a performance mechanism, not an integrity
+        /// boundary — use `--paranoid` when you need the difference.
+        #[arg(long)]
+        paranoid: bool,
     },
 
     /// Manage per-folder sync policies
@@ -1062,6 +1072,7 @@ async fn main() -> Result<()> {
             execute,
             expect_plan,
             state,
+            paranoid,
         } => {
             cmd_reconcile(
                 &config,
@@ -1071,6 +1082,7 @@ async fn main() -> Result<()> {
                 execute,
                 expect_plan.as_deref(),
                 state.as_deref(),
+                paranoid,
             )
             .await
         }
@@ -8636,6 +8648,7 @@ async fn cmd_policy(_config: &tcfs_core::config::TcfsConfig, action: PolicyActio
 
 // ── `tcfs reconcile` ─────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_reconcile(
     config: &tcfs_core::config::TcfsConfig,
     root_id: Option<&str>,
@@ -8644,6 +8657,7 @@ async fn cmd_reconcile(
     execute: bool,
     expect_plan: Option<&str>,
     state_override: Option<&Path>,
+    paranoid: bool,
 ) -> Result<()> {
     anyhow::ensure!(
         root_id.is_some() || expect_plan.is_none(),
@@ -8841,11 +8855,24 @@ async fn cmd_reconcile(
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
     let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&route_sync);
+
+    // Freshness memo sidecar, beside the state cache and therefore already
+    // covered by the state-file lock taken above. A one-shot CLI gets nothing
+    // from an in-memory memo, but it gets a great deal from a persisted one:
+    // the `--expect-plan` protocol runs this command twice over the same
+    // corpus, so the dry-run pass warms the execute pass that follows it.
+    let freshness_sidecar =
+        tcfs_sync::freshness::FreshnessCache::sidecar_path_for_state(&state_path);
+
     // Enable `.git`-aware fast-forward conflict resolution for raw git-dir sync.
     let reconcile_config = tcfs_sync::reconcile::ReconcileConfig {
         git_sync_mode: blacklist.git_sync_mode().to_string(),
         git_ff_resolution: blacklist.allows_git_dirs() && blacklist.git_sync_mode() == "raw",
         authoritative_paths,
+        paranoid,
+        freshness: Some(std::sync::Arc::new(
+            tcfs_sync::freshness::FreshnessCache::open(&freshness_sidecar),
+        )),
         ..Default::default()
     };
     let orphan_chunk_cleanup_grace =
@@ -9802,6 +9829,24 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_reconcile_paranoid_and_defaults_it_off() {
+        let default = Cli::try_parse_from(["tcfs", "reconcile", "--root", "egreg"]).unwrap();
+        assert!(matches!(
+            default.command,
+            Commands::Reconcile {
+                paranoid: false,
+                ..
+            }
+        ));
+        let paranoid =
+            Cli::try_parse_from(["tcfs", "reconcile", "--root", "egreg", "--paranoid"]).unwrap();
+        assert!(matches!(
+            paranoid.command,
+            Commands::Reconcile { paranoid: true, .. }
+        ));
+    }
+
+    #[test]
     fn cli_rejects_incomplete_or_mutating_roots_arguments() {
         for args in [
             vec!["tcfs", "roots", "status"],
@@ -9989,6 +10034,7 @@ mod tests {
                 false,
                 None,
                 Some(&state_override),
+                false,
             )
             .await
             .expect_err("explicit-state dry-run must honor the writer sidecar");
@@ -10929,9 +10975,18 @@ nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
 
         let mut config = test_config(&sync_root);
         config.crypto.master_key_file = Some(key_path);
-        let error = cmd_reconcile(&config, None, Some(&sync_root), None, false, None, None)
-            .await
-            .expect_err("reconcile must reject before credential discovery");
+        let error = cmd_reconcile(
+            &config,
+            None,
+            Some(&sync_root),
+            None,
+            false,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect_err("reconcile must reject before credential discovery");
 
         assert!(
             error.to_string().contains("crypto.master_key_file"),
