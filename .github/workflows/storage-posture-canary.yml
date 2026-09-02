@@ -13,10 +13,16 @@ on:
   workflow_dispatch:
     inputs:
       runner_label:
+        # Closed enum (was free text). Only runners this repo can actually
+        # acquire are listed; `tinyland-nix` joins this list when the
+        # repo-scoped Flywheel enrollment lands (TIN-4050, PR-d).
         description: "Runner label. Hosted runners require public HTTPS storage."
         required: false
         default: "ubuntu-24.04"
-        type: string
+        type: choice
+        options:
+          - "ubuntu-24.04"
+          - "ubuntu-22.04"
       smoke_environment:
         description: "GitHub environment containing TCFS_SMOKE_* storage secrets"
         required: false

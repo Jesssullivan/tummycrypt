@@ -83,10 +83,19 @@ on:
         default: "dist-testing-mode-pkg"
         type: string
       runner_label:
+        # Closed enum (was free text). NOTE: `petting-zoo-mini` currently has
+        # ZERO runners registered for this repo
+        # (GET /repos/Jesssullivan/tummycrypt/actions/runners -> total_count 0),
+        # so selecting it queues rather than runs. Kept because a workflow here
+        # still defaults to it; see TIN-4050.
         description: "Runner label. Use petting-zoo-mini for FileProvider testing-mode."
         required: false
         default: "macos-15"
-        type: string
+        type: choice
+        options:
+          - "macos-15"
+          - "macos-14"
+          - "petting-zoo-mini"
       smoke_environment:
         description: "GitHub environment containing TCFS_SMOKE_* secrets"
         required: false

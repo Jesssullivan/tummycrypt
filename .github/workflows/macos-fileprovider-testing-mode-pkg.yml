@@ -9,10 +9,19 @@ on:
         default: "v0.12.12"
         type: string
       runner_label:
+        # Closed enum (was free text). NOTE: `petting-zoo-mini` currently has
+        # ZERO runners registered for this repo
+        # (GET /repos/Jesssullivan/tummycrypt/actions/runners -> total_count 0),
+        # so selecting it queues rather than runs. Kept because a workflow here
+        # still defaults to it; see TIN-4050.
         description: "Registered self-hosted Mac runner label"
         required: true
         default: "petting-zoo-mini"
-        type: string
+        type: choice
+        options:
+          - "macos-15"
+          - "macos-14"
+          - "petting-zoo-mini"
       signing_identity:
         description: "Apple/Mac development codesigning identity, or auto-development"
         required: false
