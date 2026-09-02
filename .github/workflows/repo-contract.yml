@@ -1,0 +1,72 @@
+# Repo-contract gate: validate tinyland.repo.json against the org repo-manifest
+# schema published by tinyland-inc/ci-templates.
+#
+# Contract satisfied: "tinyland.repo.json declaring
+# cache_rbe_authority=tinyland-inc/GloriousFlywheel" + repo-manifest-validate
+# wiring, pinned to ci-templates v3.1.0
+# (d8d178c022a0f84853d53a2c8fe0fc90115f0949).
+#
+# TIN-3914 DEFERRAL (runs-on): the estate rule is "GF cache-fronted self-hosted
+# runners only". A compliant label DOES exist for this repo — `tinyland-nix`,
+# served by the live `tummycrypt-nix` ARC scale set in the jesssullivan-infra
+# owner overlay (TIN-2538) — so this is a deferral with a named next step, not
+# a dead end. What is not established is whether the nix runner image
+# (ghcr.io/tinyland-inc/actions-runner-nix) carries `jq`, which the authority
+# assertion below needs. Move this job in the same pass that moves release.yml
+# `plan` and `generate-installers`, behind a `command -v` preflight, and lower
+# .github/runs-on-baseline in that commit.
+# Evidence and sequencing: docs/ops/ci-runner-enrollment-2026-08-28.md
+name: Repo Contract
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifest:
+    name: tinyland.repo.json schema + authorities
+    runs-on: ubuntu-24.04 # TIN-3914 waiver — see header
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Validate repo manifest
+        uses: tinyland-inc/ci-templates/.github/actions/repo-manifest-validate@d8d178c022a0f84853d53a2c8fe0fc90115f0949 # v3.1.0
+        with:
+          path: tinyland.repo.json
+          required_roles: package-producer
+
+      # The schema makes `authorities` optional and every key inside it
+      # optional, so a manifest that silently DROPPED cache_rbe_authority would
+      # still validate. The contract line is specifically that this repo
+      # declares GloriousFlywheel as its cache/RBE authority, so assert the
+      # value here rather than trusting schema validity to carry it.
+      - name: Assert declared authorities
+        run: |
+          set -euo pipefail
+          fail=0
+          assert() {
+            local path="$1" want="$2" got
+            got="$(jq -r "$path // \"\"" tinyland.repo.json)"
+            if [[ "$got" != "$want" ]]; then
+              echo "::error file=tinyland.repo.json::$path must be '$want', got '${got:-<absent>}'"
+              fail=1
+            else
+              echo "ok: $path = $got"
+            fi
+          }
+          assert '.authorities.cache_rbe_authority' 'tinyland-inc/GloriousFlywheel'
+          assert '.authorities.ci_templates'        'tinyland-inc/ci-templates'
+          assert '.authorities.tofu_module_authority' 'tinyland-inc/GloriousFlywheel'
+          assert '.repo.github'                     'Jesssullivan/tummycrypt'
+          exit "$fail"

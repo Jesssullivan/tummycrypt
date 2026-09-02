@@ -1,0 +1,54 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tinyland-inc/ci-templates/v3.1.0/schemas/tinyland-repo-manifest.schema.json",
+  "schema_version": 1,
+  "repo": {
+    "name": "tummycrypt",
+    "github": "Jesssullivan/tummycrypt",
+    "description": "TCFS — FOSS self-hosted encrypted filesystem and sync fabric (tcfsd daemon, tcfs CLI/TUI/MCP, macOS FileProvider, FUSE)."
+  },
+  "taxonomy": {
+    "primary_role": "package-producer",
+    "layers": [
+      "org-wide-repo-contract",
+      "infra-substrate"
+    ]
+  },
+  "contracts": {
+    "agent_contract": "AGENTS.md",
+    "just": "Justfile",
+    "nix": "flake.nix",
+    "github_actions": ".github/workflows",
+    "secrets_scan": "gitleaks",
+    "conformance": "just lint && just test"
+  },
+  "boundaries": {
+    "owns_runtime_backend": true,
+    "owns_auth": true,
+    "owns_payments": false,
+    "owns_activitypub_delivery": false,
+    "owns_live_broker_fetch": false,
+    "owns_static_projection_ingest": false,
+    "owns_gitops_apply": false,
+    "owns_cloudflare_mutation": false,
+    "owns_bazel_module_authority": false
+  },
+  "authorities": {
+    "ci_templates": "tinyland-inc/ci-templates",
+    "cache_rbe_authority": "tinyland-inc/GloriousFlywheel",
+    "tofu_module_authority": "tinyland-inc/GloriousFlywheel",
+    "package_registry": "tinyland-inc/bazel-registry"
+  },
+  "enrollment": {
+    "forgeScope": "Jesssullivan",
+    "operatorOverlay": "jesssullivan-infra",
+    "executionPool": "tinyland-nix",
+    "substrateMode": "compatibility-local-only"
+  },
+  "supply_chain": {
+    "sbom": {
+      "status": "planned",
+      "formats": [],
+      "notes": "Release artifacts (deb/rpm/tarball/container/pkg) are built and cosign-signed by .github/workflows/release.yml; no SBOM is emitted yet. Flip to recipe-available with the format list in the same PR that adds the generator."
+    }
+  }
+}
