@@ -57,7 +57,7 @@ capability labels."*
 `runs-on: tinyland-nix`.
 
 **Liveness, not just declaration.** `jesssullivan-infra` run
-[33140300433](https://github.com/Jesssullivan/jesssullivan-infra/actions/runs/33140300433)
+`33140300433` (private repo — link elided for link-check)
 ("Deploy ARC Runners v2", success, 2026-08-28T03:55Z) logs at 04:00:11Z and
 04:00:29Z:
 
