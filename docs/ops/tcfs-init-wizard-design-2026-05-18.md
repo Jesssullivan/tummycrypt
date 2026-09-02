@@ -1,6 +1,10 @@
 # `tcfs init` First-Run Wizard — Design Recon (TIN-1425)
 
-**Status:** design recon for M11 sprint planning. Not an implementation plan.
+**Status:** design recon for M11 sprint planning, plus a first CLI-only
+implementation slice landed 2026-08-28 (see "Implementation status
+(2026-08-28)" at the end of this document). Still not the full plan this
+document originally scoped -- the macOS host-app, Linux systemd, and TUI
+surfaces below remain open.
 **Date:** 2026-05-18.
 **Scope:** propose the UX shape, surfaces, and integration points for a first-run
 wizard that takes a freshly-installed tcfs binary to a green `tcfs status` with
@@ -221,3 +225,43 @@ own its own copy of the prompt sequence.
 6. **"Skip storage for now."** Is the disabled-domain escape hatch (step 3,
    option c) worth shipping, or does it just create a population of installs
    stuck in a half-configured state we cannot debug remotely?
+
+## Implementation status (2026-08-28)
+
+A first slice of section 7's `crates/tcfs-cli/src/main.rs::cmd_init` touch
+point landed: when `tcfs init` runs interactively (not `--non-interactive`,
+not `--skip-config`) it now prompts for the storage backend (SeaweedFS /
+S3-compatible / use-existing), endpoint, bucket, region, and TLS
+requirement, optionally writes S3 credentials to the standard
+`~/.aws/credentials` `[default]` profile (reusing the existing
+`tcfs_secrets::parse_aws_credentials_file` fallback instead of inventing a
+new credential format), and does a best-effort `tcfs status`-equivalent
+check at the end (advisory only -- tcfsd is almost never already running
+right after `init`, so this never blocks the wizard from completing).
+
+What this slice does **not** cover, still per the open items above:
+
+- the macOS host-app menu-bar/modal trigger (`HostApp.swift`) -- open
+  question 3 (inline vs. terminal hand-off) is unresolved, so nothing
+  wires into it yet.
+- the Linux systemd journal-hint on missing config (`tcfsd.service`).
+- the `tcfs-tui init` TUI variant (`crates/tcfs-tui`) -- no `Init` tab
+  exists yet.
+- `scripts/macos-postinstall-smoke.sh` adoption as the first-use proof.
+- open questions 1, 2, 4, 5, and 6 above remain genuinely open; this slice
+  did not make any of those calls. It kept the existing mnemonic-display
+  behavior (plain render + typed "yes" confirmation) unchanged and did not
+  touch the `--password` Argon2id path's visibility.
+
+Boundary: authored without a local toolchain, so CI was the first place
+`cargo fmt` / `clippy` / `cargo test` ever ran against it. The branch's
+`Build + Lint + Test` job is green, so it compiles, lints, and passes the
+suite -- including the two pure-logic unit tests added here
+(`parse_yes_no_accepts_common_answers`,
+`parse_yes_no_empty_or_unrecognized_keeps_default`).
+
+What green does **not** cover: the interactive prompt/wizard flow itself has
+no automated coverage. Nothing exercises the actual prompt sequence, the
+`~/.aws/credentials` write (or its pre-write backup), or the post-init
+status check. Those need a manual or scripted (e.g. `expect`-driven)
+fresh-install smoke before the wizard is trusted on a real first run.
