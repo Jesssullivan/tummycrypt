@@ -154,6 +154,10 @@ linux-package-container-workflow-test:
 storage-large-restore-workflow-test:
     @bash scripts/test-storage-large-restore-canary-workflow.sh
 
+# Fail-closed first-party CI runner/cache/action/image authority contract
+ci-authority-contract-test:
+    @python3 scripts/test-ci-authority-contract.py
+
 # Regression test the storage large restore SLO evaluator
 storage-large-restore-slo-test:
     @bash scripts/test-evaluate-storage-large-restore-slo.sh
