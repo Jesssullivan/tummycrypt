@@ -5,6 +5,10 @@ Source boundary last verified: **2026-08-22** against tummycrypt `origin/main`
 older evidence boundaries; this source refresh claims no deployment or
 ceremony.
 
+Live `neo`/`honey` rows were re-measured **2026-07-29** via a read-only
+bilateral probe (see the Fleet row and Live defect findings below); the
+source boundary above is unchanged.
+
 This is the living blocker list. Dated plans and evidence packets remain useful
 history, but they do not override this page.
 
@@ -16,10 +20,10 @@ product threshold.
 | Surface | Proven now | Still open |
 | --- | --- | --- |
 | Git roam | One complete forward repo roam; automatic divergent keep-both without committed-work loss; PR #551 daemon-trusted conflict routing landed after the pre-freeze root-targeted run cleared the production `.git` loop | Residual production-root closure and the two-repo stop rule |
-| Agent state | One bounded Claude project subtree on neo/honey | Arbitrary sessions, Codex state, prompts, and cross-OS cwd mapping |
+| Agent state | One bounded Claude project subtree on neo/honey; the reconcile units were live-verified on both hosts on 2026-07-29 (kickstarted, one clean cycle each: 11 entries synced, 0 conflicts) | Arbitrary sessions, Codex state, prompts, and cross-OS cwd mapping; the canary target itself has been dormant since 2026-04-25, so cache mtime cannot serve as a liveness signal — [TIN-3300](https://linear.app/tinyland/issue/TIN-3300) tracks retargeting and last-reconcile-age surfacing |
 | Hydration | Linux FUSE lifecycle; bounded signed macOS FileProvider lifecycle | Plain-root parity, polished Finder first run, NFS/Windows/iOS parity |
 | Home state | A few explicitly managed paths | Selective product enrollment for home/dotdir classes |
-| Fleet | Honey runs `v0.12.17`; neo has a managed `v0.12.17` build | Neo's effective interactive PATH still selects `v0.12.12`; sting remains `v0.12.16`; Bumble is the formal R6 host |
+| Fleet | Honey runs `v0.12.17`; neo version coherence is now measured closed — `which -a tcfs` returns `/Users/jess/.local/bin/tcfs` then `~/.nix-profile/bin/tcfs`, both `v0.12.17`, and the daemon's gRPC status also reports `v0.12.17` (measured 2026-07-29) | The residual defect is provenance, not version skew: `/Users/jess/.local/bin/tcfs` is an unmanaged, hand-placed binary (dated Jul 26) shadowing the home-manager symlink, with nothing keeping it converged; sting remains `v0.12.16`; Bumble is the formal R6 host |
 | Security | Stored content is encrypted; TOTP is enrolled on honey | Production S3 uses plaintext HTTP; headless sessions and invitation persistence are incomplete |
 | Packaging | Tagged Nix release and several artifact lanes exist | Homebrew stale; Rocky RPM/FUSE and vendor acceptance unproven |
 | Registered roots | Source supports deterministic `reconcile --root <id>` and exact-plan execution for explicitly reconcile-enabled bindings; TIN-3277/3278 regressions and Bulkload GitWorkspaceV2 decoding are covered in Rust | Installed eGreg pilot, host activation, and live convergence evidence |
@@ -37,9 +41,13 @@ product threshold.
   [PR #551](https://github.com/Jesssullivan/tummycrypt/pull/551) on 2026-07-18
   (merge commit `929bbf1`). This accepts the daemon-trusted conflict-only
   route; it is not evidence of a post-freeze live resolver or deployment.
-- Honey currently runs `v0.12.17`. Neo has the managed `v0.12.17` build,
-  but its effective interactive PATH still selects `v0.12.12`; version
-  coherence is therefore not closed.
+- Neo version coherence is now **measured closed**: `which -a tcfs` returns
+  `/Users/jess/.local/bin/tcfs` then `~/.nix-profile/bin/tcfs`, and both
+  report `v0.12.17`; the daemon's gRPC status also reports `v0.12.17`
+  (measured 2026-07-29). The residual defect is provenance, not version
+  skew — `/Users/jess/.local/bin/tcfs` is an unmanaged, hand-placed binary
+  (dated Jul 26) shadowing the home-manager symlink, and nothing keeps it
+  converged with the managed build going forward.
 
 Any document that still calls TIN-2657 open or describes G5-git-5 as awaiting
 the divergent canary is historical.
@@ -78,6 +86,24 @@ wait for TIN-2856 live-work clearance
 The full evidence boundary and root invariants are in
 [`../PRODUCT.md`](../PRODUCT.md).
 
+### Live defect findings (2026-07-29)
+
+- [TIN-3277](https://linear.app/tinyland/issue/TIN-3277) — Home-manager
+  writes to `secrets/*` and `devices.json` on neo bypass the vclock tick,
+  producing permanent self-conflicts on those paths that the reconciler
+  cannot push.
+- [TIN-3299](https://linear.app/tinyland/issue/TIN-3299) — Honey shows a
+  live hydration failure on `fp-proof-hMn6.txt`, 4,130 orphaned chunks, and
+  stale `data`/`index` entries; a second, unaccounted worker daemon runs
+  from `/etc/tcfsd/config.toml`, and plaintext HTTP was observed live.
+- [TIN-3300](https://linear.app/tinyland/issue/TIN-3300) — The
+  claude-projects reconcile units are healthy (live-verified on both hosts
+  2026-07-29 after a false-positive "dead canary" reading), but the canary's
+  sole target directory has been dormant since 2026-04-25, so the state
+  cache cannot distinguish "nothing to sync" from "reconciler hung." Open
+  work: retarget the canary to an actively-changing directory and surface
+  last-reconcile age in status output.
+
 ## Strategy A queue
 
 1. **Delivery guardrails.** Remove TCFS from every moving lab flake-update
@@ -85,9 +111,11 @@ The full evidence boundary and root invariants are in
    activation while the transitional downstream pin remains. This is a
    source-only safety change, not version convergence.
 2. **Attended neo cleanup.** Capture paths and hashes for every effective TCFS
-   candidate, quarantine the unmanaged `v0.12.12` PATH shadow with an explicit
-   restoration path, and prove interactive and agent shells select the managed
-   binary.
+   candidate, quarantine the unmanaged `/Users/jess/.local/bin/tcfs` PATH
+   shadow with an explicit restoration path, and prove interactive and agent
+   shells select the managed binary. This is now a provenance hazard, not a
+   version-skew hazard: the shadow binary matches the managed `v0.12.17`
+   build today, but nothing enforces that convergence going forward.
 3. **Canonical pin and delivery.** Pin lab to the signed canonical `v0.12.17`
    tag and peeled commit, then prove candidate, pre-activation, and
    post-activation invariants on honey, neo, and sting.
