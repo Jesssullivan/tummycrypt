@@ -1,0 +1,33 @@
+# lint-runs-on ratchet baseline for .github/workflows/runs-on-contract.yml.
+#
+# Number of FAIL findings ci-templates lint-runs-on reports across this repo's
+# workflows. The gate FAILS if the count goes UP; a DROP is only a warning
+# asking you to lower this number (good news should not turn CI red).
+#
+# Measured on neo 2026-08-28 against ci-templates v3.1.0
+# (d8d178c022a0f84853d53a2c8fe0fc90115f0949):
+#
+#   origin/main c782bb9 as-is ...................... 25 FAIL / 8 WARN / 15 files
+#   + this PR's runs-on-contract.yml ............... 26 FAIL / 8 WARN / 16 files
+#   + series PR-a's repo-contract.yml .............. 27 FAIL / 8 WARN / 17 files
+#
+# The declared baseline is 27: the count once the a -> b review order has
+# landed both new gate workflows. Until PR-a merges this reads 26 and the gate
+# emits the "lower the baseline" warning, which is correct and not a failure.
+#
+# All FAILs are TIN-3914: GitHub-hosted labels, which the estate forbids.
+#
+# A compliant label DOES exist for this repo — `tinyland-nix`, served by the
+# live `tummycrypt-nix` ARC scale set in the jesssullivan-infra owner overlay
+# (TIN-2538) — so this number is reducible, not stuck. Series PR-c moves the
+# three pure-nix jobs and takes it to 22 (24 with both gate workflows present).
+#
+# It does not reach 0 soon, and not from inside a single PR:
+#   - release.yml build-binaries and create-release shell out to
+#     apt-get / dpkg / rpm / brew. Those are ports, not label swaps.
+#   - The four macOS jobs have NO destination. ARC is Linux-on-Kubernetes, no
+#     darwin capability class exists, and notarization needs real macOS.
+#
+# Whichever of series PR-b / PR-c lands second should lower this number.
+# Evidence and sequencing: docs/ops/ci-runner-enrollment-2026-08-28.md
+27

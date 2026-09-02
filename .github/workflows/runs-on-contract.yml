@@ -1,0 +1,98 @@
+# runs-on contract gate: adopt ci-templates `lint-runs-on` as a RATCHET.
+#
+# Contract satisfied: "lint-runs-on adoption", pinned to ci-templates v3.1.0
+# (d8d178c022a0f84853d53a2c8fe0fc90115f0949).
+#
+# Why a ratchet and not a hard gate. A hard gate is red on day one: this repo
+# has 26 FAIL findings once this file is added. Some are fixable — the pure-nix
+# jobs move to tinyland-nix in series PR-c — but the rest are not, in this PR
+# or any near one: release.yml build-binaries and create-release shell out to
+# apt-get/dpkg/rpm/brew, and the four macOS jobs have no self-hosted
+# destination at all (see .github/runs-on-baseline). A gate that is permanently
+# red teaches reviewers to ignore it. A ratchet is enforceable today: existing
+# debt is declared in one reviewable number, and any NEW hosted `runs-on` — the
+# drift this lint exists to stop — fails the PR.
+#
+# Flip to a hard gate (drop the ratchet, drop `continue-on-error`) if and when
+# the baseline reaches 0.
+name: runs-on Contract
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runs-on-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint-runs-on ratchet
+    runs-on: ubuntu-24.04 # TIN-3914 waiver — counted in .github/runs-on-baseline
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # The action exits non-zero whenever any FAIL exists, which is always
+      # true here. It writes violations_count to GITHUB_OUTPUT BEFORE exiting
+      # (ci-templates scripts/lint-runs-on.rb:700-701), so the count survives
+      # continue-on-error and the ratchet below is the real verdict.
+      - name: lint-runs-on
+        id: lint
+        continue-on-error: true
+        uses: tinyland-inc/ci-templates/.github/actions/lint-runs-on@d8d178c022a0f84853d53a2c8fe0fc90115f0949 # v3.1.0
+        with:
+          root: "."
+          workflows_glob: ".github/workflows/*.yml"
+
+      - name: Ratchet against committed baseline
+        env:
+          COUNT: ${{ steps.lint.outputs.violations_count }}
+        run: |
+          set -euo pipefail
+          baseline="$(grep -vE '^\s*(#|$)' .github/runs-on-baseline | head -1 | tr -d '[:space:]')"
+          count="${COUNT:-}"
+
+          # An empty count means the action never produced an output — a broken
+          # pin or a crashed linter, not a clean repo. Fail loud; do not read
+          # silence as zero violations.
+          if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+            echo "::error::lint-runs-on produced no violations_count (got '${count}'). The lint did not run; this is a gate failure, not a pass."
+            exit 1
+          fi
+          if ! [[ "$baseline" =~ ^[0-9]+$ ]]; then
+            echo "::error file=.github/runs-on-baseline::baseline is not an integer (got '${baseline}')"
+            exit 1
+          fi
+
+          {
+            echo "### lint-runs-on ratchet"
+            echo
+            echo "| | count |"
+            echo "|---|---|"
+            echo "| FAIL findings now | \`${count}\` |"
+            echo "| committed baseline | \`${baseline}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if (( count > baseline )); then
+            echo "::error::runs-on FAIL count rose ${baseline} -> ${count}. A new GitHub-hosted or repo-shaped runs-on was introduced (TIN-3914). Fix the label, or — if this is deliberate and operator-approved — raise .github/runs-on-baseline in the same commit and say why."
+            exit 1
+          fi
+
+          # A DROP is the outcome this gate exists to encourage. Warn so the
+          # baseline gets tightened, but do not turn a green PR red for it —
+          # that is how ratchets get deleted.
+          if (( count < baseline )); then
+            echo "::warning file=.github/runs-on-baseline::runs-on FAIL count DROPPED ${baseline} -> ${count}. Lower .github/runs-on-baseline to ${count} so the ratchet keeps its grip."
+            echo "_Dropped to \`${count}\` — lower the baseline._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "runs-on FAIL count holds at ${count} (baseline ${baseline})."
+          echo "_Holding at \`${count}\`._" >> "$GITHUB_STEP_SUMMARY"
