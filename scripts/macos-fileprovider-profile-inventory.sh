@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# Non-mutating inventory for TCFS macOS FileProvider provisioning profiles.
+# Field-compatibility inventory for TCFS macOS FileProvider profiles.
+# Decoding is not Apple authorization proof; security cms can import certificates
+# into its command keychain context. This tool performs no signing or installation.
 #
 set -euo pipefail
 
@@ -8,10 +10,14 @@ usage() {
   cat <<'EOF'
 Usage: scripts/macos-fileprovider-profile-inventory.sh [options]
 
-Decode installed macOS provisioning profiles and identify a host-app /
-FileProvider-extension pair that can satisfy the TCFS production signing gate.
+Inspect decoded profile fields for host-app / FileProvider-extension
+compatibility. This is not independent Apple profile authentication.
 
 Options:
+  --host-profile <path>       Check exactly this host profile and the declared
+  --extension-profile <path>  extension profile; both absolute regular paths are
+                              required. Exact-pair mode is always strict and
+                              cannot be combined with --profiles-dir.
   --profiles-dir <path>       Provisioning profile directory
                               (default: ~/Library/MobileDevice/Provisioning Profiles)
   --host-bundle-id <id>       Host app bundle id
@@ -47,12 +53,27 @@ REQUIRED_HOST_ENTITLEMENT="${TCFS_REQUIRED_HOST_ENTITLEMENT:-}"
 PLISTBUDDY_BIN="${TCFS_PLISTBUDDY:-/usr/libexec/PlistBuddy}"
 ENV_ONLY=0
 STRICT=0
+PROFILES_DIR_EXPLICIT=0
+EXACT_HOST_PROFILE=""
+EXACT_EXTENSION_PROFILE=""
+EXACT_PAIR=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profiles-dir)
       [[ $# -ge 2 ]] || fail "--profiles-dir requires a value"
       PROFILES_DIR="$2"
+      PROFILES_DIR_EXPLICIT=1
+      shift 2
+      ;;
+    --host-profile)
+      [[ $# -ge 2 && -n "$2" && -z "$EXACT_HOST_PROFILE" ]] || fail "--host-profile requires one nonempty value"
+      EXACT_HOST_PROFILE="$2"
+      shift 2
+      ;;
+    --extension-profile)
+      [[ $# -ge 2 && -n "$2" && -z "$EXACT_EXTENSION_PROFILE" ]] || fail "--extension-profile requires one nonempty value"
+      EXACT_EXTENSION_PROFILE="$2"
       shift 2
       ;;
     --host-bundle-id)
@@ -99,6 +120,17 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$EXACT_HOST_PROFILE" || -n "$EXACT_EXTENSION_PROFILE" ]]; then
+  [[ -n "$EXACT_HOST_PROFILE" && -n "$EXACT_EXTENSION_PROFILE" ]] || fail "exact-pair mode requires both profile paths"
+  [[ "$PROFILES_DIR_EXPLICIT" == 0 ]] || fail "exact-pair mode cannot scan --profiles-dir"
+  for profile in "$EXACT_HOST_PROFILE" "$EXACT_EXTENSION_PROFILE"; do
+    [[ "$profile" == /* && -f "$profile" && ! -L "$profile" && -r "$profile" ]] || fail "exact profile must be an absolute readable regular file, not a symlink"
+  done
+  [[ ! "$EXACT_HOST_PROFILE" -ef "$EXACT_EXTENSION_PROFILE" ]] || fail "exact profiles must be distinct files"
+  EXACT_PAIR=1
+  STRICT=1
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   fail "scripts/macos-fileprovider-profile-inventory.sh only runs on macOS"
@@ -255,7 +287,11 @@ print_profile_summary() {
 }
 
 profile_files=()
-if [[ -d "$PROFILES_DIR" ]]; then
+if [[ "$EXACT_PAIR" == 1 ]]; then
+  # Preserve each declared role. Never substitute a profile from the directory,
+  # even when an unrelated compatible pair exists beside these inputs.
+  profile_files=("$EXACT_HOST_PROFILE" "$EXACT_EXTENSION_PROFILE")
+elif [[ -d "$PROFILES_DIR" ]]; then
   while IFS= read -r profile; do
     profile_files+=("$profile")
   done < <(find "$PROFILES_DIR" -maxdepth 1 -type f \( -name '*.provisionprofile' -o -name '*.mobileprovision' \) | sort)
@@ -277,12 +313,14 @@ if ((${#profile_files[@]} > 0)); then
       continue
     fi
 
-    if profile_matches_bundle "$plist" "$HOST_BUNDLE_ID" \
+    if [[ "$EXACT_PAIR" == 0 || "$profile" == "$EXACT_HOST_PROFILE" ]] \
+      && profile_matches_bundle "$plist" "$HOST_BUNDLE_ID" \
       && profile_entitlement_true "$plist" "$REQUIRED_HOST_ENTITLEMENT"; then
       host_profiles+=("$profile")
       host_plists+=("$plist")
     fi
-    if profile_matches_bundle "$plist" "$EXTENSION_BUNDLE_ID"; then
+    if [[ "$EXACT_PAIR" == 0 || "$profile" == "$EXACT_EXTENSION_PROFILE" ]] \
+      && profile_matches_bundle "$plist" "$EXTENSION_BUNDLE_ID"; then
       extension_profiles+=("$profile")
       extension_plists+=("$plist")
     fi
@@ -290,7 +328,11 @@ if ((${#profile_files[@]} > 0)); then
 fi
 
 if [[ "$ENV_ONLY" != "1" ]]; then
-  printf 'profiles dir: %s\n' "$PROFILES_DIR"
+  if [[ "$EXACT_PAIR" == 1 ]]; then
+    printf 'profile selection: exact declared pair\n'
+  else
+    printf 'profiles dir: %s\n' "$PROFILES_DIR"
+  fi
   printf 'profiles scanned: %s\n' "${#profile_files[@]}"
   printf 'required app group: %s\n' "$APP_GROUP_ID"
   printf 'required keychain suffix: %s\n' "$KEYCHAIN_GROUP_SUFFIX"

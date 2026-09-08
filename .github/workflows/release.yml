@@ -890,8 +890,12 @@ jobs:
 
           security cms -D -i "$HOST_PROFILE" >/dev/null
           security cms -D -i "$EXTENSION_PROFILE" >/dev/null
+          # Check the exact files passed to the build; unrelated profiles in
+          # RUNNER_TEMP cannot supply a different compatible pair. Field checks
+          # remain compatibility evidence, not independent Apple authorization.
           scripts/macos-fileprovider-profile-inventory.sh \
-            --profiles-dir "$RUNNER_TEMP" \
+            --host-profile "$HOST_PROFILE" \
+            --extension-profile "$EXTENSION_PROFILE" \
             --strict
 
           {

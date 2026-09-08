@@ -987,6 +987,9 @@ if [[ "${1:-}" == "cms" && "${2:-}" == "-D" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -i)
+        if [[ -n "${TCFS_PROFILE_DECODE_LOG:-}" ]]; then
+          printf '%s\n' "$2" >>"$TCFS_PROFILE_DECODE_LOG"
+        fi
         cat "$2"
         exit 0
         ;;
@@ -1128,6 +1131,99 @@ assert_contains "$IMPORT_OUT" "extension candidates: 1"
 assert_contains "$IMPORT_ENV" "TCFS_HOST_PROVISIONING_PROFILE=${IMPORT_RUNNER_TEMP}/tcfs-host-developer-id.provisionprofile"
 assert_contains "$IMPORT_ENV" "TCFS_EXTENSION_PROVISIONING_PROFILE=${IMPORT_RUNNER_TEMP}/tcfs-fileprovider-developer-id.provisionprofile"
 assert_contains "$IMPORT_ENV" "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
+
+# Execute the extracted production caller against its actual inventory helper.
+# A valid unrelated pair sits in every runner directory: it must never rescue
+# incompatible declared inputs, nor replace the exact returned build paths.
+EXACT_PAIR_CASES=0
+for fault in valid bad-host-group bad-extension-group mismatched-prefix swapped-roles; do
+  case_dir="$TMPDIR/exact pair $fault"
+  runner="$case_dir/runner with spaces"
+  mkdir -p "$runner"
+  cp "$RAW_HOST_PROFILE" "$case_dir/input-host"
+  cp "$RAW_EXTENSION_PROFILE" "$case_dir/input-extension"
+  cp "$RAW_HOST_PROFILE" "$runner/000-decoy-host.provisionprofile"
+  cp "$RAW_EXTENSION_PROFILE" "$runner/000-decoy-extension.provisionprofile"
+  python3 - "$case_dir" "$fault" <<'PYPAIR'
+from pathlib import Path
+import plistlib
+import sys
+root, fault = Path(sys.argv[1]), sys.argv[2]
+paths = [root / "input-host", root / "input-extension"]
+profiles = [plistlib.loads(path.read_bytes()) for path in paths]
+if fault in ("bad-host-group", "bad-extension-group"):
+    index = 0 if fault == "bad-host-group" else 1
+    profiles[index]["Entitlements"]["com.apple.security.application-groups"] = ["group.fixture.unrelated"]
+elif fault == "mismatched-prefix":
+    entitlements = profiles[1]["Entitlements"]
+    entitlements["application-identifier"] = "OTHERTEAM1.io.tinyland.tcfs.fileprovider"
+    entitlements["keychain-access-groups"] = ["OTHERTEAM1.*"]
+elif fault == "swapped-roles":
+    profiles.reverse()
+for path, value in zip(paths, profiles):
+    path.write_bytes(plistlib.dumps(value))
+PYPAIR
+  # Establish that the decoys are compatible in the existing inventory mode.
+  env PATH="$FAKE_BIN:$PATH" TCFS_PLISTBUDDY="$FAKE_BIN/PlistBuddy" \
+    TCFS_PROFILE_FIXTURE_ROOT="$TMPDIR" \
+    bash "$REPO_ROOT/scripts/macos-fileprovider-profile-inventory.sh" \
+      --profiles-dir "$runner" --strict >"$case_dir/decoy-proof"
+  assert_contains "$case_dir/decoy-proof" "compatible pair: found"
+
+  command=(env PATH="$FAKE_BIN:$PATH" RUNNER_TEMP="$runner"
+    GITHUB_ENV="$case_dir/github-env" TCFS_PLISTBUDDY="$FAKE_BIN/PlistBuddy"
+    TCFS_PROFILE_FIXTURE_ROOT="$TMPDIR" TCFS_PROFILE_DECODE_LOG="$case_dir/decoded-paths"
+    TCFS_HOST_PROVISIONING_PROFILE_BASE64="$(base64_file "$case_dir/input-host")"
+    TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64="$(base64_file "$case_dir/input-extension")"
+    bash -e "$IMPORT_STEP")
+  if [[ "$fault" == valid ]]; then
+    "${command[@]}" >"$case_dir/result" 2>"$case_dir/error"
+    assert_contains "$case_dir/result" "profile selection: exact declared pair"
+    assert_contains "$case_dir/result" "profiles scanned: 2"
+    assert_contains "$case_dir/github-env" "TCFS_HOST_PROVISIONING_PROFILE=$runner/tcfs-host-developer-id.provisionprofile"
+    assert_contains "$case_dir/github-env" "TCFS_EXTENSION_PROVISIONING_PROFILE=$runner/tcfs-fileprovider-developer-id.provisionprofile"
+  else
+    if "${command[@]}" >"$case_dir/result" 2>"$case_dir/error"; then
+      printf 'incompatible declared pair was rescued: %s\n' "$fault" >&2
+      exit 1
+    fi
+    assert_contains "$case_dir/result" "compatible pair: not found"
+    [[ ! -e "$case_dir/github-env" ]] || { printf 'failed pair exported build inputs\n' >&2; exit 1; }
+  fi
+  python3 - "$case_dir" "$runner" <<'PYPAIR'
+from pathlib import Path
+import sys
+root, runner = map(Path, sys.argv[1:])
+host = str(runner / "tcfs-host-developer-id.provisionprofile")
+extension = str(runner / "tcfs-fileprovider-developer-id.provisionprofile")
+# The caller decodes the two inputs, then the real inventory checks those same
+# two. Neither stage may consult either compatible decoy.
+assert (root / "decoded-paths").read_text().splitlines() == [host, extension, host, extension]
+PYPAIR
+  EXACT_PAIR_CASES=$((EXACT_PAIR_CASES + 1))
+done
+
+pair_command=(env PATH="$FAKE_BIN:$PATH" TCFS_PLISTBUDDY="$FAKE_BIN/PlistBuddy"
+  TCFS_PROFILE_FIXTURE_ROOT="$TMPDIR"
+  bash "$REPO_ROOT/scripts/macos-fileprovider-profile-inventory.sh")
+# Exact-pair selection is strict even without --strict, and preserves roles.
+assert_fails_contains "compatible pair: not found" "${pair_command[@]}" \
+  --host-profile "$RAW_EXTENSION_PROFILE" --extension-profile "$RAW_HOST_PROFILE"
+assert_fails_contains "requires both profile paths" "${pair_command[@]}" \
+  --host-profile "$RAW_HOST_PROFILE"
+assert_fails_contains "absolute readable regular file" "${pair_command[@]}" \
+  --host-profile "$TMPDIR/absent-profile" --extension-profile "$RAW_EXTENSION_PROFILE"
+ln -s "$RAW_HOST_PROFILE" "$TMPDIR/profile-link"
+assert_fails_contains "absolute readable regular file" "${pair_command[@]}" \
+  --host-profile "$TMPDIR/profile-link" --extension-profile "$RAW_EXTENSION_PROFILE"
+assert_fails_contains "cannot scan --profiles-dir" "${pair_command[@]}" \
+  --host-profile "$RAW_HOST_PROFILE" --extension-profile "$RAW_EXTENSION_PROFILE" --profiles-dir "$IMPORT_RUNNER_TEMP"
+assert_fails_contains "distinct files" "${pair_command[@]}" \
+  --host-profile "$RAW_HOST_PROFILE" --extension-profile "$RAW_HOST_PROFILE"
+assert_fails_contains "requires one nonempty value" "${pair_command[@]}" \
+  --host-profile "$RAW_HOST_PROFILE" --host-profile "$RAW_HOST_PROFILE" --extension-profile "$RAW_EXTENSION_PROFILE"
+EXACT_PAIR_CASES=$((EXACT_PAIR_CASES + 7))
+printf 'exact profile pair contract: %s cases passed\n' "$EXACT_PAIR_CASES"
 
 assert_fails_contains \
   "::error::TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64 is required" \
