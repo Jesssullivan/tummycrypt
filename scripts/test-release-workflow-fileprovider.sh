@@ -371,6 +371,167 @@ EOF
   printf 'release Apple failure-path execution cases: %s passed\n' "$cases"
 }
 
+check_daemon_packaging_contract() {
+  # Exercise the actual packager with owned bytes and a fake codesign tool.
+  # These cases prove assembly/refusal behavior, never an Apple signature.
+  python3 - "$REPO_ROOT" "$TMPDIR/daemon-packaging" <<'PY'
+import hashlib
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+root = Path(sys.argv[2])
+root.mkdir(mode=0o700)
+certificate = "A" * 40
+team = "TESTTEAMID"
+revision = "b" * 40
+version = "9.8.7"
+input_bytes = b"owned synthetic daemon input; not a Mach-O executable\n"
+input_hash = hashlib.sha256(input_bytes).hexdigest()
+fake = root / "codesign"
+fake.write_text("#!" + sys.executable + "\n" + r"""
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+mode = os.environ['TCFS_DAEMON_FIXTURE_MODE']
+with open(os.environ['TCFS_DAEMON_FIXTURE_LOG'], 'a') as log:
+    log.write(json.dumps(args) + '\n')
+app = Path(args[-1])
+assert app.is_dir() and app.name == 'TCFSDaemon.app'
+if args[0] == '--force':
+    expected = ['--force', '--sign', 'A' * 40, '--keychain',
+                os.environ['TCFS_DAEMON_FIXTURE_KEYCHAIN'], '--identifier',
+                'io.tinyland.tcfsd', '--options', 'runtime', '--timestamp',
+                '--entitlements', str(app.parent / 'tcfsd.entitlements'), str(app)]
+    assert args == expected, args
+    if mode == 'sign-failed':
+        raise SystemExit(31)
+elif args[0] == '--verify':
+    assert args[:3] == ['--verify', '--strict', '--test-requirement'] and len(args) == 5
+    expected = ('identifier "io.tinyland.tcfsd" and anchor apple generic '
+                'and certificate 1[field.1.2.840.113635.100.6.2.6] exists '
+                'and certificate leaf[field.1.2.840.113635.100.6.1.13] exists '
+                'and certificate leaf[subject.OU] = "TESTTEAMID" '
+                'and certificate leaf = H"' + 'A' * 40 + '"')
+    assert args[3] == expected, args[3]
+    if mode == 'verify-failed':
+        raise SystemExit(32)
+else:
+    assert args[:2] == ['--display', '--verbose=4'] and len(args) == 3
+    identifier = 'io.tinyland.other' if mode == 'wrong-identifier' else 'io.tinyland.tcfsd'
+    team = 'OTHERTEAM1' if mode == 'wrong-team' else 'TESTTEAMID'
+    flags = '10002' if mode == 'adhoc-result' else ('0' if mode == 'no-runtime' else '10000')
+    lines = ['Identifier=' + identifier, 'TeamIdentifier=' + team,
+             'CodeDirectory v=20500 size=123 flags=0x' + flags + ' hashes=1+1 location=embedded']
+    if mode != 'no-timestamp':
+        lines.append('Timestamp=Sep 8, 2026 at 12:00:00 AM')
+    if mode == 'duplicate-timestamp':
+        lines.append('Timestamp=Sep 8, 2026 at 12:00:00 AM')
+    if mode == 'display-failed':
+        raise SystemExit(33)
+    print('\n'.join(lines), file=sys.stderr)
+""")
+fake.chmod(0o700)
+
+modes = (
+    'success', 'old-caller', 'auto', 'ad-hoc', 'zero-certificate', 'bad-team',
+    'wrong-hash', 'zero-hash', 'bad-source', 'zero-source', 'bad-version',
+    'missing-keychain', 'symlink-keychain', 'missing-input', 'symlink-input',
+    'empty-input', 'existing-output', 'symlink-output', 'wrong-template-id',
+    'wrong-template-version', 'sign-failed', 'verify-failed', 'display-failed',
+    'wrong-identifier', 'wrong-team', 'adhoc-result', 'no-runtime',
+    'no-timestamp', 'duplicate-timestamp',
+)
+late = {'sign-failed', 'verify-failed', 'display-failed', 'wrong-identifier',
+        'wrong-team', 'adhoc-result', 'no-runtime', 'no-timestamp', 'duplicate-timestamp'}
+for mode in modes:
+    case = root / mode
+    case.mkdir()
+    source = case / 'daemon'
+    shutil.copytree(repo / 'swift/daemon', source)
+    binary = case / 'tcfsd'
+    binary.write_bytes(input_bytes)
+    keychain = case / 'existing.keychain-db'
+    keychain.write_bytes(b'owned synthetic keychain metadata fixture\n')
+    keychain_hash = hashlib.sha256(keychain.read_bytes()).hexdigest()
+    output = case / 'output'
+    log = case / 'calls.jsonl'
+    values = [str(binary), str(output), certificate, team, str(keychain), input_hash, revision, version]
+    if mode in ('auto', 'ad-hoc', 'zero-certificate'):
+        values[2] = {'auto': 'auto', 'ad-hoc': '-', 'zero-certificate': '0' * 40}[mode]
+    elif mode == 'bad-team':
+        values[3] = 'invalid'
+    elif mode in ('wrong-hash', 'zero-hash'):
+        values[5] = 'c' * 64 if mode == 'wrong-hash' else '0' * 64
+    elif mode in ('bad-source', 'zero-source'):
+        values[6] = 'HEAD' if mode == 'bad-source' else '0' * 40
+    elif mode == 'bad-version':
+        values[7] = '9.8.7;false'
+    elif mode == 'missing-keychain':
+        values[4] = str(case / 'missing.keychain-db')
+    elif mode == 'symlink-keychain':
+        link = case / 'keychain-link'; link.symlink_to(keychain); values[4] = str(link)
+    elif mode == 'missing-input':
+        values[0] = str(case / 'missing-input')
+    elif mode == 'symlink-input':
+        link = case / 'input-link'; link.symlink_to(binary); values[0] = str(link)
+    elif mode == 'empty-input':
+        binary.write_bytes(b'')
+    elif mode == 'existing-output':
+        output.mkdir(); (output / 'marker').write_bytes(b'preserve\n')
+    elif mode == 'symlink-output':
+        other = case / 'other'; other.mkdir(); (other / 'marker').write_bytes(b'preserve\n'); output.symlink_to(other)
+    elif mode in ('wrong-template-id', 'wrong-template-version'):
+        info_path = source / 'resources/Info.plist'
+        info = plistlib.loads(info_path.read_bytes())
+        info['CFBundleIdentifier' if mode == 'wrong-template-id' else 'CFBundleVersion'] = 'incorrect'
+        info_path.write_bytes(plistlib.dumps(info))
+    elif mode == 'old-caller':
+        values = values[:2] + ['auto']
+    environment = {
+        'PATH': os.environ['PATH'],
+        'TCFS_DAEMON_CODESIGN': str(fake),
+        'TCFS_DAEMON_FIXTURE_MODE': mode,
+        'TCFS_DAEMON_FIXTURE_LOG': str(log),
+        'TCFS_DAEMON_FIXTURE_KEYCHAIN': str(keychain),
+    }
+    result = subprocess.run(['bash', '--noprofile', '--norc', str(source / 'build.sh'), *values],
+                            env=environment, capture_output=True, timeout=20, check=False)
+    (case / 'stdout').write_bytes(result.stdout)
+    (case / 'stderr').write_bytes(result.stderr)
+    assert (result.returncode == 0) == (mode == 'success'), (mode, result.returncode, result.stderr)
+    assert hashlib.sha256(keychain.read_bytes()).hexdigest() == keychain_hash, mode
+    if mode != 'empty-input':
+        assert binary.read_bytes() == input_bytes, mode
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    if mode not in late and mode != 'success':
+        assert not calls, (mode, calls)
+        if mode in ('existing-output', 'symlink-output'):
+            assert (output / 'marker').read_bytes() == b'preserve\n'
+            assert sorted(path.name for path in output.iterdir()) == ['marker']
+        else:
+            assert not output.exists(), mode
+    else:
+        expected_count = 1 if mode == 'sign-failed' else (2 if mode == 'verify-failed' else 3)
+        assert len(calls) == expected_count, (mode, calls)
+        assert (output / 'TCFSDaemon.app/Contents/MacOS/tcfsd').read_bytes() == input_bytes
+        assert ('Signed intermediate:' in result.stdout.decode()) == (mode == 'success')
+        info = plistlib.loads((output / 'TCFSDaemon.app/Contents/Info.plist').read_bytes())
+        assert info['CFBundleIdentifier'] == 'io.tinyland.tcfsd'
+        assert info['CFBundleVersion'] == info['CFBundleShortVersionString'] == version
+        assert info['TCFSSourceRevision'] == revision and info['TCFSInputSHA256'] == input_hash
+        expected_entitlements = (repo / 'swift/daemon/resources/tcfsd.entitlements').read_bytes().replace(
+            b'$(TeamIdentifierPrefix)', (team + '.').encode('ascii'))
+        assert (output / 'tcfsd.entitlements').read_bytes() == expected_entitlements
+print('daemon packaging assembly/refusal cases:', len(modes), 'passed (fake codesign only)')
+PY
+}
+
 check_macos_fileprovider_principal_class() {
   local plist="$REPO_ROOT/swift/fileprovider/resources/Extension-Info.plist"
   local source="$REPO_ROOT/swift/fileprovider/Sources/Extension/FileProviderExtension.swift"
@@ -600,6 +761,7 @@ check_postinstall_workflow_artifact_download_uses_api_zip
 check_release_action_token_override
 check_release_gates_and_apple_signing_requirements
 check_release_apple_failure_paths
+check_daemon_packaging_contract
 check_macos_fileprovider_principal_class
 check_testing_mode_is_explicit_opt_in
 check_testing_mode_package_workflow
