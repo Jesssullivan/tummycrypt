@@ -3,7 +3,8 @@
 # Regression tests for the release workflow's macOS FileProvider packaging
 # steps. This keeps CI-only YAML heredocs covered by the same local lazy gate.
 #
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "release workflow fixture failed at line %d\n" "$LINENO" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
@@ -199,6 +200,175 @@ check_release_gates_and_apple_signing_requirements() {
     raise "release pkg build must fail without Developer ID Installer" unless installer_import.include?("No Developer ID Installer identity found")
     raise "release pkg build must not build unsigned packages" if installer_import.include?("building unsigned")
   ' "$WORKFLOW"
+}
+
+check_release_apple_failure_paths() {
+  local gate_root="${TMPDIR}/release-apple-gates"
+  local gate_tools="${gate_root}/tools"
+  mkdir -p "$gate_tools"
+
+  # Run the real YAML step bodies. Only GitHub expressions are rendered with
+  # synthetic values; commands and their failure handling are not rewritten.
+  extract_step "build-binaries" "Import signing certificate (macOS)" "$gate_root/import.sh"
+  extract_step "build-binaries" "Sign CLI binaries (macOS)" "$gate_root/sign.sh"
+  extract_step "build-binaries" "Notarize CLI binaries (macOS)" "$gate_root/cli.sh"
+  extract_step "build-fileprovider" "Notarize FileProvider" "$gate_root/fileprovider.sh"
+  ruby -e '
+    substitutions = {
+      "${{ needs.plan.outputs.version }}" => "9.8.7",
+      "${{ matrix.name }}" => "macos-aarch64",
+      "${{ matrix.target }}" => "aarch64-apple-darwin",
+      "${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}" => ""
+    }
+    ARGV.each do |path|
+      body = File.read(path)
+      substitutions.each { |from, to| body = body.gsub(from, to) }
+      raise "unrendered GitHub expression" if body.include?("${{")
+      File.write(path, body)
+    end
+  ' "$gate_root/import.sh" "$gate_root/sign.sh" "$gate_root/cli.sh" "$gate_root/fileprovider.sh"
+
+  cat >"$gate_tools/security" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'security-%s\n' "$1" >> "$TCFS_GATE_LOG"
+case "$1" in
+  find-identity)
+    if [[ "$TCFS_GATE_MODE" == "no-identity" ]]; then
+      printf '0 valid identities found\n'
+    else
+      printf '1) 1111111111111111111111111111111111111111 "Developer ID Application: Fixture (TESTTEAMID)"\n'
+    fi
+    ;;
+  create-keychain|set-keychain-settings|unlock-keychain|import|set-key-partition-list|list-keychains) ;;
+  *) exit 71 ;;
+esac
+EOF
+  cat >"$gate_tools/openssl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "rand -hex 16" ]]
+printf 'fixture-keychain-password\n'
+EOF
+  cat >"$gate_tools/ditto" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'archive\n' >> "$TCFS_GATE_LOG"
+destination="${!#}"
+[[ "$destination" == /* ]] || destination="$PWD/$destination"
+[[ "$destination" == "$TCFS_GATE_ROOT/"* && "$destination" != *'/../'* ]]
+printf 'owned synthetic archive\n' > "$destination"
+EOF
+  cat >"$gate_tools/codesign" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "--verify --deep --strict build/TCFSProvider.app" ]]
+printf 'signature-verify\n' >> "$TCFS_GATE_LOG"
+EOF
+  cat >"$gate_tools/xcrun" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  "notarytool submit")
+    [[ "$*" == *'--wait --timeout 15m --output-format json' ]]
+    printf 'notary-submit\n' >> "$TCFS_GATE_LOG"
+    case "$TCFS_GATE_MODE" in
+      failed) printf 'synthetic notary failure\n' >&2; exit 19 ;;
+      invalid) printf '{"status":"Invalid"}\n' ;;
+      pending) printf '{"status":"In Progress"}\n' ;;
+      missing-status) printf '{"message":"status absent"}\n' ;;
+      malformed) printf 'not json\n' ;;
+      wrong-shape) printf '[{"status":"Accepted"}]\n' ;;
+      oversized) python3 -c 'print(" " * 65537 + "{\"status\":\"Accepted\"}")' ;;
+      *) printf '{"status":"Accepted","id":"11111111-2222-4333-8444-555555555555"}\n' ;;
+    esac
+    ;;
+  "stapler staple") printf 'staple\n' >> "$TCFS_GATE_LOG" ;;
+  "stapler validate") printf 'staple-validate\n' >> "$TCFS_GATE_LOG" ;;
+  *) exit 72 ;;
+esac
+EOF
+  cat >"$gate_tools/spctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "--assess --type exec --verbose=2 build/TCFSProvider.app" ]]
+printf 'gatekeeper-assess\n' >> "$TCFS_GATE_LOG"
+EOF
+  chmod +x "$gate_tools"/*
+
+  local kind mode modes expectation case_root identity certificate apple_id result
+  local cases=0
+  for kind in import sign cli fileprovider; do
+    case "$kind" in
+      import) modes="missing-certificate no-identity accepted" ;;
+      sign) modes="missing-identity ad-hoc" ;;
+      *) modes="missing-identity ad-hoc missing-credential failed invalid pending missing-status malformed wrong-shape oversized accepted" ;;
+    esac
+    for mode in $modes; do
+      cases=$((cases + 1))
+      case_root="$gate_root/$kind-$mode"
+      mkdir -p "$case_root/work/build/TCFSProvider.app" "$case_root/runner"
+      mkdir -p "$case_root/work/tcfs-9.8.7-macos-aarch64"
+      : > "$case_root/log"
+      : > "$case_root/github-env"
+      identity="Developer ID Application: Fixture (TESTTEAMID)"
+      certificate="Zml4dHVyZQ=="
+      apple_id="fixture@example.invalid"
+      [[ "$mode" != "missing-identity" ]] || identity=""
+      [[ "$mode" != "ad-hoc" ]] || identity="-"
+      [[ "$mode" != "missing-certificate" ]] || certificate=""
+      [[ "$mode" != "missing-credential" ]] || apple_id=""
+      expectation="failure"
+      [[ "$mode" != "accepted" ]] || expectation="success"
+      if (
+        cd "$case_root/work"
+        env -i PATH="$gate_tools:$PATH" \
+          RUNNER_TEMP="$case_root/runner" GITHUB_ENV="$case_root/github-env" \
+          TCFS_GATE_ROOT="$gate_root" TCFS_GATE_LOG="$case_root/log" TCFS_GATE_MODE="$mode" \
+          APPLE_CERTIFICATE_BASE64="$certificate" APPLE_CERTIFICATE_PASSWORD="fixture" \
+          APPLE_ID="$apple_id" APPLE_TEAM_ID="TESTTEAMID" APPLE_NOTARIZE_PASSWORD="fixture" \
+          CLI_SIGNING_IDENTITY="$identity" SIGNING_IDENTITY="$identity" \
+          TCFS_RELEASE_DITTO="$gate_tools/ditto" TCFS_RELEASE_CODESIGN="$gate_tools/codesign" \
+          TCFS_RELEASE_SPCTL="$gate_tools/spctl" \
+          bash --noprofile --norc -e -o pipefail "$gate_root/$kind.sh"
+      ) > "$case_root/stdout" 2> "$case_root/stderr"; then
+        result="success"
+      else
+        result="failure"
+      fi
+      if [[ "$result" != "$expectation" ]]; then
+        printf 'release gate %s/%s: expected %s, got %s\n' "$kind" "$mode" "$expectation" "$result" >&2
+        cat "$case_root/stdout" "$case_root/stderr" >&2
+        return 1
+      fi
+      if [[ "$kind" == "import" ]]; then
+        if [[ "$mode" == "missing-certificate" ]]; then
+          [[ ! -s "$case_root/log" && ! -s "$case_root/github-env" ]]
+        elif [[ "$mode" == "no-identity" ]]; then
+          assert_contains "$case_root/github-env" "CLI_KEYCHAIN_PATH=$case_root/runner/cli-signing.keychain-db"
+          assert_not_contains "$case_root/github-env" "CLI_SIGNING_IDENTITY="
+        else
+          assert_contains "$case_root/github-env" "CLI_SIGNING_IDENTITY=$identity"
+        fi
+      elif [[ "$kind" == "sign" || "$mode" == "missing-identity" || "$mode" == "ad-hoc" || "$mode" == "missing-credential" ]]; then
+        [[ ! -s "$case_root/log" ]]
+      elif [[ "$mode" == "accepted" ]]; then
+        if [[ "$kind" == "fileprovider" ]]; then
+          printf 'signature-verify\narchive\nnotary-submit\nstaple\nstaple-validate\ngatekeeper-assess\n' > "$case_root/expected-log"
+          [[ ! -e "$case_root/runner/TCFSProvider-notarize.zip" ]]
+        else
+          printf 'archive\nnotary-submit\n' > "$case_root/expected-log"
+          [[ ! -e "$case_root/work/tcfs-9.8.7-macos-aarch64-notarize.zip" ]]
+        fi
+        cmp "$case_root/expected-log" "$case_root/log"
+      else
+        assert_contains "$case_root/log" "notary-submit"
+        assert_not_contains "$case_root/log" "staple"
+        assert_not_contains "$case_root/log" "gatekeeper-assess"
+      fi
+    done
+  done
+  printf 'release Apple failure-path execution cases: %s passed\n' "$cases"
 }
 
 check_macos_fileprovider_principal_class() {
@@ -429,6 +599,7 @@ check_postinstall_workflow_environment_and_secrets
 check_postinstall_workflow_artifact_download_uses_api_zip
 check_release_action_token_override
 check_release_gates_and_apple_signing_requirements
+check_release_apple_failure_paths
 check_macos_fileprovider_principal_class
 check_testing_mode_is_explicit_opt_in
 check_testing_mode_package_workflow
@@ -454,6 +625,32 @@ if [[ "${1:-}" == "cms" && "${2:-}" == "-D" ]]; then
   done
 fi
 exit 1
+EOF
+cat >"$FAKE_BIN/PlistBuddy" <<'EOF'
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import plistlib
+import sys
+
+assert len(sys.argv) == 4 and sys.argv[1] == "-c"
+assert sys.argv[2].startswith("Print :")
+root = Path(os.environ["TCFS_PROFILE_FIXTURE_ROOT"]).resolve()
+path = Path(sys.argv[3]).resolve()
+assert root in path.parents
+with path.open("rb") as source:
+    value = plistlib.load(source)
+try:
+    for key in sys.argv[2][len("Print :"):].split(":"):
+        value = value[int(key)] if isinstance(value, list) else value[key]
+except (IndexError, KeyError, TypeError, ValueError):
+    raise SystemExit(1)
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif isinstance(value, (str, int)):
+    print(value)
+else:
+    raise SystemExit(1)
 EOF
 cat >"$FAKE_BIN/pluginkit" <<'EOF'
 #!/usr/bin/env bash
@@ -546,6 +743,8 @@ IMPORT_OUT="${TMPDIR}/import.out"
 PATH="$FAKE_BIN:$PATH" \
 RUNNER_TEMP="$IMPORT_RUNNER_TEMP" \
 GITHUB_ENV="$IMPORT_ENV" \
+TCFS_PLISTBUDDY="$FAKE_BIN/PlistBuddy" \
+TCFS_PROFILE_FIXTURE_ROOT="$TMPDIR" \
 TCFS_HOST_PROVISIONING_PROFILE_BASE64="$(base64_file "$RAW_HOST_PROFILE")" \
 TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64="$(base64_file "$RAW_EXTENSION_PROFILE")" \
 bash -e "$IMPORT_STEP" >"$IMPORT_OUT"
@@ -563,6 +762,8 @@ assert_fails_contains \
   env PATH="$FAKE_BIN:$PATH" \
     RUNNER_TEMP="${TMPDIR}/missing-extension-runner" \
     GITHUB_ENV="${TMPDIR}/missing-extension-env" \
+    TCFS_PLISTBUDDY="$FAKE_BIN/PlistBuddy" \
+    TCFS_PROFILE_FIXTURE_ROOT="$TMPDIR" \
     TCFS_HOST_PROVISIONING_PROFILE_BASE64="$(base64_file "$RAW_HOST_PROFILE")" \
     TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64="" \
     bash -e "$IMPORT_STEP"

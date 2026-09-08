@@ -43,6 +43,8 @@ EXTENSION_BUNDLE_ID="${TCFS_EXTENSION_BUNDLE_ID:-io.tinyland.tcfs.fileprovider}"
 APP_GROUP_ID="${TCFS_APP_GROUP_ID:-group.io.tinyland.tcfs}"
 KEYCHAIN_GROUP_SUFFIX="${TCFS_KEYCHAIN_GROUP_SUFFIX:-group.io.tinyland.tcfs}"
 REQUIRED_HOST_ENTITLEMENT="${TCFS_REQUIRED_HOST_ENTITLEMENT:-}"
+# Keep the native production tool; owned platform fixtures supply its stand-in.
+PLISTBUDDY_BIN="${TCFS_PLISTBUDDY:-/usr/libexec/PlistBuddy}"
 ENV_ONLY=0
 STRICT=0
 
@@ -106,7 +108,7 @@ plist_print() {
   local plist="$1"
   local path="$2"
 
-  /usr/libexec/PlistBuddy -c "Print :$path" "$plist" 2>/dev/null
+  "$PLISTBUDDY_BIN" -c "Print :$path" "$plist" 2>/dev/null
 }
 
 plist_first_array_value() {
