@@ -15,6 +15,7 @@
 #   - Binary tarballs (.tar.gz) per platform
 #   - .deb package (x86_64 + aarch64)
 #   - .rpm package (x86_64 daemon package only today)
+#   - macOS signed daemon app archive and notarization evidence
 #   - macOS FileProvider app archive (.zip)
 #   - macOS installer package (.pkg)
 #   - Shell installer script (curl | sh)
@@ -330,15 +331,16 @@ jobs:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
+          set -euo pipefail
           if [ -z "$APPLE_CERTIFICATE_BASE64" ]; then
-            echo "::warning::APPLE_CERTIFICATE_BASE64 not set, skipping CLI signing"
-            echo "CLI_SIGNING_IDENTITY=" >> $GITHUB_ENV
-            exit 0
+            echo "::error::APPLE_CERTIFICATE_BASE64 is required for release CLI signing"
+            exit 1
           fi
           KEYCHAIN_PATH="$RUNNER_TEMP/cli-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "CLI_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
@@ -364,15 +366,20 @@ jobs:
             | sed 's/.*"\(.*\)".*/\1/' || true)
           if [ -n "$IDENTITY" ]; then
             echo "CLI_SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
-            echo "CLI_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
           else
-            echo "::warning::No Developer ID found, skipping CLI signing"
-            echo "CLI_SIGNING_IDENTITY=" >> $GITHUB_ENV
+            echo "::error::No Developer ID Application identity found for release CLI signing"
+            exit 1
           fi
 
       - name: Sign CLI binaries (macOS)
-        if: matrix.sign && env.CLI_SIGNING_IDENTITY != ''
+        if: matrix.sign
         run: |
+          set -euo pipefail
+          : "${CLI_SIGNING_IDENTITY:?release CLI signing identity is required}"
+          if [ "$CLI_SIGNING_IDENTITY" = "-" ]; then
+            echo "::error::Release CLI signing requires Developer ID"
+            exit 1
+          fi
           BINDIR="target/${{ matrix.target }}/release"
           for bin in tcfs tcfsd tcfs-tui tcfs-mcp; do
             if [ -f "${BINDIR}/${bin}" ]; then
@@ -386,7 +393,7 @@ jobs:
           echo "Verifying signatures..."
           for bin in tcfs tcfsd tcfs-tui tcfs-mcp; do
             if [ -f "${BINDIR}/${bin}" ]; then
-              /usr/bin/codesign -dvv "${BINDIR}/${bin}" 2>&1 | head -3
+              /usr/bin/codesign --verify --strict "${BINDIR}/${bin}"
             fi
           done
 
@@ -418,22 +425,101 @@ jobs:
       # ── Notarize macOS CLI tarball ────────────────────────────────────────
 
       - name: Notarize CLI binaries (macOS)
-        if: matrix.sign && env.CLI_SIGNING_IDENTITY != ''
+        if: matrix.sign
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+          TCFS_RELEASE_DITTO: /usr/bin/ditto
         run: |
+          set -euo pipefail
+          : "${CLI_SIGNING_IDENTITY:?release CLI signing identity is required}"
+          if [ "$CLI_SIGNING_IDENTITY" = "-" ]; then
+            echo "::error::Release CLI notarization requires Developer ID"
+            exit 1
+          fi
+          for required in APPLE_ID APPLE_TEAM_ID APPLE_NOTARIZE_PASSWORD; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::${required} is required for release CLI notarization"
+              exit 1
+            fi
+          done
           DIST="tcfs-${{ needs.plan.outputs.version }}-${{ matrix.name }}"
           ZIP_PATH="${DIST}-notarize.zip"
-          /usr/bin/ditto -c -k "${DIST}" "${ZIP_PATH}"
+          NOTARY_RESULT="$RUNNER_TEMP/cli-notarization-${{ matrix.name }}.json"
+          EVIDENCE="${DIST}.notarization.json"
+          "$TCFS_RELEASE_DITTO" -c -k "${DIST}" "${ZIP_PATH}"
           echo "Submitting CLI binaries for notarization..."
           xcrun notarytool submit "${ZIP_PATH}" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_NOTARIZE_PASSWORD" \
-            --wait || echo "::warning::CLI notarization failed (non-fatal)"
+            --wait --timeout 15m --output-format json > "$NOTARY_RESULT"
+          python3 - "$NOTARY_RESULT" "$EVIDENCE" <<'PY'
+          import json, sys, uuid
+          with open(sys.argv[1], "rb") as source:
+              raw = source.read(65537)
+          if len(raw) > 65536:
+              raise SystemExit("CLI notarization response exceeds bound")
+          result = json.loads(raw)
+          if not isinstance(result, dict) or result.get("status") != "Accepted":
+              raise SystemExit("CLI notarization was not Accepted")
+          identifier = result.get("id")
+          if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier.lower():
+              raise SystemExit("CLI notarization submission ID is invalid")
+          with open(sys.argv[2], "xb") as output:
+              output.write(raw)
+          PY
           rm -f "${ZIP_PATH}"
+
+      - name: Package and notarize daemon app (macOS)
+        if: matrix.sign
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+          TCFS_RELEASE_DITTO: /usr/bin/ditto
+          TCFS_RELEASE_CODESIGN: /usr/bin/codesign
+          TCFS_RELEASE_SPCTL: /usr/sbin/spctl
+        run: |
+          set -euo pipefail
+          : "${CLI_SIGNING_IDENTITY:?existing release signing identity is required}"
+          : "${CLI_KEYCHAIN_PATH:?existing release keychain is required}"
+          : "${APPLE_TEAM_ID:?release Team ID is required}"
+          if [ "$CLI_SIGNING_IDENTITY" = "-" ]; then
+            echo 'Release daemon packaging requires Developer ID' >&2
+            exit 1
+          fi
+          for required in APPLE_ID APPLE_TEAM_ID APPLE_NOTARIZE_PASSWORD; do
+            [[ -n "${!required:-}" ]] || { echo "${required} is required for daemon notarization" >&2; exit 1; }
+          done
+          IDENTITY_LIST="$RUNNER_TEMP/daemon-signing-identities.txt"
+          security find-identity -v -p codesigning "$CLI_KEYCHAIN_PATH" > "$IDENTITY_LIST"
+          CERTIFICATE_SHA1=$(python3 - "$IDENTITY_LIST" "$CLI_SIGNING_IDENTITY" <<'PY'
+          import re, sys
+          with open(sys.argv[1], 'rb') as source:
+              raw = source.read(65537)
+          if len(raw) > 65536:
+              raise SystemExit('Signing identity listing exceeds bound')
+          matches = [fingerprint for fingerprint, name in re.findall(
+              r'^\s*\d+\) ([A-Fa-f0-9]{40}) "([^"\r\n]+)"\s*$',
+              raw.decode('utf-8'), re.MULTILINE)
+              if name == sys.argv[2] and name.startswith('Developer ID Application:')]
+          if len(matches) != 1:
+              raise SystemExit('Expected exactly one match for the already selected Developer ID')
+          print(matches[0].upper())
+          PY
+          )
+          BIN="target/${{ matrix.target }}/release/tcfsd"
+          INPUT_SHA256=$(shasum -a 256 "$BIN" | awk '{print $1}')
+          DAEMON_OUTPUT="$RUNNER_TEMP/tcfs-daemon-release-${{ matrix.name }}"
+          bash swift/daemon/build.sh "$BIN" "$DAEMON_OUTPUT" "$CERTIFICATE_SHA1" \
+            "$APPLE_TEAM_ID" "$CLI_KEYCHAIN_PATH" "$INPUT_SHA256" \
+            '${{ github.sha }}' '${{ needs.plan.outputs.version }}'
+          APP_PATH="$DAEMON_OUTPUT/TCFSDaemon.app"
+          STEM="TCFSDaemon-${{ needs.plan.outputs.version }}-${{ matrix.name }}"
+          bash swift/fileprovider/notarize.sh "$APP_PATH" --result-file "$PWD/${STEM}.notarization.json"
+          "$TCFS_RELEASE_DITTO" -c -k --keepParent "$APP_PATH" "${STEM}.zip"
 
       - name: Cleanup signing keychain (macOS)
         if: always() && matrix.sign
@@ -487,6 +573,8 @@ jobs:
             *.zip
             *.deb
             *.rpm
+            *.notarization.json
+          if-no-files-found: error
           retention-days: 7
 
   # ── Build container image (k8s-worker) ────────────────────────────────────
@@ -802,8 +890,12 @@ jobs:
 
           security cms -D -i "$HOST_PROFILE" >/dev/null
           security cms -D -i "$EXTENSION_PROFILE" >/dev/null
+          # Check the exact files passed to the build; unrelated profiles in
+          # RUNNER_TEMP cannot supply a different compatible pair. Field checks
+          # remain compatibility evidence, not independent Apple authorization.
           scripts/macos-fileprovider-profile-inventory.sh \
-            --profiles-dir "$RUNNER_TEMP" \
+            --host-profile "$HOST_PROFILE" \
+            --extension-profile "$EXTENSION_PROFILE" \
             --strict
 
           {
@@ -827,15 +919,29 @@ jobs:
             build/ \
             "$SIGNING_IDENTITY"
 
-      - name: Notarize (if Developer ID signed)
-        if: env.SIGNING_IDENTITY != '-'
+      - name: Notarize FileProvider
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+          TCFS_RELEASE_CODESIGN: /usr/bin/codesign
+          TCFS_RELEASE_DITTO: /usr/bin/ditto
+          TCFS_RELEASE_SPCTL: /usr/sbin/spctl
         run: |
-          swift/fileprovider/notarize.sh build/TCFSProvider.app \
-            || echo "::warning::FileProvider notarization failed (non-fatal)"
+          set -euo pipefail
+          : "${SIGNING_IDENTITY:?release FileProvider signing identity is required}"
+          if [ "$SIGNING_IDENTITY" = "-" ]; then
+            echo "::error::Release FileProvider notarization requires Developer ID"
+            exit 1
+          fi
+          for required in APPLE_ID APPLE_TEAM_ID APPLE_NOTARIZE_PASSWORD; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::${required} is required for release FileProvider notarization"
+              exit 1
+            fi
+          done
+          bash swift/fileprovider/notarize.sh build/TCFSProvider.app \
+            --result-file "build/TCFSProvider-${{ needs.plan.outputs.version }}-macos-aarch64.notarization.json"
 
       - name: Create artifact archive
         run: |
@@ -848,7 +954,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-fileprovider
-          path: build/TCFSProvider-*.zip
+          path: |
+            build/TCFSProvider-*.zip
+            build/TCFSProvider-*.notarization.json
+          if-no-files-found: error
           retention-days: 7
 
       - name: Cleanup keychain
@@ -1007,19 +1116,55 @@ jobs:
 
       - name: Flatten artifacts and generate checksums
         run: |
-          mkdir -p release
-          find dist/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.pkg" -o -name "*.sh" -o -name "*.ps1" \) \
-            -exec cp {} release/ \;
-
-          # Validate at least one artifact was collected
-          ASSET_COUNT=$(find release/ -type f | wc -l | tr -d ' ')
-          echo "Collected $ASSET_COUNT release assets"
-          if [ "$ASSET_COUNT" -lt 1 ]; then
-            echo "::error::No release artifacts collected — upstream build jobs may have failed"
-            exit 1
-          fi
-
-          # .sig and .pem are generated in-place by Cosign step below
+          set -euo pipefail
+          python3 - '${{ needs.plan.outputs.version }}' <<'PY'
+          import json, pathlib, re, shutil, sys, uuid
+          version = sys.argv[1]
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.]+)?', version):
+              raise SystemExit('Invalid release version')
+          assets = {}
+          for path in pathlib.Path('dist').rglob('*'):
+              if not path.is_file():
+                  continue
+              name = path.name
+              if not (name.endswith(('.tar.gz', '.zip', '.deb', '.rpm', '.pkg', '.sh', '.ps1'))
+                      or name.endswith('.notarization.json')):
+                  continue
+              if path.is_symlink() or name in assets:
+                  raise SystemExit('Symlink or duplicate release asset')
+              assets[name] = path
+          if not assets:
+              raise SystemExit('No release assets collected')
+          required = []
+          for platform in ('macos-aarch64', 'macos-x86_64'):
+              required.extend([(f'tcfs-{version}-{platform}', '.tar.gz'),
+                               (f'TCFSDaemon-{version}-{platform}', '.zip')])
+          required.append((f'TCFSProvider-{version}-macos-aarch64', '.zip'))
+          evidence_names = {stem + '.notarization.json' for stem, _ in required}
+          if {name for name in assets if name.endswith('.notarization.json')} != evidence_names:
+              raise SystemExit('Missing or unexpected macOS notarization evidence')
+          for stem, suffix in required:
+              archive = assets.get(stem + suffix)
+              evidence = assets.get(stem + '.notarization.json')
+              if archive is None or archive.stat().st_size == 0 or evidence is None:
+                  raise SystemExit('Missing macOS archive or notarization evidence')
+              with evidence.open('rb') as source:
+                  raw = source.read(65537)
+              if len(raw) > 65536:
+                  raise SystemExit('Notarization evidence exceeds bound')
+              result = json.loads(raw)
+              if not isinstance(result, dict) or result.get('status') != 'Accepted':
+                  raise SystemExit('Release notarization evidence was not Accepted')
+              identifier = result.get('id')
+              if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier.lower():
+                  raise SystemExit('Invalid notarization submission ID')
+          # Validate every required pair before creating any publishable output.
+          output = pathlib.Path('release')
+          output.mkdir(exist_ok=False)
+          for name, path in sorted(assets.items()):
+              shutil.copyfile(path, output / name)
+          PY
+          # Raw Apple evidence and final artifacts share the existing signed checksum set.
           cd release
           sha256sum * > SHA256SUMS.txt
 
@@ -1109,8 +1254,8 @@ jobs:
             ```
 
             ### macOS artifacts
-            macOS CLI binaries are Developer ID signed when Apple credentials are configured.
-            FileProvider app notarization is attempted for Apple artifacts. Signed `.pkg`
+            macOS CLI binaries require Developer ID signing.
+            CLI and FileProvider archives require Accepted Apple notarization. Signed `.pkg`
             release jobs require notarization, stapling, Gatekeeper install assessment, and
             package policy smoke before the package artifact is uploaded.
 
