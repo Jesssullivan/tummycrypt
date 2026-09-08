@@ -213,12 +213,14 @@ check_release_apple_failure_paths() {
   extract_step "build-binaries" "Sign CLI binaries (macOS)" "$gate_root/sign.sh"
   extract_step "build-binaries" "Notarize CLI binaries (macOS)" "$gate_root/cli.sh"
   extract_step "build-fileprovider" "Notarize FileProvider" "$gate_root/fileprovider.sh"
+  extract_step "build-binaries" "Package and notarize daemon app (macOS)" "$gate_root/daemon.sh"
   ruby -e '
     substitutions = {
       "${{ needs.plan.outputs.version }}" => "9.8.7",
       "${{ matrix.name }}" => "macos-aarch64",
       "${{ matrix.target }}" => "aarch64-apple-darwin",
-      "${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}" => ""
+      "${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}" => "",
+      "${{ github.sha }}" => "ffffffffffffffffffffffffffffffffffffffff"
     }
     ARGV.each do |path|
       body = File.read(path)
@@ -226,7 +228,7 @@ check_release_apple_failure_paths() {
       raise "unrendered GitHub expression" if body.include?("${{")
       File.write(path, body)
     end
-  ' "$gate_root/import.sh" "$gate_root/sign.sh" "$gate_root/cli.sh" "$gate_root/fileprovider.sh"
+  ' "$gate_root/import.sh" "$gate_root/sign.sh" "$gate_root/cli.sh" "$gate_root/fileprovider.sh" "$gate_root/daemon.sh"
 
   cat >"$gate_tools/security" <<'EOF'
 #!/usr/bin/env bash
@@ -238,6 +240,9 @@ case "$1" in
       printf '0 valid identities found\n'
     else
       printf '1) 1111111111111111111111111111111111111111 "Developer ID Application: Fixture (TESTTEAMID)"\n'
+      if [[ "$TCFS_GATE_MODE" == ambiguous-identity ]]; then
+        printf '2) 2222222222222222222222222222222222222222 "Developer ID Application: Fixture (TESTTEAMID)"\n'
+      fi
     fi
     ;;
   create-keychain|set-keychain-settings|unlock-keychain|import|set-key-partition-list|list-keychains) ;;
@@ -249,6 +254,19 @@ EOF
 set -euo pipefail
 [[ "$*" == "rand -hex 16" ]]
 printf 'fixture-keychain-password\n'
+EOF
+  cat >"$gate_tools/shasum" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == 3 && "$1 $2" == '-a 256' ]]
+# macOS supplies shasum; the Linux fixture hashes only its actual owned input.
+python3 - "$3" <<'PY'
+import hashlib, os, pathlib, sys
+path = pathlib.Path(sys.argv[1]).resolve()
+assert str(path).startswith(os.environ['TCFS_GATE_ROOT'] + '/')
+assert path.read_bytes() == b'native fixture input\n'
+print(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + sys.argv[1])
+PY
 EOF
   cat >"$gate_tools/ditto" <<'EOF'
 #!/usr/bin/env bash
@@ -262,8 +280,10 @@ EOF
   cat >"$gate_tools/codesign" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == "--verify --deep --strict build/TCFSProvider.app" ]]
+[[ "$#" == 4 && "$1 $2 $3" == "--verify --deep --strict" ]]
+[[ "$4" == build/TCFSProvider.app || "$4" == "$TCFS_GATE_ROOT/"*/TCFSDaemon.app ]]
 printf 'signature-verify\n' >> "$TCFS_GATE_LOG"
+[[ "$TCFS_GATE_MODE" != signature-failed ]]
 EOF
   cat >"$gate_tools/xcrun" <<'EOF'
 #!/usr/bin/env bash
@@ -277,38 +297,74 @@ case "$1 $2" in
       invalid) printf '{"status":"Invalid"}\n' ;;
       pending) printf '{"status":"In Progress"}\n' ;;
       missing-status) printf '{"message":"status absent"}\n' ;;
+      missing-id) printf '{"status":"Accepted"}\n' ;;
+      invalid-id) printf '{"status":"Accepted","id":"wrong"}\n' ;;
       malformed) printf 'not json\n' ;;
       wrong-shape) printf '[{"status":"Accepted"}]\n' ;;
       oversized) python3 -c 'print(" " * 65537 + "{\"status\":\"Accepted\"}")' ;;
       *) printf '{"status":"Accepted","id":"11111111-2222-4333-8444-555555555555"}\n' ;;
     esac
     ;;
-  "stapler staple") printf 'staple\n' >> "$TCFS_GATE_LOG" ;;
-  "stapler validate") printf 'staple-validate\n' >> "$TCFS_GATE_LOG" ;;
+  "stapler staple") printf 'staple\n' >> "$TCFS_GATE_LOG"; [[ "$TCFS_GATE_MODE" != staple-failed ]] ;;
+  "stapler validate") printf 'staple-validate\n' >> "$TCFS_GATE_LOG"; [[ "$TCFS_GATE_MODE" != staple-validation-failed ]] ;;
   *) exit 72 ;;
 esac
 EOF
   cat >"$gate_tools/spctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == "--assess --type exec --verbose=2 build/TCFSProvider.app" ]]
+[[ "$#" == 5 && "$1 $2 $3 $4" == "--assess --type exec --verbose=2" ]]
+[[ "$5" == build/TCFSProvider.app || "$5" == "$TCFS_GATE_ROOT/"*/TCFSDaemon.app ]]
 printf 'gatekeeper-assess\n' >> "$TCFS_GATE_LOG"
+[[ "$TCFS_GATE_MODE" != assessment-failed ]]
 EOF
   chmod +x "$gate_tools"/*
 
   local kind mode modes expectation case_root identity certificate apple_id result
   local cases=0
-  for kind in import sign cli fileprovider; do
+  for kind in import sign cli fileprovider daemon; do
     case "$kind" in
       import) modes="missing-certificate no-identity accepted" ;;
       sign) modes="missing-identity ad-hoc" ;;
-      *) modes="missing-identity ad-hoc missing-credential failed invalid pending missing-status malformed wrong-shape oversized accepted" ;;
+      cli) modes="missing-identity ad-hoc missing-credential failed invalid pending missing-status missing-id invalid-id malformed wrong-shape oversized accepted" ;;
+      *) modes="missing-identity ad-hoc missing-credential signature-failed failed invalid pending missing-status missing-id invalid-id malformed wrong-shape oversized staple-failed staple-validation-failed assessment-failed accepted" ;;
     esac
+    if [[ "$kind" == daemon ]]; then
+      modes="$modes no-identity ambiguous-identity packager-failed"
+    fi
     for mode in $modes; do
       cases=$((cases + 1))
       case_root="$gate_root/$kind-$mode"
       mkdir -p "$case_root/work/build/TCFSProvider.app" "$case_root/runner"
       mkdir -p "$case_root/work/tcfs-9.8.7-macos-aarch64"
+      mkdir -p "$case_root/work/swift/fileprovider" "$case_root/work/swift/daemon"
+      mkdir -p "$case_root/work/target/aarch64-apple-darwin/release"
+      cp "$REPO_ROOT/swift/fileprovider/notarize.sh" "$case_root/work/swift/fileprovider/notarize.sh"
+      printf 'native fixture input\n' > "$case_root/work/target/aarch64-apple-darwin/release/tcfsd"
+      printf 'owned keychain fixture\n' > "$case_root/runner/cli-signing.keychain-db"
+      # Existing check_daemon_packaging_contract exercises the actual8arg packager.
+      # This fake checks this workflow's exact integration without signing anything.
+      cat > "$case_root/work/swift/daemon/build.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$@" <<'PY'
+import hashlib, os, pathlib, sys
+assert len(sys.argv) == 9
+binary, output, certificate, team, keychain, digest, revision, version = sys.argv[1:]
+assert certificate == '1' * 40 and team == 'TESTTEAMID'
+assert pathlib.Path(keychain).read_bytes() == b'owned keychain fixture\n'
+assert pathlib.Path(binary).read_bytes() == b'native fixture input\n'
+assert hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest() == digest
+assert revision == 'f' * 40 and version == '9.8.7'
+parent = pathlib.Path(output)
+assert str(parent).startswith(os.environ['TCFS_GATE_ROOT'] + '/')
+with open(os.environ['TCFS_GATE_LOG'], 'a') as log:
+    log.write('package-daemon\n')
+if os.environ['TCFS_GATE_MODE'] == 'packager-failed':
+    raise SystemExit(23)
+(parent / 'TCFSDaemon.app').mkdir(parents=True)
+PY
+EOF
       : > "$case_root/log"
       : > "$case_root/github-env"
       identity="Developer ID Application: Fixture (TESTTEAMID)"
@@ -328,6 +384,7 @@ EOF
           APPLE_CERTIFICATE_BASE64="$certificate" APPLE_CERTIFICATE_PASSWORD="fixture" \
           APPLE_ID="$apple_id" APPLE_TEAM_ID="TESTTEAMID" APPLE_NOTARIZE_PASSWORD="fixture" \
           CLI_SIGNING_IDENTITY="$identity" SIGNING_IDENTITY="$identity" \
+          CLI_KEYCHAIN_PATH="$case_root/runner/cli-signing.keychain-db" \
           TCFS_RELEASE_DITTO="$gate_tools/ditto" TCFS_RELEASE_CODESIGN="$gate_tools/codesign" \
           TCFS_RELEASE_SPCTL="$gate_tools/spctl" \
           bash --noprofile --norc -e -o pipefail "$gate_root/$kind.sh"
@@ -341,6 +398,16 @@ EOF
         cat "$case_root/stdout" "$case_root/stderr" >&2
         return 1
       fi
+      if [[ "$kind" == daemon && "$mode" != missing-identity && "$mode" != ad-hoc && "$mode" != missing-credential && "$mode" != no-identity && "$mode" != ambiguous-identity ]]; then
+        if ! grep -Fq 'package-daemon' "$case_root/log"; then
+          cat "$case_root/stdout" "$case_root/stderr" >&2
+          echo 'Daemon workflow did not reach the expected owned packager.' >&2
+          return 1
+        fi
+      fi
+      if [[ "$mode" == signature-failed ]]; then
+        assert_contains "$case_root/log" 'signature-verify'
+      fi
       if [[ "$kind" == "import" ]]; then
         if [[ "$mode" == "missing-certificate" ]]; then
           [[ ! -s "$case_root/log" && ! -s "$case_root/github-env" ]]
@@ -353,22 +420,156 @@ EOF
       elif [[ "$kind" == "sign" || "$mode" == "missing-identity" || "$mode" == "ad-hoc" || "$mode" == "missing-credential" ]]; then
         [[ ! -s "$case_root/log" ]]
       elif [[ "$mode" == "accepted" ]]; then
-        if [[ "$kind" == "fileprovider" ]]; then
+        if [[ "$kind" == fileprovider ]]; then
           printf 'signature-verify\narchive\nnotary-submit\nstaple\nstaple-validate\ngatekeeper-assess\n' > "$case_root/expected-log"
-          [[ ! -e "$case_root/runner/TCFSProvider-notarize.zip" ]]
+        elif [[ "$kind" == daemon ]]; then
+          printf 'security-find-identity\npackage-daemon\nsignature-verify\narchive\nnotary-submit\nstaple\nstaple-validate\ngatekeeper-assess\narchive\n' > "$case_root/expected-log"
+          [[ -s "$case_root/work/TCFSDaemon-9.8.7-macos-aarch64.zip" ]]
         else
           printf 'archive\nnotary-submit\n' > "$case_root/expected-log"
           [[ ! -e "$case_root/work/tcfs-9.8.7-macos-aarch64-notarize.zip" ]]
         fi
         cmp "$case_root/expected-log" "$case_root/log"
-      else
+      elif [[ "$mode" == no-identity || "$mode" == ambiguous-identity || "$mode" == packager-failed || "$mode" == signature-failed ]]; then
+        assert_not_contains "$case_root/log" 'notary-submit'
+      elif [[ "$mode" != staple-failed && "$mode" != staple-validation-failed && "$mode" != assessment-failed ]]; then
         assert_contains "$case_root/log" "notary-submit"
         assert_not_contains "$case_root/log" "staple"
         assert_not_contains "$case_root/log" "gatekeeper-assess"
       fi
+      # No failed app/notary/signature/assessment path produces final evidence or daemon ZIP.
+      local evidence
+      case "$kind" in
+        cli) evidence="$case_root/work/tcfs-9.8.7-macos-aarch64.notarization.json" ;;
+        fileprovider) evidence="$case_root/work/build/TCFSProvider-9.8.7-macos-aarch64.notarization.json" ;;
+        daemon) evidence="$case_root/work/TCFSDaemon-9.8.7-macos-aarch64.notarization.json" ;;
+        *) evidence="" ;;
+      esac
+      if [[ -n "$evidence" ]]; then
+        if [[ "$mode" == accepted ]]; then
+          python3 - "$evidence" <<'PY'
+import json, pathlib, sys
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+assert len(raw) <= 65536
+assert json.loads(raw) == {'status': 'Accepted', 'id': '11111111-2222-4333-8444-555555555555'}
+PY
+        else
+          [[ ! -e "$evidence" ]]
+          [[ "$kind" != daemon || ! -e "$case_root/work/TCFSDaemon-9.8.7-macos-aarch64.zip" ]]
+        fi
+      fi
     done
   done
   printf 'release Apple failure-path execution cases: %s passed\n' "$cases"
+}
+
+check_release_evidence_publication() {
+  local gate_root="${TMPDIR}/release-evidence-publication"
+  mkdir -p "$gate_root"
+  extract_step "create-release" "Flatten artifacts and generate checksums" "$gate_root/publish.sh"
+  ruby -e '
+    path = ARGV.fetch(0)
+    text = File.read(path).gsub("${{ needs.plan.outputs.version }}", "__TCFS_FIXTURE_VERSION__")
+    raise "unrendered GitHub expression" if text.include?("${{")
+    File.write(path, text)
+  ' "$gate_root/publish.sh"
+  # Execute the actual publication gate with owned archives and exact raw Apple JSON.
+  # No signing, notary service, network, package installer or live executable is used.
+  python3 - "$gate_root" <<'PY'
+import hashlib, json, os, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+pairs = [(f'{kind}-9.8.7-{platform}', suffix)
+         for platform in ('macos-aarch64', 'macos-x86_64')
+         for kind, suffix in [('tcfs', '.tar.gz'), ('TCFSDaemon', '.zip')]]
+pairs.append(('TCFSProvider-9.8.7-macos-aarch64', '.zip'))
+evidence_bytes = b'{"status":"Accepted","id":"11111111-2222-4333-8444-555555555555"}\n'
+names = [stem + suffix for stem, suffix in pairs] + [stem + '.notarization.json' for stem, _ in pairs]
+cases = ['accepted', 'prerelease', 'prerelease-wrong-evidence-pair', 'prerelease-missing-daemon', 'invalid-version'] + ['missing-' + name for name in names]
+cases += ['invalid', 'pending', 'malformed', 'oversized', 'wrong-shape', 'missing-id', 'invalid-id',
+          'empty-archive', 'duplicate', 'unexpected-evidence', 'symlink']
+for index, mode in enumerate(cases):
+    version = '9.8.7-rc.1' if mode.startswith('prerelease') else ('9.8' if mode == 'invalid-version' else '9.8.7')
+    pairs = [(f'{kind}-{version}-{platform}', suffix)
+             for platform in ('macos-aarch64', 'macos-x86_64')
+             for kind, suffix in [('tcfs', '.tar.gz'), ('TCFSDaemon', '.zip')]]
+    pairs.append((f'TCFSProvider-{version}-macos-aarch64', '.zip'))
+    names = [stem + suffix for stem, suffix in pairs] + [stem + '.notarization.json' for stem, _ in pairs]
+    case = root / str(index)
+    source = case / 'dist' / 'owned'
+    source.mkdir(parents=True)
+    for stem, suffix in pairs:
+        (source / (stem + suffix)).write_bytes(b'owned final artifact ' + stem.encode())
+        (source / (stem + '.notarization.json')).write_bytes(evidence_bytes)
+    selected = source / (pairs[0][0] + '.notarization.json')
+    if mode == 'prerelease-wrong-evidence-pair':
+        selected.rename(source / selected.name.replace('-rc.1', ''))
+    elif mode == 'prerelease-missing-daemon':
+        (source / (pairs[1][0] + '.zip')).unlink()
+    if mode.startswith('missing-') and mode != 'missing-id':
+        (source / mode.removeprefix('missing-')).unlink()
+    elif mode == 'invalid': selected.write_text('{"status":"Invalid"}')
+    elif mode == 'pending': selected.write_text('{"status":"In Progress"}')
+    elif mode == 'malformed': selected.write_text('not JSON')
+    elif mode == 'oversized': selected.write_bytes(b' ' * 65537 + evidence_bytes)
+    elif mode == 'wrong-shape': selected.write_text('[{"status":"Accepted"}]')
+    elif mode == 'missing-id': selected.write_text('{"status":"Accepted"}')
+    elif mode == 'invalid-id': selected.write_text('{"status":"Accepted","id":"invalid"}')
+    elif mode == 'empty-archive': (source / names[0]).write_bytes(b'')
+    elif mode == 'duplicate':
+        other = case / 'dist' / 'duplicate'
+        other.mkdir()
+        (other / names[0]).write_bytes(b'conflicting duplicate')
+    elif mode == 'unexpected-evidence': (source / 'unexpected.notarization.json').write_bytes(evidence_bytes)
+    elif mode == 'symlink':
+        selected.unlink()
+        selected.symlink_to(source / (pairs[1][0] + '.notarization.json'))
+    template = (root / 'publish.sh').read_text()
+    assert template.count('__TCFS_FIXTURE_VERSION__') == 1
+    (case / 'publish.sh').write_text(template.replace('__TCFS_FIXTURE_VERSION__', version))
+    result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', str(case / 'publish.sh')],
+                            cwd=case, env={'PATH': os.environ['PATH']}, capture_output=True, timeout=10)
+    (case / 'stdout').write_bytes(result.stdout)
+    (case / 'stderr').write_bytes(result.stderr)
+    if mode in ('accepted', 'prerelease'):
+        assert result.returncode == 0, (mode, result.stderr.decode())
+        published = case / 'release'
+        assert {p.name for p in published.iterdir()} == set(names) | {'SHA256SUMS.txt'}
+        checksums = {}
+        for line in (published / 'SHA256SUMS.txt').read_text().splitlines():
+            digest, name = line.split('  ', 1)
+            checksums[name] = digest
+        assert set(checksums) == set(names)
+        for name in names:
+            raw = (published / name).read_bytes()
+            assert raw == (source / name).read_bytes(), name
+            assert checksums[name] == hashlib.sha256(raw).hexdigest(), name
+    else:
+        assert result.returncode != 0, mode
+        assert not (case / 'release').exists(), mode
+print('release evidence publication/refusal cases:', len(cases), 'passed')
+PY
+  ruby -ryaml -e '
+    jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+    binaries = jobs.fetch("build-binaries").fetch("steps")
+    daemon = binaries.find { |step| step["name"] == "Package and notarize daemon app (macOS)" }
+    raise "daemon must retain existing Darwin signing condition" unless daemon.fetch("if") == "matrix.sign"
+    raise "daemon must call8arg packager" unless daemon.fetch("run").include?("bash swift/daemon/build.sh")
+    raise "daemon identity cannot be replaced by automatic selection" unless daemon.fetch("run").include?("name == sys.argv[2]")
+    upload = binaries.find { |step| step["name"] == "Upload artifacts" }.fetch("with")
+    raise "CLI/daemon evidence missing from artifact upload" unless upload.fetch("path").include?("*.notarization.json")
+    provider = jobs.fetch("build-fileprovider").fetch("steps").find { |step| step["name"] == "Upload artifact" }.fetch("with")
+    raise "FileProvider evidence missing from artifact upload" unless provider.fetch("path").include?("*.notarization.json")
+    release = jobs.fetch("create-release")
+    raise "publication must require successful producer jobs" unless release.fetch("if").include?("success()")
+    steps = release.fetch("steps")
+    flat = steps.index { |step| step["name"] == "Flatten artifacts and generate checksums" }
+    sign = steps.index { |step| step["name"] == "Sign checksums with Cosign (keyless)" }
+    publish = steps.index { |step| step["name"] == "Create release" }
+    raise "validation must precede Cosign and publication" unless flat < sign && sign < publish
+    run = steps.fetch(sign).fetch("run")
+    raise "existing signed checksum format changed" unless run.include?("--output-signature SHA256SUMS.txt.sig") && run.include?("--output-certificate SHA256SUMS.txt.pem")
+    raise "publication must include evidence/checksums" unless steps.fetch(publish).fetch("with").fetch("files") == "release/*"
+  ' "$WORKFLOW"
 }
 
 check_daemon_packaging_contract() {
@@ -445,10 +646,12 @@ modes = (
     'empty-input', 'existing-output', 'symlink-output', 'wrong-template-id',
     'wrong-template-version', 'sign-failed', 'verify-failed', 'display-failed',
     'wrong-identifier', 'wrong-team', 'adhoc-result', 'no-runtime',
-    'no-timestamp', 'duplicate-timestamp',
+    'no-timestamp', 'duplicate-timestamp', 'prerelease-rc', 'prerelease-beta',
+    'bad-version-components', 'bad-version-empty-prerelease', 'bad-version-separator', 'bad-version-metadata',
 )
 late = {'sign-failed', 'verify-failed', 'display-failed', 'wrong-identifier',
         'wrong-team', 'adhoc-result', 'no-runtime', 'no-timestamp', 'duplicate-timestamp'}
+success_modes = {'success', 'prerelease-rc', 'prerelease-beta'}
 for mode in modes:
     case = root / mode
     case.mkdir()
@@ -472,6 +675,11 @@ for mode in modes:
         values[6] = 'HEAD' if mode == 'bad-source' else '0' * 40
     elif mode == 'bad-version':
         values[7] = '9.8.7;false'
+    elif mode in ('prerelease-rc', 'prerelease-beta'):
+        values[7] = {'prerelease-rc': '9.8.7-rc1', 'prerelease-beta': '9.8.7-beta.2'}[mode]
+    elif mode.startswith('bad-version-'):
+        values[7] = {'bad-version-components': '9.8', 'bad-version-empty-prerelease': '9.8.7-',
+                     'bad-version-separator': '9.8.7-rc/1', 'bad-version-metadata': '9.8.7+build'}[mode]
     elif mode == 'missing-keychain':
         values[4] = str(case / 'missing.keychain-db')
     elif mode == 'symlink-keychain':
@@ -504,12 +712,12 @@ for mode in modes:
                             env=environment, capture_output=True, timeout=20, check=False)
     (case / 'stdout').write_bytes(result.stdout)
     (case / 'stderr').write_bytes(result.stderr)
-    assert (result.returncode == 0) == (mode == 'success'), (mode, result.returncode, result.stderr)
+    assert (result.returncode == 0) == (mode in success_modes), (mode, result.returncode, result.stderr)
     assert hashlib.sha256(keychain.read_bytes()).hexdigest() == keychain_hash, mode
     if mode != 'empty-input':
         assert binary.read_bytes() == input_bytes, mode
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
-    if mode not in late and mode != 'success':
+    if mode not in late and mode not in success_modes:
         assert not calls, (mode, calls)
         if mode in ('existing-output', 'symlink-output'):
             assert (output / 'marker').read_bytes() == b'preserve\n'
@@ -520,10 +728,11 @@ for mode in modes:
         expected_count = 1 if mode == 'sign-failed' else (2 if mode == 'verify-failed' else 3)
         assert len(calls) == expected_count, (mode, calls)
         assert (output / 'TCFSDaemon.app/Contents/MacOS/tcfsd').read_bytes() == input_bytes
-        assert ('Signed intermediate:' in result.stdout.decode()) == (mode == 'success')
+        assert ('Signed intermediate:' in result.stdout.decode()) == (mode in success_modes)
         info = plistlib.loads((output / 'TCFSDaemon.app/Contents/Info.plist').read_bytes())
         assert info['CFBundleIdentifier'] == 'io.tinyland.tcfsd'
-        assert info['CFBundleVersion'] == info['CFBundleShortVersionString'] == version
+        assert info['CFBundleVersion'] == info['CFBundleShortVersionString'] == values[7].partition('-')[0]
+        assert info['TCFSReleaseVersion'] == values[7]
         assert info['TCFSSourceRevision'] == revision and info['TCFSInputSHA256'] == input_hash
         expected_entitlements = (repo / 'swift/daemon/resources/tcfsd.entitlements').read_bytes().replace(
             b'$(TeamIdentifierPrefix)', (team + '.').encode('ascii'))
@@ -761,6 +970,7 @@ check_postinstall_workflow_artifact_download_uses_api_zip
 check_release_action_token_override
 check_release_gates_and_apple_signing_requirements
 check_release_apple_failure_paths
+check_release_evidence_publication
 check_daemon_packaging_contract
 check_macos_fileprovider_principal_class
 check_testing_mode_is_explicit_opt_in

@@ -36,7 +36,7 @@ CODESIGN="${TCFS_DAEMON_CODESIGN:-/usr/bin/codesign}"
 [[ "$SOURCE_REVISION" =~ ^[a-f0-9]{40}$ && "$SOURCE_REVISION" != 0000000000000000000000000000000000000000 ]] || {
   printf '%s\n' 'An explicit nonzero source revision is required.' >&2; exit 2;
 }
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf '%s\n' 'Version must have three numeric components.' >&2; exit 2; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]] || { printf '%s\n' 'Version must match the release numeric version with an optional prerelease suffix.' >&2; exit 2; }
 [[ "$KEYCHAIN_PATH" == /* && -f "$KEYCHAIN_PATH" && ! -L "$KEYCHAIN_PATH" && -r "$KEYCHAIN_PATH" ]] || {
   printf '%s\n' 'An existing readable regular keychain path is required.' >&2; exit 2;
 }
@@ -64,7 +64,10 @@ if (info.get("CFBundleIdentifier") != "io.tinyland.tcfsd"
         or info.get("CFBundleVersion") != "$(TCFSVersion)"
         or info.get("CFBundleShortVersionString") != "$(TCFSVersion)"):
     raise SystemExit("Unexpected daemon identity or version template")
-info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
+# Apple bundle version fields stay numeric; the signed release label preserves
+# the caller's full prerelease version used by archive and evidence filenames.
+info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version.partition("-")[0]
+info["TCFSReleaseVersion"] = version
 # These signed fields retain the caller's provenance declaration. They do not
 # replace an independently qualified source-to-binary build receipt.
 info["TCFSSourceRevision"] = revision
