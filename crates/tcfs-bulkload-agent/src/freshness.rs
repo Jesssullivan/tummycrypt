@@ -41,6 +41,19 @@ pub struct StatIdentity {
 }
 
 impl StatIdentity {
+    /// Identity of an already opened file; does not resolve its path again.
+    #[must_use]
+    pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            size: meta.size(),
+            mtime_ns: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+            ctime_ns: i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+        }
+    }
+
     /// Read the identity a row asserts.
     #[must_use]
     pub const fn from_row(row: &RowSchema) -> Self {
@@ -67,8 +80,8 @@ pub enum Freshness {
 ///
 /// Implementations must be cheap enough to consult once per seat on a walk of
 /// millions of files, and must never panic: a cache that cannot answer refuses
-/// with a [`BulkloadRefusal`] and the walker treats the seat as
-/// [`Freshness::Stale`].
+/// with a [`BulkloadRefusal`]. A failed store is surfaced rather than silently
+/// turning every previously completed read into a cold read.
 pub trait FreshnessCache {
     /// Ask whether `identity` has been seen before.
     ///
@@ -83,6 +96,23 @@ pub trait FreshnessCache {
     ///
     /// Refuses if the backing store cannot be written.
     fn record(&mut self, identity: &StatIdentity) -> Result<()>;
+
+    /// Return a digest only after a successful read of this exact identity.
+    /// Stat-only observations must never satisfy this lookup.
+    ///
+    /// # Errors
+    /// Refuses if the backing store cannot be read.
+    fn digest(&self, _identity: &StatIdentity) -> Result<Option<[u8; 32]>> {
+        Ok(None)
+    }
+
+    /// Atomically remember a completed, identity-checked content read.
+    ///
+    /// # Errors
+    /// Refuses if the backing store cannot persist the completion.
+    fn record_digest(&mut self, identity: &StatIdentity, _digest: &[u8; 32]) -> Result<()> {
+        self.record(identity)
+    }
 }
 
 /// A cache that remembers nothing: every seat is [`Freshness::Stale`].
@@ -106,6 +136,7 @@ impl FreshnessCache for NullCache {
 #[derive(Debug, Default, Clone)]
 pub struct MemoryCache {
     seen: HashMap<(u64, u64), StatIdentity>,
+    digests: HashMap<(u64, u64), (StatIdentity, [u8; 32])>,
 }
 
 impl MemoryCache {
@@ -129,6 +160,20 @@ impl MemoryCache {
 }
 
 impl FreshnessCache for MemoryCache {
+    fn digest(&self, identity: &StatIdentity) -> Result<Option<[u8; 32]>> {
+        Ok(self
+            .digests
+            .get(&(identity.dev, identity.ino))
+            .filter(|(previous, _)| previous == identity)
+            .map(|(_, digest)| *digest))
+    }
+
+    fn record_digest(&mut self, identity: &StatIdentity, digest: &[u8; 32]) -> Result<()> {
+        self.digests
+            .insert((identity.dev, identity.ino), (*identity, *digest));
+        self.record(identity)
+    }
+
     fn lookup(&self, identity: &StatIdentity) -> Result<Freshness> {
         match self.seen.get(&(identity.dev, identity.ino)) {
             Some(prev) if prev == identity => Ok(Freshness::Fresh),
@@ -164,6 +209,10 @@ impl SqliteCache {
             mtime_ns  INTEGER NOT NULL,
             ctime_ns  INTEGER NOT NULL,
             PRIMARY KEY (dev, ino)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS hash_completion (
+            identity BLOB PRIMARY KEY NOT NULL,
+            digest BLOB NOT NULL CHECK(length(digest) = 32)
         ) WITHOUT ROWID";
 
     /// Open an ephemeral in-memory cache.
@@ -172,8 +221,7 @@ impl SqliteCache {
     ///
     /// Refuses if `SQLite` declines to open or to create the schema.
     pub fn open_in_memory() -> Result<Self> {
-        let conn =
-            rusqlite::Connection::open_in_memory().map_err(|_| BulkloadRefusal::Io(None))?;
+        let conn = rusqlite::Connection::open_in_memory().map_err(|_| BulkloadRefusal::Io(None))?;
         Self::from_connection(conn)
     }
 
@@ -201,6 +249,51 @@ impl SqliteCache {
 }
 
 impl FreshnessCache for SqliteCache {
+    fn digest(&self, identity: &StatIdentity) -> Result<Option<[u8; 32]>> {
+        use rusqlite::OptionalExtension as _;
+        let key = postcard::to_allocvec(&(
+            identity.dev,
+            identity.ino,
+            identity.size,
+            identity.mtime_ns,
+            identity.ctime_ns,
+        ))?;
+        let bytes: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT digest FROM hash_completion WHERE identity = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| BulkloadRefusal::SqliteIntegrityCheckFailed)?;
+        bytes
+            .map(|value| {
+                value
+                    .try_into()
+                    .map_err(|_| BulkloadRefusal::SqliteUnsupportedValue)
+            })
+            .transpose()
+    }
+
+    fn record_digest(&mut self, identity: &StatIdentity, digest: &[u8; 32]) -> Result<()> {
+        let key = postcard::to_allocvec(&(
+            identity.dev,
+            identity.ino,
+            identity.size,
+            identity.mtime_ns,
+            identity.ctime_ns,
+        ))?;
+        self.conn
+            .execute(
+                "INSERT INTO hash_completion(identity, digest) VALUES (?1, ?2)
+             ON CONFLICT(identity) DO UPDATE SET digest = excluded.digest",
+                (key, digest.as_slice()),
+            )
+            .map_err(|_| BulkloadRefusal::SqliteIntegrityCheckFailed)?;
+        Ok(())
+    }
+
     fn lookup(&self, identity: &StatIdentity) -> Result<Freshness> {
         let dev = Self::narrow(i128::from(identity.dev))?;
         let ino = Self::narrow(i128::from(identity.ino))?;
@@ -308,5 +401,42 @@ mod tests {
         cache.record(&touched).unwrap();
         assert_eq!(cache.lookup(&touched).unwrap(), Freshness::Fresh);
         assert_eq!(cache.lookup(&id).unwrap(), Freshness::Stale);
+    }
+
+    #[test]
+    fn stat_observation_is_not_a_completed_content_read() {
+        let mut cache = SqliteCache::open_in_memory().unwrap();
+        let id = identity();
+        cache.record(&id).unwrap();
+        assert_eq!(cache.digest(&id).unwrap(), None);
+        cache.record_digest(&id, &[7; 32]).unwrap();
+        assert_eq!(cache.digest(&id).unwrap(), Some([7; 32]));
+        let changed = StatIdentity {
+            ctime_ns: id.ctime_ns + 1,
+            ..id
+        };
+        assert_eq!(cache.digest(&changed).unwrap(), None);
+    }
+
+    #[test]
+    fn sqlite_completion_survives_reopen_with_full_width_identity() {
+        let path = std::env::temp_dir().join(format!(
+            "tcfs-bulkload-completion-{}.sqlite",
+            std::process::id()
+        ));
+        let id = StatIdentity {
+            ino: u64::MAX,
+            mtime_ns: i128::MAX,
+            ..identity()
+        };
+        {
+            let mut cache = SqliteCache::open(&path).unwrap();
+            cache.record_digest(&id, &[9; 32]).unwrap();
+        }
+        {
+            let cache = SqliteCache::open(&path).unwrap();
+            assert_eq!(cache.digest(&id).unwrap(), Some([9; 32]));
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

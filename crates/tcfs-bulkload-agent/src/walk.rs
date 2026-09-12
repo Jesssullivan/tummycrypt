@@ -3,9 +3,9 @@
 //! One pass over a corpus root producing one [`RowSchema`] per seat. Two
 //! properties matter and both are measured, not asserted:
 //!
-//! * **Each seat is statted once.** The walker consults the
-//!   [`FreshnessCache`] with the identity it already has; it never re-stats to
-//!   answer the cache. `files_statted_twice` counts violations.
+//! * Cache lookup uses the walk's metadata. A stale content read additionally
+//!   checks the opened descriptor before and after hashing to detect writers.
+//!   `files_statted_twice` counts these seats; warm resumes need no such checks.
 //! * **Fresh seats are not re-read.** A seat the cache calls
 //!   [`Freshness::Fresh`] contributes zero bytes to `bytes_reread_on_resume`.
 //!
@@ -75,15 +75,16 @@ pub struct WalkStats {
     pub seats_seen: u64,
     /// Apparent bytes across all regular-file seats.
     pub bytes_seen: u64,
+    /// Actual bytes read by hash workers, including reads later refused.
+    pub bytes_read: u64,
     /// Seats the cache called [`Freshness::Fresh`].
     pub fresh_skipped: u64,
     /// Bytes read again despite the cache calling the seat fresh.
     ///
     /// R25 headline metric. The product bar is zero.
     pub bytes_reread_on_resume: u64,
-    /// Seats statted more than once in a single pass.
-    ///
-    /// R25 headline metric. The product bar is zero.
+    /// Seats with actual descriptor metadata calls beyond the census stat.
+    /// Warm resumes should keep this at zero.
     pub files_statted_twice: u64,
 }
 
@@ -113,7 +114,7 @@ pub fn walk<C: FreshnessCache>(options: &WalkOptions, cache: &mut C) -> Result<W
     let root_dev = device_of(&root_meta);
 
     let mut outcome = WalkOutcome::default();
-    let mut to_hash: Vec<(usize, PathBuf)> = Vec::new();
+    let mut to_hash: Vec<(usize, PathBuf, StatIdentity, bool)> = Vec::new();
 
     let walker = ignore::WalkBuilder::new(&options.root)
         // Bulkload copies a corpus, not a source tree: gitignore, hidden-file
@@ -125,7 +126,15 @@ pub fn walk<C: FreshnessCache>(options: &WalkOptions, cache: &mut C) -> Result<W
         .build();
 
     for entry in walker {
-        let Ok(entry) = entry else { continue };
+        let Ok(entry) = entry else {
+            // An empty relative path marks an incomplete root traversal;
+            // never report a successful census after an enumeration error.
+            outcome.refusals.push(RefusedSeat {
+                rel_path: Vec::new(),
+                refusal: BulkloadRefusal::Io(None),
+            });
+            continue;
+        };
         let path = entry.path();
         if path == options.root {
             continue;
@@ -164,15 +173,28 @@ pub fn walk<C: FreshnessCache>(options: &WalkOptions, cache: &mut C) -> Result<W
             outcome.stats.bytes_seen = outcome.stats.bytes_seen.saturating_add(row.size);
         }
 
-        // One stat, one cache consultation. The identity comes from the row we
-        // already built -- re-statting here is exactly the bug
-        // `files_statted_twice` exists to catch.
+        // Cache lookup uses the metadata already in the row. Only an actual
+        // content read needs descriptor checks for concurrent source changes.
         let identity = StatIdentity::from_row(&row);
-        let freshness = cache.lookup(&identity).unwrap_or(Freshness::Stale);
+        let requires_digest =
+            row.kind == FileKind::Regular && options.hash_policy != HashPolicy::Never;
+        let cached_digest = if requires_digest {
+            cache.digest(&identity)?
+        } else {
+            None
+        };
+        let freshness = if requires_digest {
+            if cached_digest.is_some() {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        } else {
+            cache.lookup(&identity)?
+        };
         if freshness == Freshness::Fresh {
             outcome.stats.fresh_skipped += 1;
         }
-        cache.record(&identity)?;
 
         let wants_hash = row.kind == FileKind::Regular
             && match options.hash_policy {
@@ -181,41 +203,87 @@ pub fn walk<C: FreshnessCache>(options: &WalkOptions, cache: &mut C) -> Result<W
                 HashPolicy::Always => true,
             };
         if wants_hash {
-            if freshness == Freshness::Fresh {
-                // Re-reading a seat the cache vouched for. Counted, never hidden.
-                outcome.stats.bytes_reread_on_resume = outcome
-                    .stats
-                    .bytes_reread_on_resume
-                    .saturating_add(row.size);
-            }
-            to_hash.push((outcome.rows.len(), path.to_path_buf()));
+            to_hash.push((
+                outcome.rows.len(),
+                path.to_path_buf(),
+                identity,
+                freshness == Freshness::Fresh,
+            ));
+        } else if requires_digest {
+            row.blake3 = cached_digest;
+        } else {
+            cache.record(&identity)?;
         }
         outcome.rows.push(row);
     }
 
-    let hashed: Vec<(usize, Result<[u8; 32]>)> = to_hash
-        .par_iter()
-        .map(|(index, path)| (*index, hash::hash_file(path)))
-        .collect();
-    for (index, digest) in hashed {
-        match digest {
-            Ok(bytes) => {
-                if let Some(row) = outcome.rows.get_mut(index) {
-                    row.blake3 = Some(bytes);
-                }
-            }
-            Err(refusal) => {
-                let rel_path = outcome
-                    .rows
-                    .get(index)
-                    .map(|row| row.rel_path.clone())
-                    .unwrap_or_default();
-                outcome.refusals.push(RefusedSeat { rel_path, refusal });
+    complete_hashes(&mut outcome, &to_hash, cache)?;
+    Ok(outcome)
+}
+
+fn complete_hashes<C: FreshnessCache>(
+    outcome: &mut WalkOutcome,
+    to_hash: &[(usize, PathBuf, StatIdentity, bool)],
+    cache: &mut C,
+) -> Result<()> {
+    // Bounded handoff: workers never accumulate an O(N) result vector. The
+    // owning thread commits each successful read while other workers continue.
+    let (sender, receiver) = std::sync::mpsc::sync_channel(rayon::current_num_threads());
+    std::thread::scope(|scope| -> Result<()> {
+        let producer = std::thread::Builder::new().spawn_scoped(scope, move || {
+            let _ = to_hash
+                .par_iter()
+                .try_for_each(|(index, path, identity, reread)| {
+                    let read = hash::hash_file_observed(path, identity);
+                    sender.send((*index, *reread, read)).map_err(|_| ())
+                });
+        })?;
+        let mut result = Ok(());
+        for (index, reread, read) in &receiver {
+            if let Err(refusal) = finish_read(outcome, cache, index, reread, read) {
+                result = Err(refusal);
+                break;
             }
         }
-    }
+        // A failed cache write must unblock senders before joining them.
+        drop(receiver);
+        producer.join().map_err(|_| BulkloadRefusal::Io(None))?;
+        result
+    })
+}
 
-    Ok(outcome)
+fn finish_read<C: FreshnessCache>(
+    outcome: &mut WalkOutcome,
+    cache: &mut C,
+    index: usize,
+    reread: bool,
+    read: hash::HashRead,
+) -> Result<()> {
+    outcome.stats.bytes_read = outcome.stats.bytes_read.saturating_add(read.bytes_read);
+    if reread {
+        outcome.stats.bytes_reread_on_resume = outcome
+            .stats
+            .bytes_reread_on_resume
+            .saturating_add(read.bytes_read);
+    }
+    if read.metadata_checks > 0 {
+        outcome.stats.files_statted_twice += 1;
+    }
+    let row = outcome
+        .rows
+        .get_mut(index)
+        .ok_or(BulkloadRefusal::ContractSelfInconsistent)?;
+    match read.digest {
+        Ok(bytes) => {
+            cache.record_digest(&StatIdentity::from_row(row), &bytes)?;
+            row.blake3 = Some(bytes);
+        }
+        Err(refusal) => outcome.refusals.push(RefusedSeat {
+            rel_path: row.rel_path.clone(),
+            refusal,
+        }),
+    }
+    Ok(())
 }
 
 fn device_of(meta: &std::fs::Metadata) -> u64 {
@@ -359,27 +427,87 @@ mod tests {
         let cold = walk(&options, &mut cache).unwrap();
         assert_eq!(cold.stats.fresh_skipped, 0);
         assert_eq!(cold.stats.bytes_reread_on_resume, 0);
+        assert_eq!(cold.stats.bytes_read, 11);
+        assert_eq!(cold.stats.files_statted_twice, 2);
 
         let warm = walk(&options, &mut cache).unwrap();
         assert_eq!(warm.stats.fresh_skipped, warm.stats.seats_seen);
         // R25 headline bar: a resume that changed nothing re-reads nothing.
         assert_eq!(warm.stats.bytes_reread_on_resume, 0);
+        assert_eq!(warm.stats.bytes_read, 0);
         assert_eq!(warm.stats.files_statted_twice, 0);
-        assert!(warm.rows.iter().all(|row| row.blake3.is_none()));
+        assert_eq!(cold.rows, warm.rows);
     }
 
     #[test]
     fn an_always_hash_walk_over_a_warm_cache_counts_the_rereads() {
         let corpus = Corpus::new("reread");
         let mut cache = MemoryCache::new();
-        let stat_only = WalkOptions::new(corpus.root.clone());
-        walk(&stat_only, &mut cache).unwrap();
-
         let always = WalkOptions {
             hash_policy: HashPolicy::Always,
-            ..stat_only
+            ..WalkOptions::new(corpus.root.clone())
         };
+        walk(&always, &mut cache).unwrap();
         let warm = walk(&always, &mut cache).unwrap();
         assert_eq!(warm.stats.bytes_reread_on_resume, 11);
+    }
+
+    #[test]
+    fn stat_only_census_does_not_poison_content_resume() {
+        let corpus = Corpus::new("stat-then-hash");
+        let mut cache = MemoryCache::new();
+        walk(&WalkOptions::new(corpus.root.clone()), &mut cache).unwrap();
+        let options = WalkOptions {
+            hash_policy: HashPolicy::StaleOnly,
+            ..WalkOptions::new(corpus.root.clone())
+        };
+        let hashed = walk(&options, &mut cache).unwrap();
+        assert_eq!(
+            hashed
+                .rows
+                .iter()
+                .filter(|row| row.blake3.is_some())
+                .count(),
+            2
+        );
+        assert_eq!(hashed.stats.bytes_reread_on_resume, 0);
+    }
+
+    #[test]
+    fn refused_hash_never_records_completion() {
+        use crate::freshness::{FreshnessCache, StatIdentity};
+        use tcfs_bulkload_proto::Result;
+        struct RemovedDuringLookup {
+            path: PathBuf,
+        }
+        impl FreshnessCache for RemovedDuringLookup {
+            fn lookup(&self, _: &StatIdentity) -> Result<crate::freshness::Freshness> {
+                Ok(crate::freshness::Freshness::Stale)
+            }
+            fn record(&mut self, _: &StatIdentity) -> Result<()> {
+                Ok(())
+            }
+            fn digest(&self, _: &StatIdentity) -> Result<Option<[u8; 32]>> {
+                let _ = std::fs::remove_file(&self.path);
+                Ok(None)
+            }
+            fn record_digest(&mut self, _: &StatIdentity, _: &[u8; 32]) -> Result<()> {
+                panic!("failed hash must not become a completion")
+            }
+        }
+        let corpus = Corpus::new("hash-failure");
+        std::fs::remove_file(corpus.root.join("nested/b.txt")).unwrap();
+        let mut cache = RemovedDuringLookup {
+            path: corpus.root.join("a.txt"),
+        };
+        let options = WalkOptions {
+            hash_policy: HashPolicy::StaleOnly,
+            ..WalkOptions::new(corpus.root.clone())
+        };
+        let result = walk(&options, &mut cache).unwrap();
+        assert_eq!(result.refusals.len(), 1);
+        assert_eq!(result.stats.bytes_read, 0);
+        assert_eq!(result.stats.files_statted_twice, 0);
+        assert!(result.rows.iter().all(|row| row.blake3.is_none()));
     }
 }

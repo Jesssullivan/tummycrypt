@@ -16,6 +16,7 @@
 
 pub mod freshness;
 pub mod hash;
+pub mod provider_sqlite;
 pub mod walk;
 
 pub use tcfs_bulkload_proto::{BulkloadRefusal, Frame, FrameKind, Result, RowSchema};

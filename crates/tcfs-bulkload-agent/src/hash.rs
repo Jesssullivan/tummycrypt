@@ -14,6 +14,8 @@ use std::path::Path;
 
 use tcfs_bulkload_proto::{BulkloadRefusal, Result};
 
+use crate::freshness::StatIdentity;
+
 /// Read buffer size. Large enough to keep blake3's SIMD lanes busy without
 /// putting a megabyte per rayon worker on the stack.
 const READ_CHUNK_BYTES: usize = 256 * 1024;
@@ -33,12 +35,17 @@ pub const CDC_MAX_BYTES: u32 = 256 * 1024;
 /// interior NUL, and [`BulkloadRefusal::Io`] carrying the errno otherwise. A
 /// path that became a symlink between `lstat` and open surfaces as `ELOOP`.
 pub fn open_nofollow(path: &Path) -> Result<File> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| BulkloadRefusal::PathNotPortable)?;
+    let c_path =
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| BulkloadRefusal::PathNotPortable)?;
     // SAFETY: `c_path` is a valid NUL-terminated C string that outlives the
     // call, and the flag set contains no mode-bearing flag (no O_CREAT), so
     // the two-argument form of `open` is correct.
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
     if fd < 0 {
         return Err(BulkloadRefusal::from(std::io::Error::last_os_error()));
     }
@@ -53,7 +60,51 @@ pub fn open_nofollow(path: &Path) -> Result<File> {
 /// Refuses if the file cannot be opened without following a symlink, or if a
 /// read fails partway through.
 pub fn hash_file(path: &Path) -> Result<[u8; 32]> {
-    let mut file = open_nofollow(path)?;
+    let file = open_nofollow(path)?;
+    let identity = StatIdentity::from_metadata(&file.metadata()?);
+    hash_open_file(file, &identity, &mut 0, &mut 0)
+}
+
+/// Hash only the regular file identified by the walk, checking the opened
+/// descriptor before and after reading. A concurrent writer leaves no completion.
+///
+/// # Errors
+/// Refuses on I/O failure, a non-regular replacement, or changed identity.
+pub fn hash_file_checked(path: &Path, expected: &StatIdentity) -> Result<[u8; 32]> {
+    hash_file_observed(path, expected).digest
+}
+
+/// Read accounting survives refusals, including a writer changing the file
+/// after some bytes have already been read.
+pub(crate) struct HashRead {
+    pub digest: Result<[u8; 32]>,
+    pub bytes_read: u64,
+    pub metadata_checks: u64,
+}
+
+pub(crate) fn hash_file_observed(path: &Path, expected: &StatIdentity) -> HashRead {
+    let mut bytes_read = 0;
+    let mut metadata_checks = 0;
+    let digest = open_nofollow(path)
+        .and_then(|file| hash_open_file(file, expected, &mut bytes_read, &mut metadata_checks));
+    HashRead {
+        digest,
+        bytes_read,
+        metadata_checks,
+    }
+}
+
+fn hash_open_file(
+    mut file: File,
+    expected: &StatIdentity,
+    bytes_read: &mut u64,
+    metadata_checks: &mut u64,
+) -> Result<[u8; 32]> {
+    *metadata_checks += 1;
+    let before = file.metadata()?;
+    if !before.is_file() || StatIdentity::from_metadata(&before) != *expected {
+        return Err(BulkloadRefusal::SourceChangedAfterSnapshot);
+    }
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0_u8; READ_CHUNK_BYTES];
     loop {
@@ -61,8 +112,13 @@ pub fn hash_file(path: &Path) -> Result<[u8; 32]> {
         if read == 0 {
             break;
         }
+        *bytes_read = bytes_read.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         let filled = buf.get(..read).ok_or(BulkloadRefusal::Io(None))?;
         hasher.update(filled);
+    }
+    *metadata_checks += 1;
+    if StatIdentity::from_metadata(&file.metadata()?) != *expected {
+        return Err(BulkloadRefusal::SourceChangedAfterSnapshot);
     }
     Ok(*hasher.finalize().as_bytes())
 }
@@ -99,11 +155,14 @@ mod tests {
 
     use std::io::Write as _;
 
-    use super::{chunk_boundaries, checksum, hash_bytes, hash_file, open_nofollow, CDC_MIN_BYTES};
+    use super::{checksum, chunk_boundaries, hash_bytes, hash_file, open_nofollow, CDC_MIN_BYTES};
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("tcfs-bulkload-agent-test-{}-{name}", std::process::id()));
+        dir.push(format!(
+            "tcfs-bulkload-agent-test-{}-{name}",
+            std::process::id()
+        ));
         dir
     }
 
@@ -154,5 +213,19 @@ mod tests {
     fn checksum_is_stable_and_content_sensitive() {
         assert_eq!(checksum(b"abc"), checksum(b"abc"));
         assert_ne!(checksum(b"abc"), checksum(b"abd"));
+    }
+
+    #[test]
+    fn changed_identity_cannot_produce_a_completion_digest() {
+        let path = scratch("changed");
+        std::fs::write(&path, b"before").unwrap();
+        let identity =
+            crate::freshness::StatIdentity::from_metadata(&std::fs::metadata(&path).unwrap());
+        std::fs::write(&path, b"after and larger").unwrap();
+        assert_eq!(
+            super::hash_file_checked(&path, &identity),
+            Err(tcfs_bulkload_proto::BulkloadRefusal::SourceChangedAfterSnapshot)
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }
