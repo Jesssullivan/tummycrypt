@@ -12,6 +12,7 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use tcfs_bulkload_agent::freshness::NullCache;
 use tcfs_bulkload_agent::transfer;
+use tcfs_bulkload_agent::transfer_store::ChunkTiming;
 use tcfs_bulkload_agent::walk::{walk, HashPolicy, WalkOptions};
 use tcfs_bulkload_proto::{FileKind, RowSchema};
 
@@ -200,6 +201,7 @@ fn run(cli: &Cli) -> io::Result<()> {
                 if rows(&source)? != expected {
                     return Err(io::Error::other("immutable corpus changed before arm"));
                 }
+                let timing_before = ChunkTiming::snapshot();
                 let started = Instant::now();
                 let (transferred, read) = match arm {
                     Arm::Native => {
@@ -227,6 +229,7 @@ fn run(cli: &Cli) -> io::Result<()> {
                     }
                 };
                 let elapsed = started.elapsed();
+                let timing = ChunkTiming::snapshot().since(timing_before);
                 if rows(&source)? != expected || !same_payload(&expected, &rows(&destination)?) {
                     return Err(io::Error::other(
                         "source mutation or destination content/mode mismatch",
@@ -238,6 +241,10 @@ fn run(cli: &Cli) -> io::Result<()> {
                     metric(transferred),
                     metric(read)
                 );
+                if arm == Arm::Native {
+                    println!("chunk_timing rep={rep} phase={phase} scope=process-worker-sums put_calls={} put_ns={} file_syncs={} file_sync_ns={} dir_syncs={} dir_sync_ns={}",
+                        timing.put_calls, timing.put_ns, timing.file_syncs, timing.file_sync_ns, timing.dir_syncs, timing.dir_sync_ns);
+                }
             }
         }
     }

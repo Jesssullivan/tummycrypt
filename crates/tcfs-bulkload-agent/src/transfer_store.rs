@@ -5,6 +5,7 @@ use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,81 @@ use crate::freshness::StatIdentity;
 use crate::{BulkloadRefusal, Result, RowSchema};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+static PUT_CALLS: AtomicU64 = AtomicU64::new(0);
+static PUT_NS: AtomicU64 = AtomicU64::new(0);
+static FILE_SYNCS: AtomicU64 = AtomicU64::new(0);
+static FILE_SYNC_NS: AtomicU64 = AtomicU64::new(0);
+static DIR_SYNCS: AtomicU64 = AtomicU64::new(0);
+static DIR_SYNC_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Process-local chunk persistence instrumentation.
+///
+/// Durations sum worker time,
+/// including failed operations, and must not be interpreted as wall-time shares.
+/// Concurrent independent transfers in the same process also contribute.
+#[derive(Clone, Copy, Debug)]
+pub struct ChunkTiming {
+    /// Calls to `put_chunk`, including already-present content.
+    pub put_calls: u64,
+    /// Aggregate worker nanoseconds inside `put_chunk`.
+    pub put_ns: u64,
+    /// Attempted chunk-file syncs.
+    pub file_syncs: u64,
+    /// Aggregate chunk-file sync worker nanoseconds.
+    pub file_sync_ns: u64,
+    /// Attempted chunk-directory syncs.
+    pub dir_syncs: u64,
+    /// Aggregate chunk-directory sync worker nanoseconds.
+    pub dir_sync_ns: u64,
+}
+
+impl ChunkTiming {
+    /// Snapshot counters without resetting other callers' observations.
+    #[must_use]
+    pub fn snapshot() -> Self {
+        Self {
+            put_calls: PUT_CALLS.load(Ordering::Relaxed),
+            put_ns: PUT_NS.load(Ordering::Relaxed),
+            file_syncs: FILE_SYNCS.load(Ordering::Relaxed),
+            file_sync_ns: FILE_SYNC_NS.load(Ordering::Relaxed),
+            dir_syncs: DIR_SYNCS.load(Ordering::Relaxed),
+            dir_sync_ns: DIR_SYNC_NS.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Difference from a prior snapshot after the observed operation has joined.
+    #[must_use]
+    pub const fn since(self, before: Self) -> Self {
+        Self {
+            put_calls: self.put_calls.saturating_sub(before.put_calls),
+            put_ns: self.put_ns.saturating_sub(before.put_ns),
+            file_syncs: self.file_syncs.saturating_sub(before.file_syncs),
+            file_sync_ns: self.file_sync_ns.saturating_sub(before.file_sync_ns),
+            dir_syncs: self.dir_syncs.saturating_sub(before.dir_syncs),
+            dir_sync_ns: self.dir_sync_ns.saturating_sub(before.dir_sync_ns),
+        }
+    }
+}
+
+struct PutTimer(Instant);
+
+impl Drop for PutTimer {
+    fn drop(&mut self) {
+        PUT_NS.fetch_add(nanos(self.0), Ordering::Relaxed);
+    }
+}
+
+fn nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn timed_sync(file: &fs::File, count: &AtomicU64, time: &AtomicU64) -> std::io::Result<()> {
+    count.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
+    let result = file.sync_all();
+    time.fetch_add(nanos(started), Ordering::Relaxed);
+    result
+}
 
 /// Completed content capture; chunks retain file order, including repetitions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +330,8 @@ impl Store {
     /// # Errors
     /// Refuses a digest mismatch or failed durable publication.
     pub fn put_chunk(&self, digest: &[u8; 32], data: &[u8]) -> Result<()> {
+        PUT_CALLS.fetch_add(1, Ordering::Relaxed);
+        let _timer = PutTimer(Instant::now());
         if data.len() > crate::hash::CDC_MAX_BYTES as usize
             || crate::hash::hash_bytes(data) != *digest
         {
@@ -275,7 +353,7 @@ impl Store {
             .open(&staging)?;
         let result = (|| -> Result<()> {
             file.write_all(data)?;
-            file.sync_all()?;
+            timed_sync(&file, &FILE_SYNCS, &FILE_SYNC_NS)?;
             let target = chunks.join(hex(digest));
             match fs::hard_link(&staging, &target) {
                 Ok(()) => (),
@@ -287,7 +365,7 @@ impl Store {
             Ok(())
         })();
         fs::remove_file(staging)?;
-        fs::File::open(chunks)?.sync_all()?;
+        timed_sync(&fs::File::open(chunks)?, &DIR_SYNCS, &DIR_SYNC_NS)?;
         result
     }
 }
