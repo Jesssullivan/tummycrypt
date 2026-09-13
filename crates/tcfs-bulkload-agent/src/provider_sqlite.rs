@@ -14,6 +14,7 @@ use rusqlite::{Connection, OpenFlags};
 use crate::{BulkloadRefusal, Result};
 
 pub mod hydrate;
+pub mod online;
 
 fn mapped_path(path: &Path, mapping: &PathMapping<'_>) -> std::path::PathBuf {
     if mapping.source_home == Path::new("/Users/jess") {

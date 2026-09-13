@@ -44,6 +44,8 @@ SUBCOMMANDS:
                 Compose Codex state with retained rollout path mapping
     hydrate-state SNAPSHOT SOURCE_HOME DEST_HOME MAX_BYTES JOBS [GZIP ZSTD]
                 Add missing raw rollouts from retained compressed files; never replace
+    apply-state-candidate LIVE BASE CANDIDATE MAX_ROWS
+                Explicit external live-state import; requires operator authorization
     help        Print this message
 
 BOUNDARIES:
@@ -79,6 +81,7 @@ fn main() -> ExitCode {
             &args.collect::<Vec<_>>(),
         ),
         Some("hydrate-state") => hydrate_command(&args.collect::<Vec<_>>()),
+        Some("apply-state-candidate") => apply_state_command(&args.collect::<Vec<_>>()),
         Some("serve") => tcfs_bulkload_agent::transfer::serve(
             &mut std::io::stdin().lock(),
             &mut std::io::stdout().lock(),
@@ -205,6 +208,39 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
         }
         _ => Err(BulkloadRefusal::RequiredFieldMissing),
     }
+}
+
+fn apply_state_command(args: &[std::ffi::OsString]) -> Result<()> {
+    if args.len() != 4 {
+        return Err(BulkloadRefusal::RequiredFieldMissing);
+    }
+    let path = |index: usize| {
+        args.get(index)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let max_rows = args
+        .get(3)
+        .and_then(|value| value.to_str())
+        .ok_or(BulkloadRefusal::FieldDomainViolation)?
+        .parse()
+        .map_err(|_| BulkloadRefusal::FieldDomainViolation)?;
+    tcfs_bulkload_agent::provider_sqlite::online::apply_state_candidate(
+        path(0)?,
+        path(1)?,
+        path(2)?,
+        max_rows,
+        &|receipt| {
+            let mut output = std::io::stdout().lock();
+            writeln!(
+                output,
+                "table={} inserted={} corrected={} conflicts={}",
+                receipt.table, receipt.inserted, receipt.corrected, receipt.conflicts
+            )?;
+            output.flush()?;
+            Ok(())
+        },
+    )
 }
 
 fn hydrate_command(args: &[std::ffi::OsString]) -> Result<()> {
