@@ -10,6 +10,8 @@ use std::process::{Command, Output};
 
 use crate::{BulkloadRefusal, Result};
 
+pub mod shared;
+
 fn git(repo: &Path) -> Command {
     let mut command = Command::new("git");
     for key in [
@@ -517,6 +519,29 @@ fn admin_controls(admin: &Path) -> Result<Vec<(String, Option<Vec<u8>>)>> {
 /// populated submodules (which require their own capture). On refusal the
 /// private capture is retained for diagnosis; source state is never changed.
 pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
+    export_repository_inner(repo, capture, None)
+}
+
+/// Export workspace state without repacking a shared base's commit closure.
+///
+/// The base must be transported and imported before this prerequisite bundle.
+/// Callers must bind both bundles' digests in their durable capture record.
+///
+/// # Errors
+/// Refuses invalid prerequisites or any state refused by standalone capture.
+pub fn export_repository_with_prerequisite(
+    repo: &Path,
+    capture: &Path,
+    base: &Path,
+) -> Result<PathBuf> {
+    export_repository_inner(repo, capture, Some(base))
+}
+
+fn export_repository_inner(
+    repo: &Path,
+    capture: &Path,
+    prerequisite: Option<&Path>,
+) -> Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     let repo = fs::canonicalize(repo)?;
     fs::DirBuilder::new().mode(0o700).create(capture)?;
@@ -577,12 +602,7 @@ pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
         &postcard::to_allocvec(&seats).map_err(|_| BulkloadRefusal::FrameCodec)?,
     )?;
     let bundle = capture.join("capture.bundle");
-    output(
-        git(&private)
-            .args(["bundle", "create"])
-            .arg(&bundle)
-            .arg("--all"),
-    )?;
+    shared::write_bundle(&private, &bundle, prerequisite)?;
     output(git(&private).args(["bundle", "verify"]).arg(&bundle))?;
     Ok(bundle)
 }
@@ -849,6 +869,330 @@ pub fn import_bundle(repo: &Path, bundle: &Path, source: &str) -> Result<usize> 
     Ok(names.len())
 }
 
+fn capture_revision(heads: &str, suffix: &str) -> Result<String> {
+    heads
+        .lines()
+        .find_map(|line| {
+            line.split_once(' ')
+                .filter(|(_, name)| *name == format!("refs/carry-export/{suffix}"))
+        })
+        .map(|(value, _)| value.to_owned())
+        .filter(|value| oid(value))
+        .ok_or(BulkloadRefusal::GitInventoryMalformed)
+}
+
+fn payload_shape_equal(a: &[crate::RowSchema], b: &[crate::RowSchema]) -> bool {
+    use tcfs_bulkload_proto::FileKind;
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.rel_path == b.rel_path
+                && a.kind == b.kind
+                && a.link_target == b.link_target
+                && (a.kind != FileKind::Regular || a.size == b.size)
+                && (a.kind == FileKind::Symlink || a.mode & 0o777 == b.mode & 0o777)
+        })
+}
+
+fn sync_private_tree(root: &Path) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_private_tree(&entry.path())?;
+        } else if entry.file_type()?.is_file() {
+            fs::File::open(entry.path())?.sync_all()?;
+        } else {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
+    }
+    fs::File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+fn prepare_attachment(
+    bundle: &Path,
+    destination: &Path,
+    source: &str,
+    receipt: &Path,
+) -> Result<(PathBuf, String)> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(receipt)?;
+    // Retain the actual input, not merely a pathname that may later disappear.
+    let retained = receipt.join("capture.bundle");
+    fs::copy(bundle, &retained)?;
+    let heads = text(git(receipt).args(["bundle", "list-heads"]).arg(&retained))?;
+    let head = capture_revision(&heads, "head")?;
+    let format = if head.len() == 40 { "sha1" } else { "sha256" };
+    let private = receipt.join("repository.git");
+    output(
+        git(receipt)
+            .args([
+                "init",
+                "--bare",
+                "--template=",
+                &format!("--object-format={format}"),
+            ])
+            .arg(&private),
+    )?;
+    import_bundle(&private, &retained, source)?;
+    let symbolic = text(git(&private).args([
+        "show",
+        &format!("{}:value", capture_revision(&heads, "head-symbolic")?),
+    ]))?;
+    if symbolic.is_empty() {
+        output(git(&private).args(["update-ref", "--no-deref", "HEAD", &head]))?;
+    } else {
+        if !symbolic.starts_with("refs/heads/") {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
+        output(git(&private).args(["check-ref-format", &symbolic]))?;
+        set_ref(&private, &symbolic, &head)?;
+        output(git(&private).args(["symbolic-ref", "HEAD", &symbolic]))?;
+    }
+    let exclude = output(git(&private).args([
+        "show",
+        &format!("{}:value", capture_revision(&heads, "exclude")?),
+    ]))?;
+    fs::create_dir_all(private.join("info"))?;
+    fs::write(private.join("info/exclude"), exclude)?;
+    output(
+        snapshot_command(&private, destination, &private.join("index")).args([
+            "read-tree",
+            &format!("{}^{{tree}}", capture_revision(&heads, "staged")?),
+        ]),
+    )?;
+    output(git(&private).args(["config", "core.bare", "false"]))?;
+    output(
+        git(&private)
+            .args(["config", "core.worktree"])
+            .arg(destination),
+    )?;
+    Ok((private, heads))
+}
+
+fn prepare_linked_attachment(
+    repository: &Path,
+    destination: &Path,
+    source: &str,
+    receipt: &Path,
+    private: &Path,
+    heads: &str,
+) -> Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let retained = receipt.join("capture.bundle");
+    import_bundle(repository, &retained, source)?;
+    let head = capture_revision(heads, "head")?;
+    let symbolic = text(git(private).args([
+        "show",
+        &format!("{}:value", capture_revision(heads, "head-symbolic")?),
+    ]))?;
+    let captured_exclude = output(git(private).args([
+        "show",
+        &format!("{}:value", capture_revision(heads, "exclude")?),
+    ]))?;
+    let exclude_path = PathBuf::from(text(git(repository).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "info/exclude",
+    ]))?);
+    let exclude = match fs::read(&exclude_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if exclude != captured_exclude {
+        return Err(BulkloadRefusal::GitDestinationOccupied);
+    }
+    let attached = text(git(repository).args(["worktree", "list", "--porcelain"]))?;
+    let reuse = symbolic.starts_with("refs/heads/")
+        && text(git(repository).args(["rev-parse", "--verify", &symbolic]))
+            .is_ok_and(|tip| tip == head)
+        && !attached
+            .lines()
+            .any(|line| line == format!("branch {symbolic}"));
+    let branch = if reuse {
+        symbolic
+            .strip_prefix("refs/heads/")
+            .ok_or(BulkloadRefusal::GitInventoryMalformed)?
+            .to_owned()
+    } else {
+        format!(
+            "carry/{source}/{}",
+            blake3::hash(destination.as_os_str().as_bytes()).to_hex()
+        )
+    };
+    let prepared = receipt.join("prepared-worktree");
+    let mut command = git(repository);
+    command.args(["worktree", "add", "--no-checkout"]);
+    if !reuse {
+        command.args(["-b", &branch]);
+    }
+    output(
+        command
+            .arg("--")
+            .arg(&prepared)
+            .arg(if reuse { &branch } else { &head }),
+    )?;
+    if text(git(&prepared).args(["rev-parse", "HEAD"]))? != head {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    output(git(&prepared).args([
+        "read-tree",
+        &format!("{}^{{tree}}", capture_revision(heads, "staged")?),
+    ]))?;
+    let admin = PathBuf::from(text(
+        git(&prepared).args(["rev-parse", "--absolute-git-dir"]),
+    )?);
+    let mut reverse = destination.join(".git").as_os_str().as_bytes().to_vec();
+    if reverse.contains(&b'\n') || reverse.contains(&b'\r') {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    reverse.push(b'\n');
+    fs::write(admin.join("gitdir"), reverse)?;
+    // Native administrative locking prevents prune before pointer publication.
+    fs::write(admin.join("locked"), b"bulkload attachment preparation\n")?;
+    sync_private_tree(&admin)?;
+    fs::File::open(admin.parent().ok_or(BulkloadRefusal::PathNotAbsolute)?)?.sync_all()?;
+    Ok(admin)
+}
+
+fn attachment_policy_matches(repository: &Path, private: &Path, heads: &str) -> Result<bool> {
+    let expected = output(git(private).args([
+        "show",
+        &format!("{}:value", capture_revision(heads, "exclude")?),
+    ]))?;
+    let path = text(git(repository).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "info/exclude",
+    ]))?;
+    let actual = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(expected == actual)
+}
+
+/// Attach captured source administration to an exactly matching payload only.
+///
+/// Existing payload is never rewritten. New linked administration inherits the
+/// explicit common repository's configuration and restores captured source
+/// staging, not unknown old staging. Comparisons are
+/// optimistic full censuses, not an atomic snapshot of uncooperative writers.
+///
+/// # Errors
+/// Refuses existing .git, differing bytes/modes/empty directories, concurrent
+/// changes, unsupported seats, or a receipt inside the payload/on another device.
+/// Failed private preparations remain available for inspection.
+pub fn attach_matching_payload(
+    bundle: &Path,
+    repository: &Path,
+    destination: &Path,
+    source: &str,
+    receipt: &Path,
+) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let destination = fs::canonicalize(destination)?;
+    let repository = fs::canonicalize(repository)?;
+    let common = common_repository(&repository)?;
+    let receipt_parent =
+        fs::canonicalize(receipt.parent().ok_or(BulkloadRefusal::PathNotAbsolute)?)?;
+    let receipt = receipt_parent.join(
+        receipt
+            .file_name()
+            .ok_or(BulkloadRefusal::PathNotAbsolute)?,
+    );
+    if receipt.starts_with(&destination) {
+        return Err(BulkloadRefusal::PathEscapesRoot);
+    }
+    require_missing(&destination.join(".git"))?;
+    let root = fs::metadata(&destination)?;
+    if !root.is_dir() || root.dev() != fs::metadata(&receipt_parent)?.dev() {
+        return Err(BulkloadRefusal::GitDestinationOccupied);
+    }
+    let before = filesystem_rows(&destination)?;
+    let (private, heads) = prepare_attachment(bundle, &destination, source, &receipt)?;
+    let expected: Vec<crate::RowSchema> = postcard::from_bytes(&output(git(&private).args([
+        "show",
+        &format!("{}:value", capture_revision(&heads, "filesystem-v1")?),
+    ]))?)
+    .map_err(|_| BulkloadRefusal::FrameCodec)?;
+    if !payload_shape_equal(&before, &expected) {
+        return Err(BulkloadRefusal::GitDestinationOccupied);
+    }
+    let comparison = receipt.join("comparison.index");
+    output(snapshot_command(&private, &destination, &comparison).args(["read-tree", "--empty"]))?;
+    let expected_tree = text(git(&private).args([
+        "rev-parse",
+        &format!("{}^{{tree}}", capture_revision(&heads, "worktree")?),
+    ]))?;
+    if capture_tree(&private, &destination, &comparison)? != expected_tree
+        || capture_tree(&private, &destination, &comparison)? != expected_tree
+        || filesystem_rows(&destination)? != before
+    {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    fs::write(
+        receipt.join("original-payload-index-absent.postcard"),
+        postcard::to_allocvec(&before).map_err(|_| BulkloadRefusal::FrameCodec)?,
+    )?;
+    sync_private_tree(&receipt)?;
+    fs::File::open(&receipt_parent)?.sync_all()?;
+    let admin = prepare_linked_attachment(
+        &repository,
+        &destination,
+        source,
+        &receipt,
+        &private,
+        &heads,
+    )?;
+    let pointer = receipt.join("git-pointer");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&pointer)?;
+    if admin.as_os_str().as_bytes().contains(&b'\n')
+        || admin.as_os_str().as_bytes().contains(&b'\r')
+    {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    file.write_all(b"gitdir: ")?;
+    file.write_all(admin.as_os_str().as_bytes())?;
+    file.write_all(b"\n")?;
+    sync_private_tree(&receipt)?;
+    fs::File::open(&receipt_parent)?.sync_all()?;
+    let current_root = fs::metadata(&destination)?;
+    if root.dev() != current_root.dev()
+        || root.ino() != current_root.ino()
+        || filesystem_rows(&destination)? != before
+        || !attachment_policy_matches(&repository, &private, &heads)?
+        || text(
+            snapshot_command(&admin, &destination, &admin.join("index"))
+                .args(["rev-parse", "HEAD"]),
+        )? != capture_revision(&heads, "head")?
+    {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    // Atomic create-only publication cannot overwrite another writer's .git.
+    fs::hard_link(pointer, destination.join(".git"))?;
+    fs::File::open(&destination)?.sync_all()?;
+    if filesystem_rows(&destination)? != before
+        || common_repository(&destination)? != common
+        || !attachment_policy_matches(&repository, &private, &heads)?
+        || text(git(&destination).args(["rev-parse", "HEAD"]))? != capture_revision(&heads, "head")?
+    {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    fs::remove_file(admin.join("locked"))?;
+    fs::File::open(admin)?.sync_all()?;
+    Ok(())
+}
+
 /// Restore staged and unstaged state into a newly created, standalone repository.
 ///
 /// Existing destinations are always refused, including empty directories.
@@ -1110,6 +1454,95 @@ fn restore_entry(destination: &Path, entry: &[u8]) -> Result<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_payload_attachment_preserves_bytes_inodes_and_captured_staging() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("bulkload-attach-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        output(git(&source).args(["init", "--template="])).unwrap();
+        output(git(&source).args(["config", "user.name", "Test"])).unwrap();
+        output(git(&source).args(["config", "user.email", "test@localhost"])).unwrap();
+        fs::write(source.join("tracked"), b"base\0binary").unwrap();
+        output(git(&source).args(["add", "."])).unwrap();
+        output(git(&source).args(["-c", "commit.gpgsign=false", "commit", "-m", "base"])).unwrap();
+        fs::write(source.join("tracked"), b"staged\0binary").unwrap();
+        output(git(&source).args(["add", "."])).unwrap();
+        fs::write(source.join("tracked"), b"unstaged\0binary").unwrap();
+        fs::write(source.join("untracked"), b"kept").unwrap();
+        fs::create_dir(source.join("empty")).unwrap();
+        let bundle = export_repository(&source, &root.join("capture")).unwrap();
+        let payload = root.join("payload");
+        restore_bundle(&bundle, &payload, "neo").unwrap();
+        fs::rename(payload.join(".git"), root.join("old-private-git")).unwrap();
+        let before = filesystem_rows(&payload).unwrap();
+        let inode = fs::metadata(payload.join("tracked")).unwrap().ino();
+        output(git(&source).args([
+            "config",
+            "remote.origin.url",
+            "ssh://example.test/estate.git",
+        ]))
+        .unwrap();
+        attach_matching_payload(&bundle, &source, &payload, "neo", &root.join("receipt")).unwrap();
+        assert_eq!(
+            common_repository(&source).unwrap(),
+            common_repository(&payload).unwrap()
+        );
+        assert_eq!(
+            text(git(&payload).args(["config", "remote.origin.url"])).unwrap(),
+            "ssh://example.test/estate.git"
+        );
+        assert!(text(git(&source).args(["worktree", "list", "--porcelain"]))
+            .unwrap()
+            .contains(payload.to_str().unwrap()));
+        assert_eq!(before, filesystem_rows(&payload).unwrap());
+        assert_eq!(inode, fs::metadata(payload.join("tracked")).unwrap().ino());
+        for args in [
+            vec!["status", "--porcelain"],
+            vec!["diff", "--cached", "--binary"],
+            vec!["diff", "--binary"],
+        ] {
+            assert_eq!(
+                output(git(&source).args(&args)).unwrap(),
+                output(git(&payload).args(&args)).unwrap()
+            );
+        }
+        assert!(attach_matching_payload(
+            &bundle,
+            &source,
+            &payload,
+            "neo",
+            &root.join("occupied-receipt")
+        )
+        .is_err());
+        let different = root.join("different");
+        restore_bundle(&bundle, &different, "neo").unwrap();
+        fs::rename(different.join(".git"), root.join("other-private-git")).unwrap();
+        fs::write(different.join("extra"), b"destination-only").unwrap();
+        assert!(attach_matching_payload(
+            &bundle,
+            &source,
+            &different,
+            "neo",
+            &root.join("different-receipt")
+        )
+        .is_err());
+        assert!(!different.join(".git").exists());
+        fs::remove_file(different.join("extra")).unwrap();
+        fs::write(different.join("tracked"), b"different\0bytes").unwrap();
+        assert!(attach_matching_payload(
+            &bundle,
+            &source,
+            &different,
+            "neo",
+            &root.join("bytes-receipt")
+        )
+        .is_err());
+        assert!(!different.join(".git").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn bidirectional_union_reaches_fixed_point_without_provenance_wrapping() {
         let root = std::env::temp_dir().join(format!("bulkload-git-union-{}", std::process::id()));

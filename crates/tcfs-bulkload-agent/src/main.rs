@@ -48,6 +48,8 @@ SUBCOMMANDS:
                 Restore captured work into a new linked worktree without switching others
     git-repair-missing-index BUNDLE REPOSITORY SOURCE NEW_RECEIPT
                 Create a missing same-HEAD staged index only; never rewrite payload
+    git-attach-matching-payload BUNDLE REPOSITORY DESTINATION SOURCE NEW_RECEIPT
+                Attach exact matching payload using existing common Git administration
     snapshot SOURCE OUTPUT [MAX_STEPS]
                 Capture live SQLite through its online backup API
     compose BASE INCOMING OUTPUT SOURCE_ID [MAX_STEPS]
@@ -94,6 +96,7 @@ fn main() -> ExitCode {
         ),
         Some("hydrate-state") => hydrate_command(&args.collect::<Vec<_>>()),
         Some("git-repair-missing-index") => repair_index_command(&args.collect::<Vec<_>>()),
+        Some("git-attach-matching-payload") => attach_payload_command(&args.collect::<Vec<_>>()),
         Some(
             name @ ("estate-add" | "estate-add-batch" | "estate-show" | "estate-capture"
             | "estate-apply"),
@@ -242,6 +245,30 @@ fn repair_index_command(args: &[std::ffi::OsString]) -> Result<()> {
         .ok_or(BulkloadRefusal::PathNotPortable)?;
     tcfs_bulkload_agent::git_carry::repair_missing_index(path(0)?, path(1)?, source, path(3)?)?;
     println!("missing index repaired; payload parity not asserted");
+    Ok(())
+}
+
+fn attach_payload_command(args: &[std::ffi::OsString]) -> Result<()> {
+    if args.len() != 5 {
+        return Err(BulkloadRefusal::RequiredFieldMissing);
+    }
+    let path = |i| {
+        args.get(i)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let source = args
+        .get(3)
+        .and_then(|value| value.to_str())
+        .ok_or(BulkloadRefusal::PathNotPortable)?;
+    tcfs_bulkload_agent::git_carry::attach_matching_payload(
+        path(0)?,
+        path(1)?,
+        path(2)?,
+        source,
+        path(4)?,
+    )?;
+    println!("matching payload attached; existing common Git administration preserved");
     Ok(())
 }
 
