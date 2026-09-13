@@ -35,6 +35,14 @@ struct Capture {
     identity: crate::freshness::StatIdentity,
 }
 
+// Separate sidecars preserve the existing Capture postcard wire layout.
+#[derive(Clone, Serialize, Deserialize)]
+struct Base {
+    bundle: String,
+    digest: [u8; 32],
+    identity: crate::freshness::StatIdentity,
+}
+
 #[derive(Debug)]
 pub struct Receipt {
     pub item: String,
@@ -213,7 +221,73 @@ fn hash_file(path: &Path) -> Result<[u8; 32]> {
     Ok(*hasher.finalize().as_bytes())
 }
 
-fn capture_item(item: &Item, state: &Path, corpus: &Path) -> Result<&'static str> {
+fn base_path(corpus: &Path, base: &Base) -> Result<PathBuf> {
+    if !filename(&base.bundle) {
+        return Err(BulkloadRefusal::PathEscapesRoot);
+    }
+    Ok(corpus.join(&base.bundle))
+}
+
+fn retained_base(corpus: &Path, base: &Base) -> Result<bool> {
+    let path = base_path(corpus, base)?;
+    Ok(path.try_exists()?
+        && base.identity
+            == crate::freshness::StatIdentity::from_metadata(&fs::symlink_metadata(path)?))
+}
+
+fn prepare_base(item: &Item, group: &str, state: &Path, corpus: &Path) -> Result<Base> {
+    let record = corpus.join(format!("shared-{group}.base"));
+    if record.try_exists()? {
+        let base: Base = read(&record)?;
+        if retained_base(corpus, &base)? {
+            return Ok(base);
+        }
+        // Do not replace a missing or changed prerequisite while older deltas
+        // still depend on it. Keep the missing custody visible.
+        return Err(BulkloadRefusal::ReceiptBindingInvalid);
+    }
+    let mut generation = 0u64;
+    let attempt = loop {
+        let attempt = state.join(format!("shared-{group}-{generation}"));
+        if !attempt.try_exists()? {
+            break attempt;
+        }
+        generation = generation
+            .checked_add(1)
+            .ok_or(BulkloadRefusal::FieldDomainViolation)?;
+    };
+    let bundle = git_carry::shared::export_base(&item.source, &attempt)?;
+    let digest = hash_file(&bundle)?;
+    let name = format!(
+        "shared-{}.bundle",
+        blake3::Hash::from_bytes(digest).to_hex()
+    );
+    let published = corpus.join(&name);
+    if published.try_exists()? {
+        if hash_file(&published)? != digest {
+            return Err(BulkloadRefusal::DigestMismatch);
+        }
+    } else {
+        fs::hard_link(&bundle, &published)?;
+    }
+    // Git's successful pack write is not a durability guarantee. Flush the
+    // payload before write() publishes and directory-syncs its dependency.
+    fs::File::open(&published)?.sync_all()?;
+    let base = Base {
+        bundle: name,
+        digest,
+        identity: crate::freshness::StatIdentity::from_metadata(&fs::symlink_metadata(published)?),
+    };
+    write(&record, &base)?;
+    Ok(base)
+}
+
+fn capture_item(
+    item: &Item,
+    state: &Path,
+    corpus: &Path,
+    base: Option<&Base>,
+) -> Result<&'static str> {
     let identity = id(item)?;
     let record = corpus.join(format!("{identity}.capture"));
     let key = git_carry::reusable_capture_key(&item.source)?;
@@ -226,8 +300,14 @@ fn capture_item(item: &Item, state: &Path, corpus: &Path) -> Result<&'static str
         if previous.key == key
             && bundle.try_exists()?
             && previous.identity
-                == crate::freshness::StatIdentity::from_metadata(&fs::symlink_metadata(bundle)?)
+                == crate::freshness::StatIdentity::from_metadata(&fs::symlink_metadata(&bundle)?)
         {
+            if git_carry::shared::requires_base(&bundle)? {
+                let bound: Base = read(&corpus.join(format!("{}.base", previous.bundle)))?;
+                if !retained_base(corpus, &bound)? {
+                    return Err(BulkloadRefusal::ReceiptBindingInvalid);
+                }
+            }
             return Ok("capture-reused-after-census");
         }
     }
@@ -245,7 +325,15 @@ fn capture_item(item: &Item, state: &Path, corpus: &Path) -> Result<&'static str
             .ok_or(BulkloadRefusal::FieldDomainViolation)?;
     };
     // Failed private attempts are retained, never silently overwritten.
-    let bundle = git_carry::export_repository(&item.source, &attempt)?;
+    let bundle = if let Some(base) = base {
+        git_carry::export_repository_with_prerequisite(
+            &item.source,
+            &attempt,
+            &base_path(corpus, base)?,
+        )?
+    } else {
+        git_carry::export_repository(&item.source, &attempt)?
+    };
     if key != git_carry::reusable_capture_key(&item.source)? {
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
@@ -262,7 +350,13 @@ fn capture_item(item: &Item, state: &Path, corpus: &Path) -> Result<&'static str
     } else {
         fs::hard_link(&bundle, &published)?;
     }
+    // Completion may survive a crash only after its bundle bytes are durable.
+    fs::File::open(&published)?.sync_all()?;
     let metadata = fs::symlink_metadata(&published)?;
+    if let Some(base) = base {
+        // Publish dependency custody before the unchanged completion codec.
+        write(&corpus.join(format!("{name}.base")), base)?;
+    }
     write(
         &record,
         &Capture {
@@ -321,6 +415,64 @@ fn emit(state: &Path, row: &Receipt, receipt: &impl Fn(&Receipt) -> Result<()>) 
     receipt(row)
 }
 
+#[derive(Default)]
+struct CaptureGroups {
+    items: std::collections::BTreeMap<String, String>,
+    bases: std::collections::BTreeMap<String, Mutex<Option<Base>>>,
+}
+
+fn capture_groups(plan: &Plan) -> Result<CaptureGroups> {
+    let mut candidates = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for item in &plan.items {
+        // Invalid sources still run through the ordinary per-item refusal path
+        // so one bad item cannot suppress receipts for unrelated valid work.
+        let Ok(common) = git_carry::common_repository(&item.source) else {
+            continue;
+        };
+        let Ok(metadata) = fs::metadata(&common) else {
+            continue;
+        };
+        let bytes = postcard::to_allocvec(&(common, metadata.dev(), metadata.ino()))
+            .map_err(|_| BulkloadRefusal::FrameCodec)?;
+        candidates
+            .entry(blake3::hash(&bytes).to_hex().to_string())
+            .or_default()
+            .push(id(item)?);
+    }
+    let mut groups = CaptureGroups::default();
+    for (group, items) in candidates {
+        if items.len() > 1 {
+            for item in items {
+                groups.items.insert(item, group.clone());
+            }
+            groups.bases.insert(group, Mutex::new(None));
+        }
+    }
+    Ok(groups)
+}
+
+fn group_base(
+    item: &Item,
+    groups: &CaptureGroups,
+    state: &Path,
+    corpus: &Path,
+) -> Result<Option<Base>> {
+    let Some(group) = groups.items.get(&id(item)?) else {
+        return Ok(None);
+    };
+    let mut base = groups
+        .bases
+        .get(group)
+        .ok_or(BulkloadRefusal::GitAuthorityChanged)?
+        .lock()
+        .map_err(|_| BulkloadRefusal::GitAuthorityChanged)?;
+    if base.is_none() {
+        *base = Some(prepare_base(item, group, state, corpus)?);
+    }
+    // Drop the base-creation lock before the independent workspace capture.
+    Ok(base.clone())
+}
+
 /// Capture explicit items with at most two Git pack workers at a time.
 ///
 /// # Errors
@@ -337,15 +489,69 @@ pub fn capture(
     private_directory(corpus)?;
     let contents: Plan = read(plan)?;
     let _lock = exclusive(&state.join("estate.lock"))?;
+    let groups = capture_groups(&contents)?;
     execute(
         &contents,
         jobs,
-        &|item| capture_item(item, state, corpus),
+        &|item| {
+            let base = group_base(item, &groups, state, corpus)?;
+            capture_item(item, state, corpus, base.as_ref())
+        },
         &|row| emit(state, row, receipt),
     )
 }
 
-fn apply_item(item: &Item, corpus: &Path, state: &Path, source: &str) -> Result<&'static str> {
+type ImportedBases = Mutex<std::collections::BTreeSet<(PathBuf, [u8; 32])>>;
+
+fn import_base(
+    item: &Item,
+    captured: &Capture,
+    corpus: &Path,
+    source: &str,
+    imported: &ImportedBases,
+) -> Result<()> {
+    let bundle = corpus.join(&captured.bundle);
+    if !git_carry::shared::requires_base(&bundle)? {
+        return Ok(());
+    }
+    let base: Base = read(&corpus.join(format!("{}.base", captured.bundle)))?;
+    let path = base_path(corpus, &base)?;
+    // Existing shared repositories are the supported optimization. Creating a
+    // standalone destination needs a separate private preseed implementation.
+    if !item.repository.try_exists()?
+        || item
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace == &item.repository)
+    {
+        return Err(BulkloadRefusal::GitDestinationOccupied);
+    }
+    let key = (git_carry::common_repository(&item.repository)?, base.digest);
+    if imported
+        .lock()
+        .map_err(|_| BulkloadRefusal::GitAuthorityChanged)?
+        .contains(&key)
+    {
+        return Ok(());
+    }
+    if hash_file(&path)? != base.digest || git_carry::shared::requires_base(&path)? {
+        return Err(BulkloadRefusal::DigestMismatch);
+    }
+    git_carry::import_bundle(&item.repository, &path, source)?;
+    imported
+        .lock()
+        .map_err(|_| BulkloadRefusal::GitAuthorityChanged)?
+        .insert(key);
+    Ok(())
+}
+
+fn apply_item(
+    item: &Item,
+    corpus: &Path,
+    state: &Path,
+    source: &str,
+    imported: &ImportedBases,
+) -> Result<&'static str> {
     let identity = id(item)?;
     let captured: Capture = read(&corpus.join(format!("{identity}.capture")))?;
     if !filename(&captured.bundle) {
@@ -368,6 +574,7 @@ fn apply_item(item: &Item, corpus: &Path, state: &Path, source: &str) -> Result<
     if hash_file(&bundle)? != captured.digest {
         return Err(BulkloadRefusal::DigestMismatch);
     }
+    import_base(item, &captured, corpus, source, imported)?;
     let outcome = if let Some(workspace) = &item.workspace {
         if item.repository == *workspace {
             git_carry::restore_bundle(&bundle, workspace, source)?;
@@ -401,6 +608,7 @@ pub fn apply(
     let contents: Plan = read(plan)?;
     let mut locks = std::collections::BTreeMap::new();
     let mut groups = std::collections::BTreeMap::new();
+    let imported = ImportedBases::default();
     for item in &contents.items {
         let common = if item.repository.try_exists()? {
             git_carry::common_repository(&item.repository)?
@@ -423,7 +631,7 @@ pub fn apply(
             let _guard = lock
                 .lock()
                 .map_err(|_| BulkloadRefusal::GitAuthorityChanged)?;
-            apply_item(item, corpus, state, source)
+            apply_item(item, corpus, state, source, &imported)
         },
         &|row| emit(state, row, receipt),
     )
@@ -455,6 +663,78 @@ mod tests {
             .expect("git command")
             .status
             .success());
+    }
+
+    #[test]
+    fn shared_capture_keeps_completion_codec_and_requires_retained_base() {
+        let root = std::env::temp_dir().join(format!("tcfs-estate-shared-{}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "--template="]);
+        fs::write(source.join("file"), b"base").unwrap();
+        git(&source, &["add", "file"]);
+        git(&source, &["commit", "-m", "base"]);
+        let second = root.join("second");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                second.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        fs::write(source.join("file"), b"first dirty").unwrap();
+        fs::write(second.join("file"), b"second dirty").unwrap();
+        let repository = root.join("repository");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "--template="]);
+        let first_target = root.join("first-target");
+        let second_target = root.join("second-target");
+        let plan = root.join("plan");
+        add(&plan, &source, &repository, Some(&first_target)).unwrap();
+        add(&plan, &second, &repository, Some(&second_target)).unwrap();
+        let state = root.join("state");
+        let corpus = root.join("corpus");
+        capture(&plan, &state, &corpus, 2, &|_| Ok(())).unwrap();
+        let outcomes = Mutex::new(Vec::new());
+        capture(&plan, &state, &corpus, 2, &|row| {
+            outcomes.lock().unwrap().push(row.outcome);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec!["capture-reused-after-census"; 2]
+        );
+        let items = inspect(&plan).unwrap();
+        let mut dependencies = Vec::new();
+        for item in &items {
+            // Decode through the unchanged completion struct used by existing
+            // independent standalone captures and their live restore journals.
+            let record: Capture =
+                read(&corpus.join(format!("{}.capture", id(item).unwrap()))).unwrap();
+            let base: Base = read(&corpus.join(format!("{}.base", record.bundle))).unwrap();
+            dependencies.push(base.bundle);
+        }
+        assert_eq!(dependencies.first(), dependencies.last());
+        let base = corpus.join(dependencies.first().unwrap());
+        let held = root.join("held-base");
+        fs::rename(&base, &held).unwrap();
+        assert!(capture(&plan, &state, &corpus, 2, &|_| Ok(())).is_err());
+        let applied = root.join("applied");
+        assert!(apply(&plan, &corpus, &applied, "neo", 2, &|_| Ok(())).is_err());
+        assert!(!first_target.exists() && !second_target.exists());
+        fs::rename(&held, &base).unwrap();
+        apply(&plan, &corpus, &applied, "neo", 2, &|_| Ok(())).unwrap();
+        assert_eq!(fs::read(first_target.join("file")).unwrap(), b"first dirty");
+        assert_eq!(
+            fs::read(second_target.join("file")).unwrap(),
+            b"second dirty"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
