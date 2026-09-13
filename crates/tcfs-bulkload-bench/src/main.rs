@@ -1,301 +1,291 @@
-//! `tcfs-bulkload-bench` -- the M0 real-corpus A/B harness.
-//!
-//! This is deliberately **not** a criterion benchmark. The thing being
-//! measured is a one-shot walk of a real corpus of millions of files on real
-//! storage; criterion's model -- warm up, then run the same tiny operation
-//! thousands of times against a hot page cache -- measures the opposite of
-//! what R25 cares about. So: N reps, median and spread, and the headline
-//! metrics printed as first-class columns.
-//!
-//! # Status (M0)
-//!
-//! The harness is a skeleton. It compiles, it runs, and its shape is the shape
-//! the real numbers will land in. It is not yet meaningful:
-//!
-//! * The `agent` arm runs the real walker but against a
-//!   [`NullCache`](tcfs_bulkload_agent::freshness::NullCache), so there is no
-//!   resume to measure yet.
-//! * `bytes_reread_on_resume` and `files_statted_twice` are wired through from
-//!   the walker for the agent arm and stubbed at `0` for the baseline arm --
-//!   see the TODOs below.
-//!
-//! # Usage
-//!
-//! ```text
-//! tcfs-bulkload-bench --corpus-root /path/to/corpus --reps 3
-//! ```
+//! Real local native/rclone copy and resume comparison on an immutable corpus.
+//! Verification is outside timing and warms the OS cache. Initial means fresh
+//! private application state, not cold storage. Outputs are retained, never deleted.
 
+use std::fs;
+use std::io;
+use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::process::{Command, ExitCode, Stdio};
+use std::time::Instant;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tcfs_bulkload_agent::freshness::NullCache;
-use tcfs_bulkload_agent::walk::{self, HashPolicy, WalkOptions};
-use tcfs_bulkload_proto::BulkloadRefusal;
+use tcfs_bulkload_agent::transfer;
+use tcfs_bulkload_agent::walk::{walk, HashPolicy, WalkOptions};
+use tcfs_bulkload_proto::{FileKind, RowSchema};
 
-/// The M0 real-corpus A/B harness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Arm {
+    #[value(alias = "agent")]
+    Native,
+    #[value(alias = "baseline")]
+    Rclone,
+}
+
+/// Real local copy/resume benchmark. No remote endpoints or live corpus allowed.
 #[derive(Debug, Parser)]
-#[command(name = "tcfs-bulkload-bench", version, about, long_about = None)]
+#[command(version)]
 struct Cli {
-    /// Corpus root to walk. Must be an absolute path to an existing directory.
-    #[arg(long, value_name = "PATH")]
+    /// Absolute sealed corpus directory; source identity is checked between runs.
+    #[arg(long)]
     corpus_root: PathBuf,
-
-    /// Repetitions per arm. The reported figure is the median.
-    #[arg(long, default_value_t = 3, value_name = "N")]
+    /// Absolute NEW directory under an existing parent. Retained after completion.
+    #[arg(long)]
+    work_root: PathBuf,
+    /// Absolute rclone executable. Required when running the rclone arm.
+    #[arg(long)]
+    rclone: Option<PathBuf>,
+    /// Repetitions, 1 through 5; arm order alternates each repetition.
+    #[arg(long, default_value_t = 3)]
     reps: usize,
-
-    /// Run only the named arm ("baseline" or "agent"). Default: both.
-    #[arg(long, value_name = "ARM")]
-    only: Option<String>,
+    /// Old agent/baseline spellings remain aliases, now performing real transfers.
+    #[arg(long)]
+    only: Option<Arm>,
 }
 
-/// One arm's result for one repetition.
-#[derive(Debug, Clone, Copy)]
-struct Rep {
-    elapsed: Duration,
-    files: u64,
-    bytes: u64,
-    bytes_reread_on_resume: u64,
-    files_statted_twice: u64,
-}
-
-/// One arm's aggregate across reps.
-#[derive(Debug)]
-struct ArmSummary {
-    name: &'static str,
-    reps: usize,
-    median_ms: f64,
-    spread_ms: f64,
-    files: u64,
-    bytes: u64,
-    bytes_reread_on_resume: u64,
-    files_statted_twice: u64,
-}
-
-fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
-    match run(&cli) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(refusal) => {
-            eprintln!("tcfs-bulkload-bench: refused: {refusal}");
-            std::process::ExitCode::FAILURE
+fn main() -> ExitCode {
+    match run(&Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("benchmark refused: {error}; private outputs retained");
+            ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: &Cli) -> Result<(), BulkloadRefusal> {
-    if !cli.corpus_root.is_absolute() {
-        return Err(BulkloadRefusal::PathNotAbsolute);
+fn rows(root: &Path) -> io::Result<Vec<RowSchema>> {
+    let result = walk(
+        &WalkOptions {
+            hash_policy: HashPolicy::Always,
+            cross_device: true,
+            ..WalkOptions::new(root.to_owned())
+        },
+        &mut NullCache,
+    )
+    .map_err(io::Error::other)?;
+    if !result.refusals.is_empty() {
+        return Err(io::Error::other("corpus verification refused entries"));
     }
-    if !cli.corpus_root.is_dir() {
-        return Err(BulkloadRefusal::SnapshotCustodyUnavailable);
+    let mut rows = result.rows;
+    if rows.iter().any(|row| {
+        !matches!(
+            row.kind,
+            FileKind::Regular | FileKind::Directory | FileKind::Symlink
+        )
+    }) {
+        return Err(io::Error::other("unsupported corpus entry"));
     }
-    if cli.reps == 0 {
-        return Err(BulkloadRefusal::FieldDomainViolation);
-    }
+    rows.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(rows)
+}
 
-    let wanted = cli.only.as_deref();
-    let mut summaries = Vec::new();
+fn same_payload(a: &[RowSchema], b: &[RowSchema]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.rel_path == b.rel_path
+                && a.kind == b.kind
+                && a.link_target == b.link_target
+                && (a.kind != FileKind::Regular || (a.size == b.size && a.blake3 == b.blake3))
+                && (a.kind == FileKind::Symlink || a.mode & 0o777 == b.mode & 0o777)
+        })
+}
 
-    if matches!(wanted, None | Some("baseline")) {
-        summaries.push(measure("baseline", cli.reps, || {
-            baseline_walk(&cli.corpus_root)
-        })?);
-    }
-    if matches!(wanted, None | Some("agent")) {
-        summaries.push(measure("agent", cli.reps, || agent_walk(&cli.corpus_root))?);
-    }
-    if summaries.is_empty() {
-        return Err(BulkloadRefusal::FieldDomainViolation);
-    }
+fn private_dir(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
 
-    println!("corpus_root: {}", cli.corpus_root.display());
-    println!("reps:        {}\n", cli.reps);
-    print_table(&summaries);
-    println!(
-        "\nNOTE (M0): this harness is a skeleton. The agent arm runs against a null\n\
-         freshness cache, so no resume is exercised yet and the two headline columns\n\
-         are not yet meaningful. See the M2 resume lane."
+fn prepare(cli: &Cli) -> io::Result<(PathBuf, PathBuf)> {
+    if !(1..=5).contains(&cli.reps)
+        || !cli.corpus_root.is_absolute()
+        || !cli.work_root.is_absolute()
+    {
+        return Err(io::Error::other(
+            "absolute paths and 1..=5 repetitions required",
+        ));
+    }
+    let source = fs::canonicalize(&cli.corpus_root)?;
+    let parent = fs::canonicalize(
+        cli.work_root
+            .parent()
+            .ok_or_else(|| io::Error::other("missing work parent"))?,
+    )?;
+    let work = parent.join(
+        cli.work_root
+            .file_name()
+            .ok_or_else(|| io::Error::other("missing work name"))?,
     );
+    if source.starts_with(&work) || work.starts_with(&source) || !source.is_dir() {
+        return Err(io::Error::other(
+            "corpus and work roots must be disjoint directories",
+        ));
+    }
+    if cli.only != Some(Arm::Native)
+        && !cli
+            .rclone
+            .as_ref()
+            .is_some_and(|p| p.is_absolute() && p.is_file())
+    {
+        return Err(io::Error::other(
+            "explicit absolute rclone executable required",
+        ));
+    }
+    private_dir(&work)?;
+    Ok((source, work))
+}
+
+const fn arm_order(rep: usize) -> [Arm; 2] {
+    if rep.is_multiple_of(2) {
+        [Arm::Native, Arm::Rclone]
+    } else {
+        [Arm::Rclone, Arm::Native]
+    }
+}
+
+fn rclone_copy(binary: &Path, source: &Path, destination: &Path) -> io::Result<()> {
+    let mut command = Command::new(binary);
+    // Do not let operator config/environment select remote backends or exclusions.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("RCLONE_") {
+            command.env_remove(key);
+        }
+    }
+    let status = command
+        .args(["copy"])
+        .arg(source)
+        .arg(destination)
+        .args([
+            "--config",
+            "/dev/null",
+            "--create-empty-src-dirs",
+            "--links",
+            "--metadata",
+            "--transfers",
+            "4",
+            "--checkers",
+            "4",
+            "--stats",
+            "0",
+            "--log-level",
+            "ERROR",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("rclone failed: {status}")));
+    }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// arms
-// ---------------------------------------------------------------------------
+fn metric(value: Option<u64>) -> String {
+    value.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+}
 
-/// The `rclone check`-style arm: a plain recursive stat walk with no cache and
-/// no parallelism. This is the bar the agent has to beat.
-///
-/// The `Result` is not currently reachable in the error direction -- this arm
-/// swallows per-entry I/O errors the way `rclone check` does -- but the
-/// signature has to match [`agent_walk`] so both can be handed to [`measure`].
-#[allow(clippy::unnecessary_wraps)]
-fn baseline_walk(root: &Path) -> Result<Rep, BulkloadRefusal> {
-    let started = Instant::now();
-    let mut files = 0_u64;
-    let mut bytes = 0_u64;
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else if meta.is_file() {
-                files += 1;
-                bytes = bytes.saturating_add(meta.len());
+fn run(cli: &Cli) -> io::Result<()> {
+    let (source, work) = prepare(cli)?;
+    let expected = rows(&source)?;
+    println!("scope=local-ordinary-file-copy verification=full-blake3-outside-timing cache=not-flushed outputs=retained");
+    println!("rep arm phase elapsed_ms transferred_content_bytes source_bytes_read acceptance");
+    for rep in 0..cli.reps {
+        for arm in arm_order(rep)
+            .into_iter()
+            .filter(|arm| cli.only.is_none_or(|only| only == *arm))
+        {
+            let root = work.join(format!("{rep}-{arm:?}"));
+            private_dir(&root)?;
+            let destination = root.join("destination");
+            private_dir(&destination)?;
+            for phase in ["initial", "resume"] {
+                if rows(&source)? != expected {
+                    return Err(io::Error::other("immutable corpus changed before arm"));
+                }
+                let started = Instant::now();
+                let (transferred, read) = match arm {
+                    Arm::Native => {
+                        let stats = transfer::copy(
+                            &source,
+                            &destination,
+                            &root.join("source-state"),
+                            &root.join("destination-state"),
+                        )
+                        .map_err(io::Error::other)?;
+                        if !stats.refusals.is_empty() {
+                            return Err(io::Error::other("native transfer refused entries"));
+                        }
+                        (Some(stats.bytes_received), Some(stats.source_bytes_read))
+                    }
+                    Arm::Rclone => {
+                        rclone_copy(
+                            cli.rclone
+                                .as_deref()
+                                .ok_or_else(|| io::Error::other("rclone missing"))?,
+                            &source,
+                            &destination,
+                        )?;
+                        (None, None)
+                    }
+                };
+                let elapsed = started.elapsed();
+                if rows(&source)? != expected || !same_payload(&expected, &rows(&destination)?) {
+                    return Err(io::Error::other(
+                        "source mutation or destination content/mode mismatch",
+                    ));
+                }
+                println!(
+                    "{rep} {arm:?} {phase} {:.3} {} {} verified",
+                    elapsed.as_secs_f64() * 1000.0,
+                    metric(transferred),
+                    metric(read)
+                );
             }
         }
     }
-
-    Ok(Rep {
-        elapsed: started.elapsed(),
-        files,
-        bytes,
-        // TODO(M2): a resume-aware baseline re-reads everything by
-        // construction; wire this to the real re-read accounting once the
-        // resume path exists so the two arms are comparable.
-        bytes_reread_on_resume: 0,
-        // TODO(M2): count the baseline's second stat per seat (read_dir
-        // metadata plus the transfer-time stat) once the transfer half lands.
-        files_statted_twice: 0,
-    })
-}
-
-/// The agent arm: the real walker, currently against a null freshness cache.
-fn agent_walk(root: &Path) -> Result<Rep, BulkloadRefusal> {
-    let options = WalkOptions {
-        hash_policy: HashPolicy::Never,
-        ..WalkOptions::new(root.to_path_buf())
-    };
-    let started = Instant::now();
-    // TODO(M3): swap NullCache for the persistent SqliteCache so the second
-    // rep measures a warm resume instead of a second cold walk.
-    let mut cache = NullCache;
-    let outcome = walk::walk(&options, &mut cache)?;
-    let elapsed = started.elapsed();
-
-    Ok(Rep {
-        elapsed,
-        files: outcome.stats.seats_seen,
-        bytes: outcome.stats.bytes_seen,
-        bytes_reread_on_resume: outcome.stats.bytes_reread_on_resume,
-        files_statted_twice: outcome.stats.files_statted_twice,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// measurement
-// ---------------------------------------------------------------------------
-
-fn measure<F>(name: &'static str, reps: usize, mut arm: F) -> Result<ArmSummary, BulkloadRefusal>
-where
-    F: FnMut() -> Result<Rep, BulkloadRefusal>,
-{
-    let mut results = Vec::with_capacity(reps);
-    for _ in 0..reps {
-        results.push(arm()?);
-    }
-    let last = results
-        .last()
-        .copied()
-        .ok_or(BulkloadRefusal::BudgetExceeded)?;
-
-    let mut millis: Vec<f64> = results
-        .iter()
-        .map(|rep| rep.elapsed.as_secs_f64() * 1000.0)
-        .collect();
-    millis.sort_by(f64::total_cmp);
-
-    let median_ms = median(&millis).ok_or(BulkloadRefusal::BudgetExceeded)?;
-    let lo = millis.first().copied().unwrap_or(median_ms);
-    let hi = millis.last().copied().unwrap_or(median_ms);
-
-    Ok(ArmSummary {
-        name,
-        reps,
-        median_ms,
-        spread_ms: hi - lo,
-        files: last.files,
-        bytes: last.bytes,
-        bytes_reread_on_resume: last.bytes_reread_on_resume,
-        files_statted_twice: last.files_statted_twice,
-    })
-}
-
-/// Median of a pre-sorted slice.
-fn median(sorted: &[f64]) -> Option<f64> {
-    let len = sorted.len();
-    if len == 0 {
-        return None;
-    }
-    let mid = len / 2;
-    if len % 2 == 1 {
-        sorted.get(mid).copied()
-    } else {
-        let lo = sorted.get(mid - 1).copied()?;
-        let hi = sorted.get(mid).copied()?;
-        Some(lo.midpoint(hi))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// output
-// ---------------------------------------------------------------------------
-
-fn print_table(summaries: &[ArmSummary]) {
-    println!(
-        "{:<10} {:>5} {:>12} {:>12} {:>12} {:>16} {:>24} {:>21}",
-        "arm",
-        "reps",
-        "median_ms",
-        "spread_ms",
-        "files",
-        "bytes",
-        "bytes_reread_on_resume",
-        "files_statted_twice",
-    );
-    println!("{}", "-".repeat(120));
-    for summary in summaries {
-        println!(
-            "{:<10} {:>5} {:>12.2} {:>12.2} {:>12} {:>16} {:>24} {:>21}",
-            summary.name,
-            summary.reps,
-            summary.median_ms,
-            summary.spread_ms,
-            summary.files,
-            summary.bytes,
-            summary.bytes_reread_on_resume,
-            summary.files_statted_twice,
-        );
-    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
-
-    use super::{median, Cli};
+    use super::*;
     use clap::CommandFactory as _;
 
     #[test]
-    fn cli_definition_is_valid() {
+    fn cli_and_order() {
         Cli::command().debug_assert();
+        assert_eq!(arm_order(0), [Arm::Native, Arm::Rclone]);
+        assert_eq!(arm_order(1), [Arm::Rclone, Arm::Native]);
+        assert_eq!(metric(None), "unknown");
+        assert_eq!(metric(Some(0)), "0");
     }
 
     #[test]
-    fn median_handles_odd_even_and_empty() {
-        assert_eq!(median(&[]), None);
-        assert_eq!(median(&[1.0]), Some(1.0));
-        assert_eq!(median(&[1.0, 3.0]), Some(2.0));
-        assert_eq!(median(&[1.0, 3.0, 100.0]), Some(3.0));
-        assert_eq!(median(&[1.0, 3.0, 5.0, 7.0]), Some(4.0));
+    fn native_copy_resume_and_acceptance() -> io::Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        private_dir(&source)?;
+        fs::write(source.join("raw"), b"raw\0bytes\r\n")?;
+        std::os::unix::fs::symlink("raw", source.join("link"))?;
+        private_dir(&source.join("empty"))?;
+        let cli = Cli {
+            corpus_root: source.clone(),
+            work_root: fixture.path().join("work"),
+            rclone: None,
+            reps: 1,
+            only: Some(Arm::Native),
+        };
+        run(&cli)?;
+        // A repeated invocation cannot accidentally reuse another run's state.
+        assert!(prepare(&cli).is_err());
+        let destination = cli.work_root.join("0-Native/destination");
+        let expected = rows(&source)?;
+        assert!(same_payload(&expected, &rows(&destination)?));
+        fs::write(destination.join("raw"), b"bad\0bytes\r\n")?;
+        assert!(!same_payload(&expected, &rows(&destination)?));
+        let overlapping = Cli {
+            work_root: source.join("nested"),
+            ..cli
+        };
+        assert!(prepare(&overlapping).is_err());
+        Ok(())
     }
 }

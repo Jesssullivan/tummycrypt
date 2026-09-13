@@ -5351,6 +5351,7 @@ dependencies = [
  "clap",
  "tcfs-bulkload-agent",
  "tcfs-bulkload-proto",
+ "tempfile",
 ]
 
 [[package]]
