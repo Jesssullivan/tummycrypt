@@ -203,7 +203,10 @@ where
     for _ in 0..reps {
         results.push(arm()?);
     }
-    let last = results.last().copied().ok_or(BulkloadRefusal::BudgetExceeded)?;
+    let last = results
+        .last()
+        .copied()
+        .ok_or(BulkloadRefusal::BudgetExceeded)?;
 
     let mut millis: Vec<f64> = results
         .iter()

@@ -22,9 +22,10 @@ use std::process::Command;
 const FORBIDDEN: &[&str] = &["tokio", "opendal", "reqwest", "ring", "tonic"];
 
 fn is_forbidden(name: &str) -> Option<&'static str> {
-    FORBIDDEN.iter().copied().find(|forbidden| {
-        name == *forbidden || name.starts_with(&format!("{forbidden}-"))
-    })
+    FORBIDDEN
+        .iter()
+        .copied()
+        .find(|forbidden| name == *forbidden || name.starts_with(&format!("{forbidden}-")))
 }
 
 /// Pull the package name out of one `cargo tree` line.
@@ -115,6 +116,9 @@ fn forbidden_matcher_is_neither_too_broad_nor_too_narrow() {
 
     assert_eq!(package_name("├── serde v1.0.210"), Some("serde"));
     assert_eq!(package_name("│   └── tokio v1.40.0 (*)"), Some("tokio"));
-    assert_eq!(package_name("tcfs-bulkload-agent v0.12.14"), Some("tcfs-bulkload-agent"));
+    assert_eq!(
+        package_name("tcfs-bulkload-agent v0.12.14"),
+        Some("tcfs-bulkload-agent")
+    );
     assert_eq!(package_name("   "), None);
 }

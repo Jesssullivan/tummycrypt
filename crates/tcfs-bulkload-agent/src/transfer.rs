@@ -646,6 +646,98 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_transport_resumes_completed_captures_without_source_reads() {
+        struct Interrupted<W> {
+            output: W,
+            remaining: usize,
+        }
+        impl<W: Write> Write for Interrupted<W> {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let count = self
+                    .output
+                    .write(data.get(..data.len().min(self.remaining)).unwrap())?;
+                self.remaining -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.output.flush()
+            }
+        }
+        let corpus = Corpus::new();
+        for index in 0_u64..3 {
+            let mut state = index + 1;
+            let bytes: Vec<u8> = (0..524_288)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    u8::try_from(state >> 56).unwrap()
+                })
+                .collect();
+            std::fs::write(
+                corpus.base.join("source").join(format!("file-{index}")),
+                bytes,
+            )
+            .unwrap();
+        }
+        let (sender, mut receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+        for stream in [&sender, &receiver] {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(20)))
+                .unwrap();
+        }
+        std::thread::scope(|scope| {
+            let producer = scope.spawn(move || {
+                let mut input = sender.try_clone().unwrap();
+                serve(
+                    &mut input,
+                    &mut Interrupted {
+                        output: sender,
+                        remaining: 700_000,
+                    },
+                )
+            });
+            let mut output = receiver.try_clone().unwrap();
+            let outcome = receive(
+                &mut receiver,
+                &mut output,
+                &corpus.base.join("source"),
+                &corpus.base.join("source-state"),
+                &corpus.base.join("destination"),
+                &corpus.base.join("destination-state"),
+            );
+            drop(output);
+            drop(receiver);
+            assert!(producer.join().unwrap().is_err());
+            assert!(outcome.is_err());
+        });
+        assert_eq!(
+            std::fs::read_dir(corpus.base.join("destination"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let resumed = corpus.run().unwrap();
+        assert!(resumed.refusals.is_empty());
+        assert_eq!(resumed.reused, 1);
+        assert_eq!(resumed.completed, 2);
+        assert_eq!(resumed.source_bytes_read, 0);
+        for index in 0..3 {
+            let relative = format!("file-{index}");
+            assert_eq!(
+                std::fs::read(corpus.base.join("source").join(&relative)).unwrap(),
+                std::fs::read(corpus.base.join("destination").join(relative)).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn parallel_batches_resume_and_continue_after_a_refused_file() {
         let corpus = Corpus::new();
         let bytes = vec![71_u8; 65_536];

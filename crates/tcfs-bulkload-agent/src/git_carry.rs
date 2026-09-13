@@ -192,7 +192,16 @@ fn capture_refs(repo: &Path, private: &Path, inventory: &str) -> Result<()> {
         let (value, name) = line
             .split_once(' ')
             .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
-        set_ref(private, &format!("refs/carry-export/{name}"), value)?;
+        // Older carry spellings remain fully recoverable, once. They are
+        // never discarded merely because provenance predates this schema.
+        let exported = name
+            .strip_prefix("refs/carry/v1/")
+            .filter(|tail| canonical_tail(tail))
+            .map_or_else(
+                || format!("refs/carry-export/{name}"),
+                |tail| format!("refs/carry-export/union/v1/{tail}"),
+            );
+        set_ref(private, &exported, value)?;
     }
     let stash = output(git(repo).args(["reflog", "show", "--format=%H", "refs/stash"]));
     if let Ok(stash) = stash {
@@ -211,6 +220,22 @@ fn capture_refs(repo: &Path, private: &Path, inventory: &str) -> Result<()> {
         return Err(BulkloadRefusal::GitInventoryMalformed);
     }
     Ok(())
+}
+
+fn source_slug(source: &str) -> bool {
+    !source.is_empty()
+        && source.len() <= 64
+        && source
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn canonical_tail(tail: &str) -> bool {
+    let mut parts = tail.splitn(3, '/');
+    let source = parts.next().unwrap_or_default();
+    let snapshot = parts.next().unwrap_or_default();
+    let suffix = parts.next().unwrap_or_default();
+    source_slug(source) && snapshot.len() == 64 && oid(snapshot) && !suffix.is_empty()
 }
 
 /// Export one worktree and all repository refs into a new, private directory.
@@ -475,39 +500,37 @@ fn prepare_private(repo: &Path, capture: &Path) -> Result<PathBuf> {
 }
 
 /// Import into a content-addressed source namespace, never native branches.
-/// Repeats are idempotent; differing captures remain separately reachable.
+///
+/// Snapshot identity includes native refs and capture metadata, not carried
+/// transit refs. Already canonical refs retain their original source and
+/// identity across bidirectional rounds, bounding growth by distinct captures.
 ///
 /// # Errors
 /// Refuses invalid source names, non-export bundle refs, collisions or invalid
 /// bundles. A failed fetch may leave unreachable objects, never changed HEAD.
 pub fn import_bundle(repo: &Path, bundle: &Path, source: &str) -> Result<usize> {
-    use std::io::Read;
-    if source.is_empty()
-        || source.len() > 64
-        || !source
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
+    if !source_slug(source) {
         return Err(BulkloadRefusal::GitInventoryMalformed);
     }
     let bundle = fs::canonicalize(bundle)?;
-    let mut file = fs::File::open(&bundle)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut bytes = vec![0_u8; 65_536];
-    loop {
-        let count = file.read(&mut bytes)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(
-            bytes
-                .get(..count)
-                .ok_or(BulkloadRefusal::GitInventoryMalformed)?,
-        );
-    }
-    let digest = hasher.finalize().to_hex();
     output(git(repo).args(["bundle", "verify"]).arg(&bundle))?;
     let heads = text(git(repo).args(["bundle", "list-heads"]).arg(&bundle))?;
+    let mut native: Vec<_> = heads
+        .lines()
+        .filter(|line| {
+            !line
+                .split_once(' ')
+                .is_some_and(|(_, name)| name.starts_with("refs/carry-export/union/v1/"))
+        })
+        .collect();
+    native.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tcfs-git-native-snapshot-v1\0");
+    for line in native {
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize().to_hex();
     let mut names = Vec::new();
     for line in heads.lines() {
         let (value, name) = line
@@ -519,11 +542,15 @@ pub fn import_bundle(repo: &Path, bundle: &Path, source: &str) -> Result<usize> 
         if !oid(value) {
             return Err(BulkloadRefusal::GitInventoryMalformed);
         }
-        names.push((
-            value.to_owned(),
-            name.to_owned(),
-            format!("refs/carry/{source}/{digest}/{suffix}"),
-        ));
+        let target = if let Some(tail) = suffix.strip_prefix("union/v1/") {
+            if !canonical_tail(tail) {
+                return Err(BulkloadRefusal::GitInventoryMalformed);
+            }
+            format!("refs/carry/v1/{tail}")
+        } else {
+            format!("refs/carry/v1/{source}/{digest}/{suffix}")
+        };
+        names.push((value.to_owned(), name.to_owned(), target));
     }
     // Fetch objects only. Compare-and-create below cannot clobber a native ref.
     output(
@@ -811,6 +838,68 @@ fn restore_entry(destination: &Path, entry: &[u8]) -> Result<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn bidirectional_union_reaches_fixed_point_without_provenance_wrapping() {
+        let root = std::env::temp_dir().join(format!("bulkload-git-union-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let a = root.join("a");
+        let b = root.join("b");
+        for (repo, content) in [(&a, b"source-a"), (&b, b"source-b")] {
+            fs::create_dir(repo).unwrap();
+            output(git(repo).args(["init", "--template="])).unwrap();
+            output(git(repo).args(["config", "user.name", "Test"])).unwrap();
+            output(git(repo).args(["config", "user.email", "test@localhost"])).unwrap();
+            fs::write(repo.join("tracked"), content).unwrap();
+            output(git(repo).args(["add", "."])).unwrap();
+            output(git(repo).args(["-c", "commit.gpgsign=false", "commit", "-m", "base"])).unwrap();
+        }
+        let original_a = text(git(&a).args(["rev-parse", "HEAD"])).unwrap();
+        let original_b = text(git(&b).args(["rev-parse", "HEAD"])).unwrap();
+        let mut stashes = Vec::new();
+        for repo in [&a, &b] {
+            fs::write(repo.join("tracked"), b"unique stash state").unwrap();
+            output(git(repo).args(["stash", "push"])).unwrap();
+            stashes.push(text(git(repo).args(["rev-parse", "refs/stash"])).unwrap());
+        }
+        // A legacy nested provenance name is kept, not silently discarded.
+        let legacy = "refs/carry/sting/old/registry/carry-export/refs/carry/neo/old/heads/topic";
+        set_ref(&a, legacy, &original_a).unwrap();
+        let mut fixed = None;
+        for round in 0..5 {
+            let ab = export_repository(&a, &root.join(format!("a-{round}"))).unwrap();
+            import_bundle(&b, &ab, "neo").unwrap();
+            let ba = export_repository(&b, &root.join(format!("b-{round}"))).unwrap();
+            import_bundle(&a, &ba, "sting").unwrap();
+            let current = (refs(&a).unwrap(), refs(&b).unwrap());
+            if round == 1 {
+                fixed = Some(current.clone());
+            }
+            if round > 1 {
+                assert_eq!(fixed.as_ref(), Some(&current));
+            }
+        }
+        for repo in [&a, &b] {
+            let inventory = refs(repo).unwrap();
+            assert!(inventory
+                .lines()
+                .any(|line| line.starts_with(&original_a) && line.contains(legacy)));
+            assert!(inventory.lines().any(|line| line.starts_with(&original_b)));
+            for stash in &stashes {
+                assert!(inventory.lines().any(|line| line.starts_with(stash)));
+            }
+            assert!(!inventory.contains("/refs/carry/v1/"));
+        }
+        assert_eq!(
+            text(git(&a).args(["rev-parse", "HEAD"])).unwrap(),
+            original_a
+        );
+        assert_eq!(
+            text(git(&b).args(["rev-parse", "HEAD"])).unwrap(),
+            original_b
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)] // One end-to-end source/union/restore invariant.
     fn union_preserves_native_head_index_binary_and_stash_history() {
