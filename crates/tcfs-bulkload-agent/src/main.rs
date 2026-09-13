@@ -50,6 +50,8 @@ SUBCOMMANDS:
                 Create a missing same-HEAD staged index only; never rewrite payload
     git-attach-matching-payload BUNDLE REPOSITORY DESTINATION SOURCE NEW_RECEIPT
                 Attach exact matching payload using existing common Git administration
+    git-attach-standalone-payload BUNDLE DESTINATION SOURCE NEW_RECEIPT ORIGIN_FROM ORIGIN_TO
+                Attach exact payload with retained config and explicit local origin mapping
     snapshot SOURCE OUTPUT [MAX_STEPS]
                 Capture live SQLite through its online backup API
     compose BASE INCOMING OUTPUT SOURCE_ID [MAX_STEPS]
@@ -97,6 +99,9 @@ fn main() -> ExitCode {
         Some("hydrate-state") => hydrate_command(&args.collect::<Vec<_>>()),
         Some("git-repair-missing-index") => repair_index_command(&args.collect::<Vec<_>>()),
         Some("git-attach-matching-payload") => attach_payload_command(&args.collect::<Vec<_>>()),
+        Some("git-attach-standalone-payload") => {
+            attach_standalone_command(&args.collect::<Vec<_>>())
+        }
         Some(
             name @ ("estate-add" | "estate-add-batch" | "estate-show" | "estate-capture"
             | "estate-apply"),
@@ -245,6 +250,31 @@ fn repair_index_command(args: &[std::ffi::OsString]) -> Result<()> {
         .ok_or(BulkloadRefusal::PathNotPortable)?;
     tcfs_bulkload_agent::git_carry::repair_missing_index(path(0)?, path(1)?, source, path(3)?)?;
     println!("missing index repaired; payload parity not asserted");
+    Ok(())
+}
+
+fn attach_standalone_command(args: &[std::ffi::OsString]) -> Result<()> {
+    if args.len() != 6 {
+        return Err(BulkloadRefusal::RequiredFieldMissing);
+    }
+    let path = |i| {
+        args.get(i)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let source = args
+        .get(2)
+        .and_then(|value| value.to_str())
+        .ok_or(BulkloadRefusal::PathNotPortable)?;
+    tcfs_bulkload_agent::git_carry::attach_standalone_payload(
+        path(0)?,
+        path(1)?,
+        source,
+        path(3)?,
+        path(4)?,
+        path(5)?,
+    )?;
+    println!("standalone payload attached; config retained, selected origin mapping activated");
     Ok(())
 }
 
