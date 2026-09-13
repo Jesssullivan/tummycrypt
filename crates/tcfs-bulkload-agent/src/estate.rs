@@ -188,7 +188,19 @@ pub fn add_batch(plan: &Path, items: &[Item]) -> Result<()> {
     write(plan, &contents)
 }
 
-fn exclusive(path: &Path) -> Result<fs::File> {
+struct Exclusive(fs::File);
+
+impl Drop for Exclusive {
+    fn drop(&mut self) {
+        // A concurrent fork can briefly inherit the open file description until
+        // exec closes it. Explicit unlock ends our operation's ownership even
+        // while such a descriptor exists; closing only this fd is insufficient.
+        // SAFETY: this guard owns a live descriptor for the acquired flock.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+fn exclusive(path: &Path) -> Result<Exclusive> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -201,7 +213,7 @@ fn exclusive(path: &Path) -> Result<fs::File> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    Ok(file)
+    Ok(Exclusive(file))
 }
 
 fn hash_file(path: &Path) -> Result<[u8; 32]> {
@@ -735,6 +747,24 @@ mod tests {
             b"second dirty"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completed_operation_unlocks_even_with_an_inherited_description() {
+        let root = std::env::temp_dir().join(format!("tcfs-estate-lock-{}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path = root.join("estate.lock");
+        let owner = exclusive(&path).unwrap();
+        let inherited = owner.0.try_clone().unwrap();
+        assert!(exclusive(&path).is_err());
+        drop(owner);
+        let next = exclusive(&path).expect("completed owner explicitly unlocked");
+        drop(inherited);
+        assert!(exclusive(&path).is_err());
+        drop(next);
+        assert!(exclusive(&path).is_ok());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[test]
