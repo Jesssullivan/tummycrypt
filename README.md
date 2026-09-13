@@ -39,12 +39,33 @@ Claims without a packet or named live canary remain unproven.
 - Root-targeted production conflict resolution for scheduled roam roots.
 - Two repositories completing the full bidirectional roam, unsync, rehydrate,
   divergence, restore, and second-cycle convergence loop.
-- Linked-worktree reconstruction, arbitrary agent sessions, or broad home and
-  dot-directory remotification.
+- Automatic linked-worktree reconstruction through the roaming daemon,
+  arbitrary agent sessions, or broad home and dot-directory remotification.
 - Per-device-only crypto, headless SSH-first enrollment, or a TLS-protected
   production S3 path.
 - Rocky 10 RPM/FUSE acceptance, Windows Explorer parity, iOS production use, or
   NFS client parity.
+
+## Native Bulkload migration tools
+
+This source tree also contains the explicit Rust migration adapter, separate
+from automatic TCFS roaming:
+
+```bash
+cargo build --release -p tcfs-bulkload-agent -p tcfs-bulkload-bench
+target/release/tcfs-bulkload-bench --help
+```
+
+The [agent command interface](crates/tcfs-bulkload-agent/src/main.rs) supports
+resumable transfers, Git capture/import and guarded worktree restoration.
+Use explicit source snapshots and private state/receipt directories; retain
+captures until acceptance. An imported bundle is not a restored workspace.
+Existing worktrees and provider databases are not replaceable copy targets.
+
+The benchmark compares real local native/rclone copies and resumes on a sealed
+corpus. It does not establish network performance or whole-estate completion.
+See [TIN-3692](https://linear.app/tinyland/issue/TIN-3692) for migration acceptance
+and the outstanding policy decisions.
 
 ## Develop
 
@@ -56,7 +77,7 @@ nix develop
 ~/.cargo/bin/cargo clippy --workspace --all-targets
 ```
 
-The repository contains 19 workspace crates. The protobuf source of truth is
+The workspace members are declared in [Cargo.toml](Cargo.toml). The protobuf source of truth is
 [`crates/tcfs-core/src/proto/tcfs.proto`](crates/tcfs-core/src/proto/tcfs.proto).
 See [`AGENTS.md`](AGENTS.md) before changing code or running fleet workflows.
 
