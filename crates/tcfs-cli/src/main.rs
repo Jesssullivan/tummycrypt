@@ -557,6 +557,14 @@ struct StorageCanaryScopeDenyReport {
 
 #[derive(Subcommand, Debug)]
 enum DeviceAction {
+    /// Merge a signed local registry without enrollment or remote writes
+    Import {
+        /// Signed registry carried from another device
+        source: PathBuf,
+        /// Write a signed union to a new candidate file; never replaces the active registry
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Enroll this device in the sync fleet
     Enroll {
         /// Device name (default: hostname)
@@ -948,6 +956,25 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Device { action } => match action {
+            DeviceAction::Import { source, out } => {
+                let key_path = config.crypto.master_key_file.as_ref().context(
+                    "device import requires the configured master_key_file; no key is generated",
+                )?;
+                let master = read_master_key(key_path)?;
+                let registry_path = config
+                    .sync
+                    .device_identity
+                    .clone()
+                    .unwrap_or_else(tcfs_secrets::device::default_registry_path);
+                let added = import_device_registry(
+                    &registry_path,
+                    &source,
+                    master.as_bytes(),
+                    out.as_deref(),
+                )?;
+                println!("Device registry import: added={added} candidate_written={} active_registry_unchanged=true remote_writes=0", out.is_some());
+                Ok(())
+            }
             DeviceAction::Enroll {
                 name,
                 repair_placeholder,
@@ -6309,6 +6336,108 @@ fn repair_placeholder_device_key(
     Ok(key_path)
 }
 
+/// Import only disjoint or identical device entries. Existing local identity,
+/// revocation and progress fields are never replaced by a carried snapshot.
+fn import_device_registry(
+    destination: &Path,
+    source: &Path,
+    master: &[u8; 32],
+    output: Option<&Path>,
+) -> Result<usize> {
+    use tcfs_secrets::device::{DeviceRegistry, RegistryTrust};
+
+    let before = std::fs::read(destination).context("reading local device registry")?;
+    let incoming_bytes = std::fs::read(source).context("reading carried device registry")?;
+    let decode = |bytes: &[u8]| -> Result<DeviceRegistry> {
+        let raw: serde_json::Value = serde_json::from_slice(bytes)?;
+        let registry: DeviceRegistry = serde_json::from_value(raw.clone())?;
+        let normalized = serde_json::to_value(&registry)?;
+        // Serde accepts future fields by default. An import must not silently
+        // discard them when it writes an older schema back to disk.
+        for (key, value) in raw.as_object().context("registry must be an object")? {
+            if key != "devices" {
+                anyhow::ensure!(
+                    normalized.get(key) == Some(value),
+                    "unsupported registry field"
+                );
+            }
+        }
+        for (raw_device, device) in raw["devices"]
+            .as_array()
+            .context("devices must be an array")?
+            .iter()
+            .zip(&registry.devices)
+        {
+            let normalized = serde_json::to_value(device)?;
+            for (key, value) in raw_device.as_object().context("device must be an object")? {
+                anyhow::ensure!(
+                    normalized.get(key) == Some(value),
+                    "unsupported device field"
+                );
+            }
+        }
+        Ok(registry)
+    };
+    let mut local = decode(&before)?;
+    let incoming = decode(&incoming_bytes)?;
+    for registry in [&local, &incoming] {
+        anyhow::ensure!(
+            registry.verify_signature(master)? == RegistryTrust::Signed,
+            "device import refuses unsigned registries"
+        );
+    }
+
+    // Check every identity axis before the existing merge primitive can choose
+    // one of them. Ambiguous names/keys and differing shared entries require
+    // explicit reconciliation, never a last-writer-wins device replacement.
+    let mut identities = std::collections::BTreeMap::new();
+    for (side, registry) in [(0, &local), (1, &incoming)] {
+        let mut seen = std::collections::BTreeSet::new();
+        for device in &registry.devices {
+            anyhow::ensure!(
+                !device.device_id.is_empty() && !device.name.is_empty(),
+                "device import requires nonempty device IDs and names"
+            );
+            let value = serde_json::to_value(device)?;
+            for (axis, identity) in [
+                ("id", &device.device_id),
+                ("name", &device.name),
+                ("public_key", &device.public_key),
+            ] {
+                anyhow::ensure!(
+                    seen.insert((axis, identity)),
+                    "device import has a duplicate {axis}"
+                );
+                if let Some((prior_side, prior)) = identities.get(&(axis, identity)) {
+                    anyhow::ensure!(
+                        *prior_side != side && prior == &value,
+                        "device import has a conflicting or duplicate {axis}"
+                    );
+                } else {
+                    identities.insert((axis, identity), (side, value.clone()));
+                }
+            }
+        }
+    }
+    let added = merge_device_registry(&mut local, &incoming)?;
+    if let Some(output) = output {
+        local.sign(master)?;
+        let bytes = serde_json::to_vec_pretty(&local)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut candidate = options.open(output).context("candidate path must be new")?;
+        candidate.write_all(&bytes)?;
+        candidate.sync_all()?;
+        sync_parent_directory(atomic_write_parent(output))?;
+    }
+    Ok(added)
+}
+
 fn merge_device_registry(
     local: &mut tcfs_secrets::device::DeviceRegistry,
     incoming: &tcfs_secrets::device::DeviceRegistry,
@@ -11615,6 +11744,117 @@ nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
         assert!(tcfs_secrets::device::is_real_age_public_key(
             &merged.public_key
         ));
+    }
+
+    #[test]
+    fn import_device_registry_preserves_identity_and_is_idempotent() {
+        use tcfs_secrets::device::{DeviceRegistry, RegistryTrust};
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("devices.json");
+        let source = dir.path().join("incoming.json");
+        let master = [42; 32];
+        let mut local = DeviceRegistry::default();
+        local.enroll_local("sting", None);
+        local.save_signed(&destination, &master).unwrap();
+        let identity = serde_json::to_value(&local.devices[0]).unwrap();
+        let before = std::fs::read(&destination).unwrap();
+        let mut incoming = local.clone();
+        incoming.enroll_local("neo", None);
+        incoming.save_signed(&source, &master).unwrap();
+        let source_before = std::fs::read(&source).unwrap();
+
+        let output = dir.path().join("union.json");
+        assert_eq!(
+            import_device_registry(&destination, &source, &master, None).unwrap(),
+            1
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+        assert_eq!(
+            import_device_registry(&destination, &source, &master, Some(&output)).unwrap(),
+            1
+        );
+        let (merged, trust) = DeviceRegistry::load_verified(&output, &master).unwrap();
+        assert_eq!(trust, RegistryTrust::Signed);
+        assert_eq!(merged.devices.len(), 2);
+        assert_eq!(
+            serde_json::to_value(merged.find("sting").unwrap()).unwrap(),
+            identity
+        );
+        let once = std::fs::read(&output).unwrap();
+        assert_eq!(
+            import_device_registry(&output, &source, &master, None).unwrap(),
+            0
+        );
+        assert!(import_device_registry(&destination, &source, &master, Some(&output)).is_err());
+        assert!(
+            import_device_registry(&destination, &source, &master, Some(&destination)).is_err()
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), once);
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+        assert_eq!(std::fs::read(&source).unwrap(), source_before);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn import_device_registry_refuses_untrusted_or_conflicting_input_without_writes() {
+        use tcfs_secrets::device::DeviceRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("devices.json");
+        let source = dir.path().join("incoming.json");
+        let output = dir.path().join("union.json");
+        let master = [42; 32];
+        let mut local = DeviceRegistry::default();
+        local.enroll_local("sting", None);
+        local.save_signed(&destination, &master).unwrap();
+        let before = std::fs::read(&destination).unwrap();
+        let mut incoming = DeviceRegistry::default();
+        incoming.enroll_local("neo", None);
+        incoming.save(&source).unwrap();
+        assert!(import_device_registry(&destination, &source, &master, Some(&output)).is_err());
+
+        incoming.save_signed(&source, &master).unwrap();
+        let mut future = serde_json::to_value(&incoming).unwrap();
+        future["devices"][0]["future_identity_field"] = serde_json::json!("preserve me");
+        std::fs::write(&source, serde_json::to_vec(&future).unwrap()).unwrap();
+        assert!(import_device_registry(&destination, &source, &master, Some(&output)).is_err());
+        incoming.save_signed(&source, &[43; 32]).unwrap();
+        assert!(import_device_registry(&destination, &source, &master, Some(&output)).is_err());
+        incoming.save_signed(&source, &master).unwrap();
+        incoming.devices[0].description = Some("tampered".into());
+        incoming.save(&source).unwrap();
+        assert!(import_device_registry(&destination, &source, &master, Some(&output)).is_err());
+
+        for axis in ["id", "name", "key", "progress", "duplicate"] {
+            incoming = local.clone();
+            if axis == "progress" {
+                incoming.devices[0].last_nats_seq += 1;
+            } else if axis == "duplicate" {
+                incoming.devices.push(incoming.devices[0].clone());
+            } else {
+                incoming = DeviceRegistry::default();
+                incoming.enroll_local("neo", None);
+                match axis {
+                    "id" => incoming.devices[0].device_id = local.devices[0].device_id.clone(),
+                    "name" => incoming.devices[0].name = local.devices[0].name.clone(),
+                    "key" => incoming.devices[0].public_key = local.devices[0].public_key.clone(),
+                    _ => unreachable!(),
+                }
+            }
+            incoming.save_signed(&source, &master).unwrap();
+            assert!(
+                import_device_registry(&destination, &source, &master, Some(&output)).is_err(),
+                "{axis}"
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), before);
+            assert!(!output.exists());
+        }
     }
 
     // ── TIN-1417 B4: unsigned-remote LAUNDERING bypass is BLOCKED ──────────────
