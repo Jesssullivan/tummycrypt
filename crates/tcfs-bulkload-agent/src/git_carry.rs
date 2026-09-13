@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 
 use crate::{BulkloadRefusal, Result};
 
+mod batch_objects;
 mod raw_tree;
 pub mod registered;
 pub mod shared;
@@ -662,7 +663,7 @@ fn filesystem_rows(root: &Path) -> Result<Vec<crate::RowSchema>> {
 
 fn restore_filesystem_rows(destination: &Path, revision: &str) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use tcfs_bulkload_proto::FileKind;
     let bytes = output(git(destination).args(["show", &format!("{revision}:value")]))?;
     let rows: Vec<crate::RowSchema> =
@@ -681,7 +682,16 @@ fn restore_filesystem_rows(destination: &Path, revision: &str) -> Result<()> {
                 Err(error) => return Err(error.into()),
             },
             FileKind::Regular if fs::symlink_metadata(&path)?.is_file() => {
-                fs::set_permissions(&path, fs::Permissions::from_mode(row.mode & 0o777))?;
+                // Open before applying a potentially unreadable captured mode.
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&path)?;
+                if !file.metadata()?.is_file() {
+                    return Err(BulkloadRefusal::GitInventoryMalformed);
+                }
+                file.set_permissions(fs::Permissions::from_mode(row.mode & 0o777))?;
+                file.sync_all()?;
             }
             FileKind::Symlink if fs::symlink_metadata(&path)?.is_symlink() => {
                 if row.link_target.as_deref() != Some(fs::read_link(&path)?.as_os_str().as_bytes())
@@ -702,7 +712,28 @@ fn restore_filesystem_rows(destination: &Path, revision: &str) -> Result<()> {
             destination,
             Path::new(std::ffi::OsStr::from_bytes(&row.rel_path)),
         )?;
-        fs::set_permissions(path, fs::Permissions::from_mode(row.mode & 0o777))?;
+        // Flush descendants before their parent, retaining an open descriptor
+        // across modes such as 000 so durability does not require reopening it.
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(path)?;
+        directory.set_permissions(fs::Permissions::from_mode(row.mode & 0o777))?;
+        directory.sync_all()?;
+    }
+    // These flush payload entry creation, not the separate Git administration
+    // or receipt transactions, which retain their own durability boundaries.
+    for path in [
+        destination,
+        destination
+            .parent()
+            .ok_or(BulkloadRefusal::PathNotAbsolute)?,
+    ] {
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(path)?
+            .sync_all()?;
     }
     Ok(())
 }
@@ -1500,9 +1531,7 @@ pub fn restore_bundle_configured(
     fs::write(destination.join(".git/info/exclude"), exclude)?;
     let worktree = find("worktree")?;
     let entries = output(git(&destination).args(["ls-tree", "-r", "-z", &worktree]))?;
-    for entry in entries.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
-        restore_entry(&destination, entry)?;
-    }
+    restore_entries(&destination, &entries)?;
     let staged = find("staged")?;
     output(git(&destination).args(["read-tree", &format!("{staged}^{{tree}}")]))?;
     restore_filesystem_rows(&destination, &find("filesystem-v1")?)?;
@@ -1608,9 +1637,7 @@ pub fn restore_linked(
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
     let entries = output(git(&destination).args(["ls-tree", "-r", "-z", &find("worktree")?]))?;
-    for entry in entries.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
-        restore_entry(&destination, entry)?;
-    }
+    restore_entries(&destination, &entries)?;
     output(git(&destination).args(["read-tree", &format!("{}^{{tree}}", find("staged")?)]))?;
     restore_filesystem_rows(&destination, &find("filesystem-v1")?)?;
     let final_exclude = match fs::read(exclude_path) {
@@ -1627,11 +1654,25 @@ pub fn restore_linked(
     Ok(())
 }
 
-fn restore_entry(destination: &Path, entry: &[u8]) -> Result<()> {
+fn restore_entries(destination: &Path, entries: &[u8]) -> Result<()> {
+    let mut objects = batch_objects::BatchObjects::new(destination)?;
+    for entry in entries
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        restore_entry(destination, entry, &mut objects)?;
+    }
+    objects.finish()
+}
+
+fn restore_entry(
+    destination: &Path,
+    entry: &[u8],
+    objects: &mut batch_objects::BatchObjects,
+) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::Component;
-    use std::process::Stdio;
     let tab = entry
         .iter()
         .position(|b| *b == b'\t')
@@ -1653,6 +1694,9 @@ fn restore_entry(destination: &Path, entry: &[u8]) -> Result<()> {
         .next()
         .filter(|value| oid(value))
         .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
+    if fields.next().is_some() {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
     let relative = Path::new(std::ffi::OsStr::from_bytes(
         entry
             .get(tab + 1..)
@@ -1682,22 +1726,17 @@ fn restore_entry(destination: &Path, entry: &[u8]) -> Result<()> {
     }
     match mode {
         "120000" => {
-            let target = output(git(destination).args(["cat-file", "blob", value]))?;
+            let mut target = Vec::new();
+            objects.copy_into(value, &mut target, Some(65_536))?;
             std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&target), path)?;
         }
         "100644" | "100755" => {
-            let file = fs::OpenOptions::new()
+            let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&path)?;
-            let status = git(destination)
-                .args(["cat-file", "blob", value])
-                .stdout(Stdio::from(file.try_clone()?))
-                .status()?;
-            if !status.success() {
-                return Err(BulkloadRefusal::GitInventoryMalformed);
-            }
+            objects.copy_into(value, &mut file, None)?;
             file.set_permissions(fs::Permissions::from_mode(if mode == "100755" {
                 0o755
             } else {
@@ -2038,9 +2077,10 @@ mod tests {
         fs::write(source.join("ignored"), b"unique ignored bytes").unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(source.join("ignored"), fs::Permissions::from_mode(0o600)).unwrap();
+            // Restoration must flush final modes even when the result is readonly.
+            fs::set_permissions(source.join("ignored"), fs::Permissions::from_mode(0o400)).unwrap();
             fs::create_dir_all(source.join("empty/nested")).unwrap();
-            fs::set_permissions(source.join("empty"), fs::Permissions::from_mode(0o750)).unwrap();
+            fs::set_permissions(source.join("empty"), fs::Permissions::from_mode(0o500)).unwrap();
             fs::write(source.join("executable"), b"#!/bin/sh\nexit 0\n").unwrap();
             fs::set_permissions(source.join("executable"), fs::Permissions::from_mode(0o700))
                 .unwrap();
@@ -2157,7 +2197,7 @@ mod tests {
                         .permissions()
                         .mode()
                         & 0o777,
-                    0o600
+                    0o400
                 );
                 assert_eq!(
                     fs::metadata(target.join("empty"))
@@ -2165,7 +2205,7 @@ mod tests {
                         .permissions()
                         .mode()
                         & 0o777,
-                    0o750
+                    0o500
                 );
                 assert_eq!(
                     fs::metadata(target.join("executable"))
@@ -2291,6 +2331,11 @@ mod tests {
             fs::read(dest.join("tracked")).unwrap(),
             b"destination divergence"
         );
+        // Only the test-owned trees regain write permission for fixture cleanup.
+        for target in [&source, &restored, &linked] {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(target.join("empty"), fs::Permissions::from_mode(0o700)).unwrap();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

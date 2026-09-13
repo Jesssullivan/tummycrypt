@@ -2,7 +2,7 @@
 
 use super::{
     attachment_policy_matches, capture_revision, common_repository, git, import_bundle, output,
-    require_missing, restore_entry, restore_filesystem_rows, snapshot_command, sync_private_tree,
+    require_missing, restore_entries, restore_filesystem_rows, snapshot_command, sync_private_tree,
     text, write_git_pointer, IndexReservation,
 };
 use crate::{BulkloadRefusal, Result};
@@ -196,12 +196,7 @@ pub fn restore(
         "-z",
         &capture_revision(&heads, "worktree")?,
     ]))?;
-    for entry in entries
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-    {
-        restore_entry(&destination, entry)?;
-    }
+    restore_entries(&destination, &entries)?;
     restore_filesystem_rows(&destination, &capture_revision(&heads, "filesystem-v1")?)?;
     if image(&admin)? != before {
         return Err(BulkloadRefusal::GitAuthorityChanged);
@@ -210,6 +205,12 @@ pub fn restore(
     attachment_policy_matches(&repository, &repository, &heads)?;
     fs::File::open(&destination)?.sync_all()?;
     reservation.release()?;
+    // The completion receipt must not precede the new target directory entry.
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(&parent)?
+        .sync_all()?;
     complete(&receipt, &destination, &admin, &head, &staged)
 }
 

@@ -22,7 +22,7 @@ use tcfs_bulkload_proto::FileKind;
 
 use crate::freshness::{NullCache, StatIdentity};
 use crate::materialize::Destination;
-use crate::transfer_store::{row_key, Manifest, Store};
+use crate::transfer_store::{row_key, Manifest, Store, PERSIST_BATCH};
 use crate::walk::{walk, WalkOptions};
 use crate::{BulkloadRefusal, Frame, FrameKind, Result, RowSchema};
 
@@ -465,17 +465,25 @@ fn receive_chunks<R: Read, W: Write>(
             digests: missing.clone(),
         },
     )?;
+    let mut pending = Vec::with_capacity(PERSIST_BATCH);
     for expected in missing {
         match read_frame(input)?.kind {
             FrameKind::Chunk { digest, data } if digest == expected => {
+                if data.len() > crate::hash::CDC_MAX_BYTES as usize {
+                    return Err(BulkloadRefusal::DigestMismatch);
+                }
                 stats.bytes_received = stats.bytes_received.saturating_add(data.len() as u64);
-                store.put_chunk(&digest, &data)?;
+                pending.push((digest, data));
+                if pending.len() == PERSIST_BATCH {
+                    store.put_chunks(&pending)?;
+                    pending.clear();
+                }
             }
             FrameKind::Refusal { .. } => return Err(BulkloadRefusal::SealedObjectMissing),
             _ => return Err(BulkloadRefusal::FrameCodec),
         }
     }
-    Ok(())
+    store.put_chunks(&pending)
 }
 
 fn capture(
@@ -530,6 +538,7 @@ fn capture(
     }
     let mut hasher = blake3::Hasher::new();
     let mut chunks = Vec::new();
+    let mut pending = Vec::with_capacity(PERSIST_BATCH);
     for chunk in fastcdc::v2020::StreamCDC::new(
         prefix.as_slice().chain(reader),
         crate::hash::CDC_MIN_BYTES,
@@ -542,12 +551,17 @@ fn capture(
         }
         hasher.update(&chunk.data);
         let digest = crate::hash::hash_bytes(&chunk.data);
-        store.put_chunk(&digest, &chunk.data)?;
         chunks.push(ChunkSpec {
             digest,
             size: chunk.data.len() as u64,
         });
+        pending.push((digest, chunk.data));
+        if pending.len() == PERSIST_BATCH {
+            store.put_chunks(&pending)?;
+            pending.clear();
+        }
     }
+    store.put_chunks(&pending)?;
     if StatIdentity::from_metadata(&file.metadata()?) != expected {
         return Err(BulkloadRefusal::SourceChangedAfterSnapshot);
     }
@@ -735,6 +749,32 @@ mod tests {
                 std::fs::read(corpus.base.join("destination").join(relative)).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn chunk_batches_round_trip_and_resume_large_file() {
+        let corpus = Corpus::new();
+        let mut seed = 1_u32;
+        let bytes: Vec<u8> = (0..=(PERSIST_BATCH * crate::hash::CDC_MAX_BYTES as usize))
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed.to_le_bytes().first().copied().unwrap()
+            })
+            .collect();
+        std::fs::write(corpus.base.join("source/large"), &bytes).unwrap();
+        let first = corpus.run().unwrap();
+        assert!(first.refusals.is_empty());
+        assert_eq!(first.source_bytes_read, bytes.len() as u64);
+        assert_eq!(
+            std::fs::read(corpus.base.join("destination/large")).unwrap(),
+            bytes
+        );
+        let resumed = corpus.run().unwrap();
+        assert!(resumed.refusals.is_empty());
+        assert_eq!(resumed.source_bytes_read, 0);
+        assert_eq!(resumed.bytes_received, 0);
     }
 
     #[test]

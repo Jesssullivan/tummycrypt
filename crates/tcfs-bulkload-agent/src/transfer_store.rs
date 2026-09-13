@@ -22,6 +22,10 @@ static FILE_SYNC_NS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNCS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNC_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Maximum buffered chunks per producer (at most 2 MiB of chunk payload).
+pub(crate) const PERSIST_BATCH: usize = 8;
+const PERSIST_WORKERS: usize = 2;
+
 /// Process-local chunk persistence instrumentation.
 ///
 /// Durations sum worker time,
@@ -306,7 +310,11 @@ impl Store {
     /// # Errors
     /// Refuses unexpected filesystem failures.
     pub fn chunk(&self, digest: &[u8; 32]) -> Result<Option<Vec<u8>>> {
-        let path = self.root.join("chunks").join(hex(digest));
+        Self::chunk_at(&self.root, digest)
+    }
+
+    fn chunk_at(root: &Path, digest: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        let path = root.join("chunks").join(hex(digest));
         let file = match crate::hash::open_nofollow(&path) {
             Ok(file) => file,
             Err(BulkloadRefusal::Io(Some(libc::ENOENT))) => return Ok(None),
@@ -330,6 +338,19 @@ impl Store {
     /// # Errors
     /// Refuses a digest mismatch or failed durable publication.
     pub fn put_chunk(&self, digest: &[u8; 32], data: &[u8]) -> Result<()> {
+        Self::put_chunk_at(&self.root, digest, data)
+    }
+
+    /// Persist a bounded batch; every worker is joined before returning, including
+    /// on refusal. Each chunk retains its own file and directory durability fence.
+    pub(crate) fn put_chunks(&self, chunks: &[([u8; 32], Vec<u8>)]) -> Result<()> {
+        let root = self.root.as_path();
+        persist_batch_with(chunks, &|digest, data| {
+            Self::put_chunk_at(root, digest, data)
+        })
+    }
+
+    fn put_chunk_at(root: &Path, digest: &[u8; 32], data: &[u8]) -> Result<()> {
         PUT_CALLS.fetch_add(1, Ordering::Relaxed);
         let _timer = PutTimer(Instant::now());
         if data.len() > crate::hash::CDC_MAX_BYTES as usize
@@ -337,10 +358,17 @@ impl Store {
         {
             return Err(BulkloadRefusal::DigestMismatch);
         }
-        if self.chunk(digest)?.is_some() {
+        if Self::chunk_at(root, digest)?.is_some() {
+            // A concurrent publisher may have linked the already-synced inode
+            // but not yet synced its directory. Fence that link before reuse.
+            timed_sync(
+                &fs::File::open(root.join("chunks"))?,
+                &DIR_SYNCS,
+                &DIR_SYNC_NS,
+            )?;
             return Ok(());
         }
-        let chunks = self.root.join("chunks");
+        let chunks = root.join("chunks");
         let staging = chunks.join(format!(
             ".part-{}-{}",
             std::process::id(),
@@ -358,7 +386,7 @@ impl Store {
             match fs::hard_link(&staging, &target) {
                 Ok(()) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    self.chunk(digest)?.ok_or(BulkloadRefusal::DigestMismatch)?;
+                    Self::chunk_at(root, digest)?.ok_or(BulkloadRefusal::DigestMismatch)?;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -368,6 +396,47 @@ impl Store {
         timed_sync(&fs::File::open(chunks)?, &DIR_SYNCS, &DIR_SYNC_NS)?;
         result
     }
+}
+
+fn persist_batch_with<F>(chunks: &[([u8; 32], Vec<u8>)], persist: &F) -> Result<()>
+where
+    F: Fn(&[u8; 32], &[u8]) -> Result<()> + Sync,
+{
+    if chunks.len() > PERSIST_BATCH {
+        return Err(BulkloadRefusal::BudgetExceeded);
+    }
+    if chunks
+        .iter()
+        .any(|(_, data)| data.len() > crate::hash::CDC_MAX_BYTES as usize)
+    {
+        return Err(BulkloadRefusal::DigestMismatch);
+    }
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for group in chunks.chunks(chunks.len().div_ceil(PERSIST_WORKERS)) {
+            workers.push(std::thread::Builder::new().spawn_scoped(scope, move || {
+                for (digest, data) in group {
+                    persist(digest, data)?;
+                }
+                Ok(())
+            })?);
+        }
+        let mut outcome = Ok(());
+        for worker in workers {
+            let result = worker
+                .join()
+                .map_err(|_| BulkloadRefusal::Io(None))
+                .and_then(|result| result);
+            // Join even after an earlier refusal; no background writes escape.
+            if outcome.is_ok() {
+                outcome = result;
+            }
+        }
+        outcome
+    })
 }
 
 /// Bind a row to its source root identity and destination namespace.
@@ -411,4 +480,54 @@ fn hex(digest: &[u8; 32]) -> String {
 
 fn sqlite_error(_: rusqlite::Error) -> BulkloadRefusal {
     BulkloadRefusal::SqliteIntegrityCheckFailed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn batch_joins_success_and_refusal_before_returning() -> Result<()> {
+        let chunks = vec![([0; 32], vec![0]), ([1; 32], vec![1])];
+        let finished = AtomicUsize::new(0);
+        persist_batch_with(&chunks, &|_, _| {
+            finished.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })?;
+        assert_eq!(finished.load(Ordering::SeqCst), 2);
+        finished.store(0, Ordering::SeqCst);
+        let failed = persist_batch_with(&chunks, &|digest, _| {
+            if digest.first() == Some(&0) {
+                return Err(BulkloadRefusal::DigestMismatch);
+            }
+            finished.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(failed, Err(BulkloadRefusal::DigestMismatch));
+        // The second worker finishes even if the first worker failed first.
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_batch_refuses_before_any_write() {
+        let chunks = vec![([0; 32], Vec::new()); PERSIST_BATCH + 1];
+        let calls = AtomicUsize::new(0);
+        let result = persist_batch_with(&chunks, &|_, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(result, Err(BulkloadRefusal::BudgetExceeded));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let oversized = vec![([0; 32], vec![0; crate::hash::CDC_MAX_BYTES as usize + 1])];
+        assert_eq!(
+            persist_batch_with(&oversized, &|_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+            Err(BulkloadRefusal::DigestMismatch)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }
