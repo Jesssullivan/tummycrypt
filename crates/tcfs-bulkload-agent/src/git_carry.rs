@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 
 use crate::{BulkloadRefusal, Result};
 
+mod raw_tree;
 pub mod shared;
 
 fn git(repo: &Path) -> Command {
@@ -143,53 +144,18 @@ fn commit_tree(private: &Path, tree: &str, label: &str) -> Result<String> {
     )
 }
 
-// Git's normal add applies attributes (including EOL normalization). Archive
-// raw worktree bytes instead; the separate staged tree retains index semantics.
-fn capture_tree(private: &Path, repo: &Path, index: &Path) -> Result<String> {
-    use std::os::unix::ffi::OsStrExt;
-    output(snapshot_command(private, repo, index).args(["add", "--all", "--force", "--", "."]))?;
-    let entries =
-        output(snapshot_command(private, repo, index).args(["ls-files", "--stage", "-z"]))?;
-    for entry in entries.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
-        let tab = entry
-            .iter()
-            .position(|b| *b == b'\t')
-            .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
-        let header = std::str::from_utf8(
-            entry
-                .get(..tab)
-                .ok_or(BulkloadRefusal::GitInventoryMalformed)?,
-        )
-        .map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
-        let mode = header
-            .split_whitespace()
-            .next()
-            .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
-        let path = std::ffi::OsStr::from_bytes(
-            entry
-                .get(tab + 1..)
-                .ok_or(BulkloadRefusal::GitInventoryMalformed)?,
-        );
-        if mode == "160000" {
-            return Err(BulkloadRefusal::GitInventoryMalformed);
-        }
-        if matches!(mode, "100644" | "100755") {
-            let value = text(
-                snapshot_command(private, repo, index)
-                    .args(["hash-object", "-w", "--no-filters", "--"])
-                    .arg(path),
-            )?;
-            output(
-                snapshot_command(private, repo, index)
-                    .args(["update-index", "--add", "--cacheinfo", mode, &value])
-                    .arg(path),
-            )?;
-        }
+// Build a raw tree without running attributes/filters or starting Git per file.
+fn capture_tree(private: &Path, repo: &Path, _index: &Path) -> Result<String> {
+    let rows = filesystem_rows(repo)?;
+    let (tree, _) = raw_tree::capture(private, repo, &rows)?;
+    if rows != filesystem_rows(repo)? {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
     }
-    text(snapshot_command(private, repo, index).arg("write-tree"))
+    Ok(tree)
 }
 
 fn capture_refs(repo: &Path, private: &Path, inventory: &str) -> Result<()> {
+    let mut pending = std::collections::BTreeMap::new();
     for line in inventory.lines() {
         let (value, name) = line
             .split_once(' ')
@@ -203,23 +169,41 @@ fn capture_refs(repo: &Path, private: &Path, inventory: &str) -> Result<()> {
                 || format!("refs/carry-export/{name}"),
                 |tail| format!("refs/carry-export/union/v1/{tail}"),
             );
-        set_ref(private, &exported, value)?;
+        if !oid(value) || exported.as_bytes().contains(&0) {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
+        if pending.insert(exported, value.to_owned()).is_some() {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
     }
     let stash = output(git(repo).args(["reflog", "show", "--format=%H", "refs/stash"]));
     if let Ok(stash) = stash {
         let stash = String::from_utf8(stash).map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
         for value in stash.lines() {
-            let name = format!("refs/carry-export/stashes/{value}");
-            if !git(private)
-                .args(["show-ref", "--verify", "--quiet", &name])
-                .status()?
-                .success()
-            {
-                set_ref(private, &name, value)?;
+            if !oid(value) {
+                return Err(BulkloadRefusal::GitInventoryMalformed);
             }
+            let name = format!("refs/carry-export/stashes/{value}");
+            pending.entry(name).or_insert_with(|| value.to_owned());
         }
     } else if inventory.lines().any(|line| line.ends_with(" refs/stash")) {
         return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    // One create-only Git transaction instead of one process per ref. NUL
+    // framing preserves legal quote characters without command interpolation.
+    let mut commands = Vec::new();
+    for (name, value) in pending {
+        commands.extend_from_slice(b"create ");
+        commands.extend_from_slice(name.as_bytes());
+        commands.push(0);
+        commands.extend_from_slice(value.as_bytes());
+        commands.push(0);
+    }
+    if !commands.is_empty() {
+        input(
+            git(private).args(["update-ref", "--stdin", "-z"]),
+            &commands,
+        )?;
     }
     Ok(())
 }
@@ -578,9 +562,8 @@ fn export_repository_inner(
         "refs/carry-export/staged",
         &commit_tree(&private, &staged, "bulkload staged tree")?,
     )?;
-    let tree = capture_tree(&private, &repo, &index)?;
-    if tree != capture_tree(&private, &repo, &index)?
-        || before_refs != refs(&repo)?
+    let (tree, _) = raw_tree::capture(&private, &repo, &seats)?;
+    if before_refs != refs(&repo)?
         || before_index != fs::read(index_path)?
         || head != text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?
         || seats != filesystem_rows(&repo)?
@@ -1638,6 +1621,7 @@ mod tests {
             fs::write(source.join("tracked"), content).unwrap();
             output(git(&source).args(["stash", "push"])).unwrap();
         }
+        output(git(&source).args(["branch", "quote\"branch"])).unwrap();
         fs::write(source.join("tracked"), b"staged").unwrap();
         fs::remove_file(source.join("deleted")).unwrap();
         fs::write(source.join("binary"), [0, 1, 128]).unwrap();
@@ -1667,6 +1651,11 @@ mod tests {
         let dest_head = fs::read(dest.join(".git/HEAD")).unwrap();
         let native = refs(&dest).unwrap();
         let bundle = export_repository(&source, &root.join("capture")).unwrap();
+        assert!(
+            text(git(&source).args(["bundle", "list-heads"]).arg(&bundle))
+                .unwrap()
+                .contains("refs/carry-export/refs/heads/quote\"branch")
+        );
         let count = import_bundle(&dest, &bundle, "neo").unwrap();
         assert!(count >= 6);
         assert_eq!(count, import_bundle(&dest, &bundle, "neo").unwrap());
