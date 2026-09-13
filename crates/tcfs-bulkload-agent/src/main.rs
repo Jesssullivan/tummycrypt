@@ -30,12 +30,24 @@ SUBCOMMANDS:
     serve       Serve one framed request on stdin/stdout (for SSH)
     git-export REPO NEW_CAPTURE_DIR
                 Archive refs/stashes and staged/worktree trees in a bundle
+    estate-add PLAN SOURCE_REPO DEST_REPO [ABSENT_WORKSPACE]
+                Append an explicit reviewed item; no automatic worktree proliferation
+    estate-show PLAN
+                Print the exact selected sources, repositories and restore targets
+    estate-add-batch PLAN SOURCE DEST WORKSPACE_OR_DASH [SOURCE DEST WORKSPACE_OR_DASH ...]
+                Append selected items in one linear plan update
+    estate-capture PLAN PRIVATE_STATE CORPUS JOBS
+                Capture reviewed Git items with successful capture reuse (jobs 1 or 2)
+    estate-apply PLAN CORPUS PRIVATE_STATE SOURCE JOBS
+                Import refs and restore only explicitly selected absent workspaces
     git-import REPO BUNDLE SOURCE
                 Preserve bundle refs in a content-addressed carry namespace
     git-restore BUNDLE ABSENT_DEST SOURCE
                 Restore captured staged/unstaged work into a new repository
     git-restore-linked BUNDLE REPOSITORY ABSENT_DEST SOURCE
                 Restore captured work into a new linked worktree without switching others
+    git-repair-missing-index BUNDLE REPOSITORY SOURCE NEW_RECEIPT
+                Create a missing same-HEAD staged index only; never rewrite payload
     snapshot SOURCE OUTPUT [MAX_STEPS]
                 Capture live SQLite through its online backup API
     compose BASE INCOMING OUTPUT SOURCE_ID [MAX_STEPS]
@@ -81,6 +93,11 @@ fn main() -> ExitCode {
             &args.collect::<Vec<_>>(),
         ),
         Some("hydrate-state") => hydrate_command(&args.collect::<Vec<_>>()),
+        Some("git-repair-missing-index") => repair_index_command(&args.collect::<Vec<_>>()),
+        Some(
+            name @ ("estate-add" | "estate-add-batch" | "estate-show" | "estate-capture"
+            | "estate-apply"),
+        ) => estate_command(name, &args.collect::<Vec<_>>()),
         Some("apply-state-candidate") => apply_state_command(&args.collect::<Vec<_>>()),
         Some("serve") => tcfs_bulkload_agent::transfer::serve(
             &mut std::io::stdin().lock(),
@@ -205,6 +222,98 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
                 stats.paths_corrected, stats.unavailable_rollouts
             );
             Ok(())
+        }
+        _ => Err(BulkloadRefusal::RequiredFieldMissing),
+    }
+}
+
+fn repair_index_command(args: &[std::ffi::OsString]) -> Result<()> {
+    if args.len() != 4 {
+        return Err(BulkloadRefusal::RequiredFieldMissing);
+    }
+    let path = |i| {
+        args.get(i)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let source = args
+        .get(2)
+        .and_then(|value| value.to_str())
+        .ok_or(BulkloadRefusal::PathNotPortable)?;
+    tcfs_bulkload_agent::git_carry::repair_missing_index(path(0)?, path(1)?, source, path(3)?)?;
+    println!("missing index repaired; payload parity not asserted");
+    Ok(())
+}
+
+// Escaped paths are intentional: receipts must not permit embedded newlines.
+#[allow(clippy::unnecessary_debug_formatting)]
+fn estate_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
+    use tcfs_bulkload_agent::estate;
+    let path = |i| {
+        args.get(i)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let jobs = || {
+        args.last()
+            .and_then(|arg| arg.to_str())
+            .ok_or(BulkloadRefusal::FieldDomainViolation)?
+            .parse::<usize>()
+            .map_err(|_| BulkloadRefusal::FieldDomainViolation)
+    };
+    let receipt = |row: &estate::Receipt| {
+        let mut output = std::io::stdout().lock();
+        writeln!(
+            output,
+            "item={} source={:?} outcome={} reason={:?}",
+            row.item, row.source, row.outcome, row.reason
+        )?;
+        output.flush()?;
+        Ok(())
+    };
+    match command {
+        "estate-show" if args.len() == 1 => {
+            for item in estate::inspect(path(0)?)? {
+                println!("{item:?}");
+            }
+            Ok(())
+        }
+        "estate-add" if (3..=4).contains(&args.len()) => {
+            estate::add(path(0)?, path(1)?, path(2)?, args.get(3).map(Path::new))
+        }
+        "estate-add-batch" if args.len() >= 4 && (args.len() - 1).is_multiple_of(3) => {
+            let mut items = Vec::new();
+            for group in args
+                .get(1..)
+                .ok_or(BulkloadRefusal::RequiredFieldMissing)?
+                .chunks_exact(3)
+            {
+                let source = group
+                    .first()
+                    .map(PathBuf::from)
+                    .ok_or(BulkloadRefusal::RequiredFieldMissing)?;
+                let repository = group
+                    .get(1)
+                    .map(PathBuf::from)
+                    .ok_or(BulkloadRefusal::RequiredFieldMissing)?;
+                let workspace = group.get(2).filter(|p| *p != "-").map(PathBuf::from);
+                items.push(estate::Item {
+                    source,
+                    repository,
+                    workspace,
+                });
+            }
+            estate::add_batch(path(0)?, &items)
+        }
+        "estate-capture" if args.len() == 4 => {
+            estate::capture(path(0)?, path(1)?, path(2)?, jobs()?, &receipt)
+        }
+        "estate-apply" if args.len() == 5 => {
+            let source = args
+                .get(3)
+                .and_then(|arg| arg.to_str())
+                .ok_or(BulkloadRefusal::FieldDomainViolation)?;
+            estate::apply(path(0)?, path(1)?, path(2)?, source, jobs()?, &receipt)
         }
         _ => Err(BulkloadRefusal::RequiredFieldMissing),
     }

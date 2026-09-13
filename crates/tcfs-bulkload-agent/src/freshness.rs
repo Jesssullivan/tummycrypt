@@ -26,7 +26,7 @@ use tcfs_bulkload_proto::{BulkloadRefusal, Result, RowSchema};
 /// reading bytes at all. `ctime_ns` is carried alongside `mtime_ns` because
 /// mtime alone is forgeable by a restore tool and does not move when only
 /// ownership or mode changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct StatIdentity {
     /// Containing device id.
     pub dev: u64,

@@ -17,6 +17,7 @@
 //! `tcfs-sync`; the trait here keeps M3 unblocked either way and lets the M0
 //! bench swap in a null cache.
 
+pub mod estate;
 pub mod freshness;
 pub mod git_carry;
 pub mod hash;

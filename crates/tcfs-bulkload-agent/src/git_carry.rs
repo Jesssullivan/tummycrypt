@@ -238,6 +238,278 @@ fn canonical_tail(tail: &str) -> bool {
     source_slug(source) && snapshot.len() == 64 && oid(snapshot) && !suffix.is_empty()
 }
 
+/// Canonical common repository used to serialize applies sharing Git storage.
+///
+/// # Errors
+/// Refuses unavailable or malformed Git administration.
+pub fn common_repository(repo: &Path) -> Result<PathBuf> {
+    let common = text(git(repo).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]))?;
+    Ok(fs::canonicalize(common)?)
+}
+
+/// Identity of a reusable capture, including new transit refs and full census.
+///
+/// This reads Git metadata and filesystem metadata, not ordinary file contents.
+/// Callers must compare before/after keys and retain the successful bundle.
+/// It is not a filesystem journal, atomic snapshot, or a no-rewalk claim.
+///
+/// # Errors
+/// Refuses unsupported source indexes, filesystem seats or Git state.
+pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = fs::canonicalize(repo)?;
+    let common = common_repository(&repo)?;
+    let inventory = refs(&repo)?;
+    let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
+    let symbolic = git(&repo).args(["symbolic-ref", "-q", "HEAD"]).output()?;
+    if !symbolic.status.success() && symbolic.status.code() != Some(1) {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    let (_, index) = source_index(&repo)?;
+    let exclude_path = text(git(&repo).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "info/exclude",
+    ]))?;
+    let exclude = match fs::read(exclude_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let stash = if inventory.lines().any(|line| line.ends_with(" refs/stash")) {
+        output(git(&repo).args(["reflog", "show", "--format=%H", "refs/stash"]))?
+    } else {
+        Vec::new()
+    };
+    let rows =
+        postcard::to_allocvec(&filesystem_rows(&repo)?).map_err(|_| BulkloadRefusal::FrameCodec)?;
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"tcfs-git-reusable-capture-v1\0");
+    for bytes in [
+        repo.as_os_str().as_bytes(),
+        common.as_os_str().as_bytes(),
+        inventory.as_bytes(),
+        head.as_bytes(),
+        &symbolic.stdout,
+        &index,
+        &exclude,
+        &stash,
+        &rows,
+    ] {
+        hash.update(
+            &u64::try_from(bytes.len())
+                .map_err(|_| BulkloadRefusal::BudgetExceeded)?
+                .to_le_bytes(),
+        );
+        hash.update(bytes);
+    }
+    for directory in [&repo, &common] {
+        let identity = crate::freshness::StatIdentity::from_metadata(&fs::metadata(directory)?);
+        for value in [i128::from(identity.dev), i128::from(identity.ino)] {
+            hash.update(&value.to_le_bytes());
+        }
+    }
+    Ok(*hash.finalize().as_bytes())
+}
+
+/// Reconstruct a missing index from a same-HEAD capture without touching payload.
+///
+/// Receipt must be new, outside the worktree, and on the index filesystem for
+/// atomic create-only publication. Existing indexes always refuse. This restores
+/// captured staging, not a claim that the destination's lost staging was known.
+///
+/// # Errors
+/// Refuses HEAD/admin changes, active Git operations, occupied index/receipt,
+/// unsupported capture/index state, or cross-filesystem atomic publication.
+pub fn repair_missing_index(
+    bundle: &Path,
+    repo: &Path,
+    source: &str,
+    receipt: &Path,
+) -> Result<()> {
+    repair_missing_index_inner(bundle, repo, source, receipt, |_| Ok(()))
+}
+
+fn repair_missing_index_inner(
+    bundle: &Path,
+    repo: &Path,
+    source: &str,
+    receipt: &Path,
+    before_publish: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let repo = fs::canonicalize(repo)?;
+    let bundle = fs::canonicalize(bundle)?;
+    let admin = PathBuf::from(text(git(&repo).args(["rev-parse", "--absolute-git-dir"]))?);
+    let index = PathBuf::from(text(git(&repo).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index",
+    ]))?);
+    require_missing(&index)?;
+    for name in [
+        "index.lock",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+        "sequencer",
+    ] {
+        require_missing(&admin.join(name))?;
+    }
+    let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
+    let heads = text(git(&repo).args(["bundle", "list-heads"]).arg(&bundle))?;
+    let find = |suffix: &str| -> Result<String> {
+        heads
+            .lines()
+            .find_map(|line| {
+                line.split_once(' ')
+                    .filter(|(_, name)| *name == format!("refs/carry-export/{suffix}"))
+            })
+            .map(|(value, _)| value.to_owned())
+            .filter(|value| oid(value))
+            .ok_or(BulkloadRefusal::GitInventoryMalformed)
+    };
+    if find("head")? != head {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    let controls = admin_controls(&admin)?;
+    let admin_identity = crate::freshness::StatIdentity::from_metadata(&fs::metadata(&admin)?);
+    let receipt_parent =
+        fs::canonicalize(receipt.parent().ok_or(BulkloadRefusal::PathNotAbsolute)?)?;
+    let receipt = receipt_parent.join(
+        receipt
+            .file_name()
+            .ok_or(BulkloadRefusal::PathNotAbsolute)?,
+    );
+    if receipt.starts_with(&repo) || receipt.starts_with(&admin) {
+        return Err(BulkloadRefusal::PathEscapesRoot);
+    }
+    fs::DirBuilder::new().mode(0o700).create(&receipt)?;
+    fs::write(
+        receipt.join("original-administration.postcard"),
+        postcard::to_allocvec(&(head.clone(), true, &controls))
+            .map_err(|_| BulkloadRefusal::FrameCodec)?,
+    )?;
+    fs::File::open(receipt.join("original-administration.postcard"))?.sync_all()?;
+    fs::File::open(&receipt)?.sync_all()?;
+    fs::File::open(&receipt_parent)?.sync_all()?;
+    import_bundle(&repo, &bundle, source)?;
+    let staged_entries = output(git(&repo).args(["ls-tree", "-r", "-z", &find("staged")?]))?;
+    if staged_entries
+        .split(|b| *b == 0)
+        .any(|entry| entry.starts_with(b"160000 "))
+    {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    let private_index = receipt.join("captured.index");
+    output(
+        git(&repo)
+            .env("GIT_INDEX_FILE", &private_index)
+            .args(["read-tree", &format!("{}^{{tree}}", find("staged")?)]),
+    )?;
+    fs::set_permissions(&private_index, fs::Permissions::from_mode(0o600))?;
+    fs::File::open(&private_index)?.sync_all()?;
+    fs::File::open(&receipt)?.sync_all()?;
+    let reservation = IndexReservation::acquire(admin.join("index.lock"))?;
+    let current_identity = crate::freshness::StatIdentity::from_metadata(&fs::metadata(&admin)?);
+    if (admin_identity.dev, admin_identity.ino) != (current_identity.dev, current_identity.ino)
+        || controls != admin_controls(&admin)?
+        || text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))? != head
+    {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    before_publish(&index)?;
+    if controls != admin_controls(&admin)?
+        || text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))? != head
+    {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    fs::hard_link(&private_index, &index)?;
+    fs::File::open(&admin)?.sync_all()?;
+    if text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))? != head {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    reservation.release()
+}
+
+/// Cooperates with native Git's index lock. The held descriptor identifies the
+/// exact inode owned by this operation; a replaced/pre-existing lock is never
+/// removed. Error paths release only this reservation, never another writer's.
+struct IndexReservation {
+    path: PathBuf,
+    file: fs::File,
+    released: bool,
+}
+
+impl IndexReservation {
+    fn acquire(path: PathBuf) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        Ok(Self {
+            path,
+            file,
+            released: false,
+        })
+    }
+
+    fn remove_owned(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let original = self.file.metadata()?;
+        let current = fs::symlink_metadata(&self.path)?;
+        if !current.is_file() || (original.dev(), original.ino()) != (current.dev(), current.ino())
+        {
+            return Err(BulkloadRefusal::GitAuthorityChanged);
+        }
+        fs::remove_file(&self.path)?;
+        fs::File::open(self.path.parent().ok_or(BulkloadRefusal::PathEscapesRoot)?)?.sync_all()?;
+        Ok(())
+    }
+
+    fn release(mut self) -> Result<()> {
+        self.remove_owned()?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for IndexReservation {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self.remove_owned();
+        }
+    }
+}
+
+fn require_missing(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err(BulkloadRefusal::GitDestinationOccupied),
+    }
+}
+
+fn admin_controls(admin: &Path) -> Result<Vec<(String, Option<Vec<u8>>)>> {
+    ["HEAD", "commondir", "gitdir", "config", "config.worktree"]
+        .into_iter()
+        .map(|name| {
+            let bytes = match fs::read(admin.join(name)) {
+                Ok(value) => Some(value),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            Ok((name.to_owned(), bytes))
+        })
+        .collect()
+}
+
 /// Export one worktree and all repository refs into a new, private directory.
 ///
 /// # Errors
@@ -855,6 +1127,15 @@ mod tests {
         }
         let original_a = text(git(&a).args(["rev-parse", "HEAD"])).unwrap();
         let original_b = text(git(&b).args(["rev-parse", "HEAD"])).unwrap();
+        assert_eq!(
+            common_repository(&a).unwrap(),
+            fs::canonicalize(a.join(".git")).unwrap()
+        );
+        let reusable = reusable_capture_key(&a).unwrap();
+        assert_eq!(reusable, reusable_capture_key(&a).unwrap());
+        fs::write(a.join("tracked"), b"dirty-a!").unwrap();
+        assert_ne!(reusable, reusable_capture_key(&a).unwrap());
+        fs::write(a.join("tracked"), b"source-a").unwrap();
         let mut stashes = Vec::new();
         for repo in [&a, &b] {
             fs::write(repo.join("tracked"), b"unique stash state").unwrap();
@@ -863,7 +1144,9 @@ mod tests {
         }
         // A legacy nested provenance name is kept, not silently discarded.
         let legacy = "refs/carry/sting/old/registry/carry-export/refs/carry/neo/old/heads/topic";
+        let before_ref = reusable_capture_key(&a).unwrap();
         set_ref(&a, legacy, &original_a).unwrap();
+        assert_ne!(before_ref, reusable_capture_key(&a).unwrap());
         let mut fixed = None;
         for round in 0..5 {
             let ab = export_repository(&a, &root.join(format!("a-{round}"))).unwrap();
@@ -1087,6 +1370,67 @@ mod tests {
         assert!(restore_linked(&bundle, &dest, &linked, "neo").is_err());
         assert_eq!(fs::read(restored.join("binary")).unwrap(), [0, 255, 128]);
         assert!(restore_bundle(&bundle, &restored, "neo").is_err());
+        fs::remove_file(restored.join(".git/index")).unwrap();
+        fs::write(restored.join("tracked"), b"destination-only pending change").unwrap();
+        repair_missing_index(&bundle, &restored, "neo", &root.join("repair")).unwrap();
+        assert_eq!(
+            fs::read(restored.join("tracked")).unwrap(),
+            b"destination-only pending change"
+        );
+        assert_eq!(
+            output(git(&source).args(["diff", "--cached", "--binary"])).unwrap(),
+            output(git(&restored).args(["diff", "--cached", "--binary"])).unwrap()
+        );
+        assert!(root
+            .join("repair/original-administration.postcard")
+            .is_file());
+        assert!(
+            repair_missing_index(&bundle, &restored, "neo", &root.join("repair-again")).is_err()
+        );
+        fs::remove_file(restored.join(".git/index")).unwrap();
+        fs::write(restored.join(".git/index.lock"), b"another Git writer").unwrap();
+        assert!(
+            repair_missing_index(&bundle, &restored, "neo", &root.join("repair-locked")).is_err()
+        );
+        assert_eq!(
+            fs::read(restored.join(".git/index.lock")).unwrap(),
+            b"another Git writer"
+        );
+        fs::remove_file(restored.join(".git/index.lock")).unwrap();
+        assert!(repair_missing_index_inner(
+            &bundle,
+            &restored,
+            "neo",
+            &root.join("repair-race"),
+            |index| {
+                assert!(restored.join(".git/index.lock").is_file());
+                assert!(output(git(&restored).args(["read-tree", "HEAD"])).is_err());
+                fs::write(index, b"concurrent index publication")?;
+                Ok(())
+            }
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(restored.join(".git/index")).unwrap(),
+            b"concurrent index publication"
+        );
+        assert!(!restored.join(".git/index.lock").exists());
+        let lock_path = root.join("reservation.lock");
+        let reservation = IndexReservation::acquire(lock_path.clone()).unwrap();
+        fs::rename(&lock_path, root.join("reservation-original")).unwrap();
+        fs::write(&lock_path, b"replacement writer").unwrap();
+        drop(reservation);
+        assert_eq!(fs::read(lock_path).unwrap(), b"replacement writer");
+        fs::remove_file(dest.join(".git/index")).unwrap();
+        assert_eq!(
+            repair_missing_index(&bundle, &dest, "neo", &root.join("repair-wrong-head")),
+            Err(BulkloadRefusal::GitAuthorityChanged)
+        );
+        assert!(!dest.join(".git/index").exists());
+        assert_eq!(
+            fs::read(dest.join("tracked")).unwrap(),
+            b"destination divergence"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
