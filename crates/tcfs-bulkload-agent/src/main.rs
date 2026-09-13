@@ -1,13 +1,13 @@
-//! `tcfs-bulkload-agent` -- the thin darwin-side bulkload half.
+//! Native ordinary-file transport and offline provider composition on Unix.
 //!
 //! Argument parsing is hand-rolled on purpose. `clap` is not on the R34
 //! dependency allowlist for the agent, and a binary whose whole point is a
 //! closed dependency graph should not grow a parser crate to read one
-//! subcommand.
+//! subcommands.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use tcfs_bulkload_agent::freshness::{Freshness, FreshnessCache as _, MemoryCache, StatIdentity};
 use tcfs_bulkload_agent::hash;
@@ -15,7 +15,7 @@ use tcfs_bulkload_agent::walk::{self, HashPolicy, WalkOptions};
 use tcfs_bulkload_proto::{BulkloadRefusal, FileKind, Frame, FrameKind, Result, RowSchema};
 
 const USAGE: &str = "\
-tcfs-bulkload-agent -- tcfs bulkload agent (M1 skeleton)
+tcfs-bulkload-agent -- ordinary-file transport and offline SQLite composition
 
 USAGE:
     tcfs-bulkload-agent <SUBCOMMAND>
@@ -23,12 +23,31 @@ USAGE:
 SUBCOMMANDS:
     selftest    Hash a temporary file and round-trip a postcard frame
     walk PATH   Stat-walk PATH and print the row and refusal counts
+    copy SOURCE DEST SOURCE_STATE DEST_STATE
+                Native local copy with private resumable chunk stores
+    pull HOST SOURCE DEST SOURCE_STATE DEST_STATE
+                Native SSH pull; remote tcfs-bulkload-agent must be installed
+    serve       Serve one framed request on stdin/stdout (for SSH)
+    snapshot SOURCE OUTPUT [MAX_STEPS]
+                Capture live SQLite through its online backup API
+    compose BASE INCOMING OUTPUT SOURCE_ID [MAX_STEPS]
+                Compose retained SQLite snapshots into a private candidate
+    compose-state BASE INCOMING OUTPUT SOURCE_ID SOURCE_HOME DEST_HOME [MAX_STEPS]
+                Compose Codex state with retained rollout path mapping
     help        Print this message
+
+BOUNDARIES:
+    copy/pull preserve divergent destinations and refuse live SQLite files.
+    They enumerate the source each run; completed content is resumable.
+    File manifests are bounded to 8 MiB; oversized manifests refuse.
+    Git-native divergent union is not supplied by copy/pull.
+    compose commands write offline candidates, never install live databases.
 ";
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    let outcome = match args.next().as_deref() {
+    let mut args = std::env::args_os().skip(1);
+    let command = args.next();
+    let outcome = match command.as_ref().and_then(|value| value.to_str()) {
         Some("selftest") => selftest(),
         Some("walk") => {
             if let Some(path) = args.next() {
@@ -38,6 +57,17 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+        Some("copy" | "pull" | "snapshot" | "compose" | "compose-state") => native_command(
+            command
+                .as_ref()
+                .and_then(|value| value.to_str())
+                .unwrap_or(""),
+            &args.collect::<Vec<_>>(),
+        ),
+        Some("serve") => tcfs_bulkload_agent::transfer::serve(
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+        ),
         Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -58,6 +88,132 @@ fn main() -> ExitCode {
             eprintln!("tcfs-bulkload-agent: refused: {refusal}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
+    let path = |index: usize| {
+        args.get(index)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    match command {
+        "copy" if args.len() == 4 => {
+            let stats =
+                tcfs_bulkload_agent::transfer::copy(path(0)?, path(1)?, path(2)?, path(3)?)?;
+            report_transfer(&stats)
+        }
+        "pull" if args.len() == 5 => {
+            let host = args.first().ok_or(BulkloadRefusal::RequiredFieldMissing)?;
+            let mut child = Command::new("ssh")
+                .args(["-T", "-oBatchMode=yes", "-oConnectTimeout=15", "--"])
+                .arg(host)
+                .args(["tcfs-bulkload-agent", "serve"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()?;
+            let result = {
+                let mut output = child.stdin.take().ok_or(BulkloadRefusal::Io(None))?;
+                let mut input = child.stdout.take().ok_or(BulkloadRefusal::Io(None))?;
+                tcfs_bulkload_agent::transfer::receive(
+                    &mut input,
+                    &mut output,
+                    path(1)?,
+                    path(3)?,
+                    path(2)?,
+                    path(4)?,
+                )
+            };
+            let exit_status = child.wait()?;
+            let stats = result?;
+            if !exit_status.success() {
+                return Err(BulkloadRefusal::Io(None));
+            }
+            report_transfer(&stats)
+        }
+        "snapshot" if (2..=3).contains(&args.len()) => {
+            tcfs_bulkload_agent::provider_sqlite::snapshot(
+                path(0)?,
+                path(1)?,
+                steps(args.get(2))?,
+            )?;
+            println!("snapshot complete");
+            Ok(())
+        }
+        "compose" if (4..=5).contains(&args.len()) => {
+            let source_id = args
+                .get(3)
+                .and_then(|value| value.to_str())
+                .ok_or(BulkloadRefusal::PathNotPortable)?;
+            let stats = tcfs_bulkload_agent::provider_sqlite::compose_snapshots(
+                path(0)?,
+                path(1)?,
+                path(2)?,
+                source_id,
+                steps(args.get(4))?,
+            )?;
+            println!(
+                "inserted={} equivalent={} preserved={} unresolved={} paths_corrected={} unavailable_rollouts={}",
+                stats.inserted, stats.equivalent, stats.preserved, stats.unresolved,
+                stats.paths_corrected, stats.unavailable_rollouts
+            );
+            Ok(())
+        }
+        "compose-state" if (6..=7).contains(&args.len()) => {
+            let source_id = args
+                .get(3)
+                .and_then(|value| value.to_str())
+                .ok_or(BulkloadRefusal::PathNotPortable)?;
+            let mapping = tcfs_bulkload_agent::provider_sqlite::PathMapping {
+                source_home: path(4)?,
+                destination_home: path(5)?,
+            };
+            let stats = tcfs_bulkload_agent::provider_sqlite::compose_state_snapshots(
+                path(0)?,
+                path(1)?,
+                path(2)?,
+                source_id,
+                steps(args.get(6))?,
+                &mapping,
+            )?;
+            println!(
+                "inserted={} equivalent={} preserved={} unresolved={} paths_corrected={} unavailable_rollouts={}",
+                stats.inserted, stats.equivalent, stats.preserved, stats.unresolved,
+                stats.paths_corrected, stats.unavailable_rollouts
+            );
+            Ok(())
+        }
+        _ => Err(BulkloadRefusal::RequiredFieldMissing),
+    }
+}
+
+fn steps(value: Option<&std::ffi::OsString>) -> Result<u32> {
+    value.map_or(Ok(1_000_000), |value| {
+        value
+            .to_str()
+            .ok_or(BulkloadRefusal::FieldDomainViolation)?
+            .parse()
+            .map_err(|_| BulkloadRefusal::FieldDomainViolation)
+    })
+}
+
+fn report_transfer(stats: &tcfs_bulkload_agent::transfer::TransferStats) -> Result<()> {
+    println!(
+        "completed={} reused={} bytes_received={} source_bytes_read={} refusals={}",
+        stats.completed,
+        stats.reused,
+        stats.bytes_received,
+        stats.source_bytes_read,
+        stats.refusals.len()
+    );
+    for (path, code) in &stats.refusals {
+        eprintln!("refused {}: {code}", path.escape_ascii());
+    }
+    if stats.refusals.is_empty() {
+        Ok(())
+    } else {
+        Err(BulkloadRefusal::ContractSelfInconsistent)
     }
 }
 
@@ -155,10 +311,7 @@ fn row_for(len: usize, meta: &std::fs::Metadata, digest: [u8; 32]) -> RowSchema 
 
 fn scratch_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
-    path.push(format!(
-        "tcfs-bulkload-agent-{name}-{}",
-        std::process::id()
-    ));
+    path.push(format!("tcfs-bulkload-agent-{name}-{}", std::process::id()));
     path
 }
 

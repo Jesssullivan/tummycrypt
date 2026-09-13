@@ -1,4 +1,4 @@
-//! The postcard frame codec skeleton.
+//! Bounded postcard frames for native bulkload request/reply streams.
 //!
 //! Wire format is deliberately boring: a 4-byte big-endian body length
 //! followed by a postcard-serialised [`Frame`]. Length-prefixing keeps a
@@ -13,15 +13,15 @@ use crate::row::RowSchema;
 use crate::Result;
 
 /// Wire protocol version. Bump on any incompatible [`Frame`] change.
-pub const PROTO_VERSION: u16 = 1;
+pub const PROTO_VERSION: u16 = 2;
 
 /// Bytes of frame header carrying the body length.
 pub const LENGTH_PREFIX_BYTES: usize = 4;
 
 /// Largest body this codec will encode or accept, in bytes.
 ///
-/// A frame carries one row or one small control record; anything larger is a
-/// desynchronised stream, not a big row.
+/// Frames carry rows, bounded content chunks, or a file's chunk manifest.
+/// Oversized manifests refuse rather than allocating an unbounded wire body.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// The payload a frame carries.
@@ -36,6 +36,34 @@ pub enum FrameKind {
     Refusal { code: String, rel_path: Vec<u8> },
     /// Closes a stream. `rows` is the count the sender believes it emitted.
     Done { rows: u64 },
+    /// Requests a source root and private source-side resume store over stdio.
+    TransferOpen { root: Vec<u8>, state: Vec<u8> },
+    /// Receiver has a verified output for this exact source identity.
+    WantFile { needed: bool },
+    /// A completed source capture, expressed in content-addressed chunks.
+    Manifest {
+        digest: [u8; 32],
+        chunks: Vec<ChunkSpec>,
+    },
+    /// Receiver requests only chunks missing from its verified local store.
+    WantChunks { digests: Vec<[u8; 32]> },
+    /// One requested, digest-verified content chunk.
+    Chunk { digest: [u8; 32], data: Vec<u8> },
+    /// Receiver finished processing the current file; permits the next row.
+    Applied { success: bool },
+    /// Source authority includes canonical path and root device/inode.
+    TransferStart { authority: Vec<u8> },
+    /// Final source accounting; refusals cannot be mistaken for completion.
+    TransferDone { rows: u64, source_bytes_read: u64 },
+}
+
+/// A content-defined chunk in a source file, in file order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkSpec {
+    /// BLAKE3 of the chunk bytes.
+    pub digest: [u8; 32],
+    /// Exact plaintext byte length.
+    pub size: u64,
 }
 
 /// One framed protocol message.
@@ -116,7 +144,7 @@ impl Frame {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
-    use super::{Frame, FrameKind, BulkloadRefusal, MAX_FRAME_BYTES};
+    use super::{BulkloadRefusal, Frame, FrameKind, MAX_FRAME_BYTES};
 
     fn sample() -> Frame {
         Frame::new(FrameKind::Hello {
@@ -167,6 +195,21 @@ mod tests {
         assert_eq!(
             Frame::decode(&bytes).unwrap_err(),
             BulkloadRefusal::BudgetExceeded
+        );
+    }
+
+    #[test]
+    fn content_protocol_round_trips_and_refuses_the_previous_version() {
+        let chunk = Frame::new(FrameKind::Chunk {
+            digest: [7; 32],
+            data: vec![0, 255, 3],
+        });
+        assert_eq!(Frame::decode(&chunk.encode().unwrap()).unwrap().0, chunk);
+        let mut old = sample();
+        old.version = 1;
+        assert_eq!(
+            Frame::decode(&old.encode().unwrap()).unwrap_err(),
+            BulkloadRefusal::FrameCodec
         );
     }
 }
