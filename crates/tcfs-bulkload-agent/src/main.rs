@@ -25,9 +25,15 @@ SUBCOMMANDS:
     walk PATH   Stat-walk PATH and print the row and refusal counts
     copy SOURCE DEST SOURCE_STATE DEST_STATE
                 Native local copy with private resumable chunk stores
-    pull HOST SOURCE DEST SOURCE_STATE DEST_STATE
+    pull HOST SOURCE DEST SOURCE_STATE DEST_STATE [REMOTE_EXECUTABLE]
                 Native SSH pull; remote tcfs-bulkload-agent must be installed
     serve       Serve one framed request on stdin/stdout (for SSH)
+    git-export REPO NEW_CAPTURE_DIR
+                Archive refs/stashes and staged/worktree trees in a bundle
+    git-import REPO BUNDLE SOURCE
+                Preserve bundle refs in a content-addressed carry namespace
+    git-restore BUNDLE ABSENT_DEST SOURCE
+                Restore captured staged/unstaged work into a new repository
     snapshot SOURCE OUTPUT [MAX_STEPS]
                 Capture live SQLite through its online backup API
     compose BASE INCOMING OUTPUT SOURCE_ID [MAX_STEPS]
@@ -37,9 +43,10 @@ SUBCOMMANDS:
     help        Print this message
 
 BOUNDARIES:
+    copy/pull require an existing destination directory.
     copy/pull preserve divergent destinations and refuse live SQLite files.
     They enumerate the source each run; completed content is resumable.
-    File manifests are bounded to 8 MiB; oversized manifests refuse.
+    File manifests allow 131072 chunks and frames at most 8 MiB; oversized files refuse.
     Git-native divergent union is not supplied by copy/pull.
     compose commands write offline candidates, never install live databases.
 ";
@@ -57,7 +64,10 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
-        Some("copy" | "pull" | "snapshot" | "compose" | "compose-state") => native_command(
+        Some(
+            "copy" | "pull" | "snapshot" | "compose" | "compose-state" | "git-export"
+            | "git-import" | "git-restore",
+        ) => native_command(
             command
                 .as_ref()
                 .and_then(|value| value.to_str())
@@ -98,40 +108,35 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
             .ok_or(BulkloadRefusal::RequiredFieldMissing)
     };
     match command {
+        "git-restore" if args.len() == 3 => {
+            let source = args
+                .get(2)
+                .and_then(|value| value.to_str())
+                .ok_or(BulkloadRefusal::PathNotPortable)?;
+            tcfs_bulkload_agent::git_carry::restore_bundle(path(0)?, path(1)?, source)?;
+            println!("{}", path(1)?.display());
+            Ok(())
+        }
+        "git-export" if args.len() == 2 => {
+            let bundle = tcfs_bulkload_agent::git_carry::export_repository(path(0)?, path(1)?)?;
+            println!("{}", bundle.display());
+            Ok(())
+        }
+        "git-import" if args.len() == 3 => {
+            let source = args
+                .get(2)
+                .and_then(|value| value.to_str())
+                .ok_or(BulkloadRefusal::PathNotPortable)?;
+            let count = tcfs_bulkload_agent::git_carry::import_bundle(path(0)?, path(1)?, source)?;
+            println!("{count}");
+            Ok(())
+        }
         "copy" if args.len() == 4 => {
             let stats =
                 tcfs_bulkload_agent::transfer::copy(path(0)?, path(1)?, path(2)?, path(3)?)?;
             report_transfer(&stats)
         }
-        "pull" if args.len() == 5 => {
-            let host = args.first().ok_or(BulkloadRefusal::RequiredFieldMissing)?;
-            let mut child = Command::new("ssh")
-                .args(["-T", "-oBatchMode=yes", "-oConnectTimeout=15", "--"])
-                .arg(host)
-                .args(["tcfs-bulkload-agent", "serve"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()?;
-            let result = {
-                let mut output = child.stdin.take().ok_or(BulkloadRefusal::Io(None))?;
-                let mut input = child.stdout.take().ok_or(BulkloadRefusal::Io(None))?;
-                tcfs_bulkload_agent::transfer::receive(
-                    &mut input,
-                    &mut output,
-                    path(1)?,
-                    path(3)?,
-                    path(2)?,
-                    path(4)?,
-                )
-            };
-            let exit_status = child.wait()?;
-            let stats = result?;
-            if !exit_status.success() {
-                return Err(BulkloadRefusal::Io(None));
-            }
-            report_transfer(&stats)
-        }
+        "pull" if (5..=6).contains(&args.len()) => pull_command(args),
         "snapshot" if (2..=3).contains(&args.len()) => {
             tcfs_bulkload_agent::provider_sqlite::snapshot(
                 path(0)?,
@@ -186,6 +191,55 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
         }
         _ => Err(BulkloadRefusal::RequiredFieldMissing),
     }
+}
+
+fn pull_command(args: &[std::ffi::OsString]) -> Result<()> {
+    let path = |index: usize| {
+        args.get(index)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let host = args.first().ok_or(BulkloadRefusal::RequiredFieldMissing)?;
+    let remote = match args.get(5) {
+        None => "tcfs-bulkload-agent",
+        Some(value) => {
+            let value = value.to_str().ok_or(BulkloadRefusal::PathNotPortable)?;
+            if !Path::new(value).is_absolute()
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_-.".contains(&b))
+            {
+                return Err(BulkloadRefusal::PathNotPortable);
+            }
+            value
+        }
+    };
+    let mut child = Command::new("ssh")
+        .args(["-T", "-oBatchMode=yes", "-oConnectTimeout=15", "--"])
+        .arg(host)
+        .args([remote, "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let result = {
+        let mut output = child.stdin.take().ok_or(BulkloadRefusal::Io(None))?;
+        let mut input = child.stdout.take().ok_or(BulkloadRefusal::Io(None))?;
+        tcfs_bulkload_agent::transfer::receive(
+            &mut input,
+            &mut output,
+            path(1)?,
+            path(3)?,
+            path(2)?,
+            path(4)?,
+        )
+    };
+    let exit_status = child.wait()?;
+    let stats = result?;
+    if !exit_status.success() {
+        return Err(BulkloadRefusal::Io(None));
+    }
+    report_transfer(&stats)
 }
 
 fn steps(value: Option<&std::ffi::OsString>) -> Result<u32> {

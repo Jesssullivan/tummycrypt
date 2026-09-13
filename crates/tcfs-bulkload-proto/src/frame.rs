@@ -13,7 +13,7 @@ use crate::row::RowSchema;
 use crate::Result;
 
 /// Wire protocol version. Bump on any incompatible [`Frame`] change.
-pub const PROTO_VERSION: u16 = 2;
+pub const PROTO_VERSION: u16 = 3;
 
 /// Bytes of frame header carrying the body length.
 pub const LENGTH_PREFIX_BYTES: usize = 4;
@@ -55,6 +55,14 @@ pub enum FrameKind {
     TransferStart { authority: Vec<u8> },
     /// Final source accounting; refusals cannot be mistaken for completion.
     TransferDone { rows: u64, source_bytes_read: u64 },
+    /// Bounded row offers, allowing several requested files to be captured concurrently.
+    TransferBatch { rows: Vec<RowSchema> },
+    /// One request bit for each offered row, before any source content is read.
+    WantFiles { needed: Vec<bool> },
+    /// Names the requested batch row whose manifest follows.
+    FileContent { index: u32 },
+    /// All requested batch rows have produced content or a refusal.
+    BatchDone,
 }
 
 /// A content-defined chunk in a source file, in file order.
@@ -206,7 +214,7 @@ mod tests {
         });
         assert_eq!(Frame::decode(&chunk.encode().unwrap()).unwrap().0, chunk);
         let mut old = sample();
-        old.version = 1;
+        old.version = super::PROTO_VERSION - 1;
         assert_eq!(
             Frame::decode(&old.encode().unwrap()).unwrap_err(),
             BulkloadRefusal::FrameCodec

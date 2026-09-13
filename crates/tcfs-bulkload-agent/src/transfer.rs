@@ -9,6 +9,13 @@ use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const BATCH_ROWS: usize = 32;
+const CAPTURE_WORKERS: usize = 4;
+// At most four queued plus four in-flight manifests (5 MiB each), with
+// CDC buffers bounded separately. The existing full census remains O(N).
+const MAX_MANIFEST_CHUNKS: usize = 131_072;
 
 use tcfs_bulkload_proto::frame::{ChunkSpec, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 use tcfs_bulkload_proto::FileKind;
@@ -22,7 +29,7 @@ use crate::{BulkloadRefusal, Frame, FrameKind, Result, RowSchema};
 /// Receiver accounting; any refusal means the requested carry is incomplete.
 #[derive(Debug, Default)]
 pub struct TransferStats {
-    /// Newly materialized or independently verified files and links.
+    /// Newly materialized or independently verified regular files.
     pub completed: u64,
     /// Outputs skipped using a previously persisted completion.
     pub reused: u64,
@@ -124,33 +131,28 @@ pub fn serve<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
     }
     let mut source_bytes_read = 0;
     let mut rows = 0;
-    for row in census.rows {
-        rows += 1;
-        write_frame(output, FrameKind::Row(row.clone()))?;
-        let FrameKind::WantFile { needed } = read_frame(input)?.kind else {
+    for batch in census.rows.chunks(BATCH_ROWS) {
+        rows += batch.len() as u64;
+        write_frame(
+            output,
+            FrameKind::TransferBatch {
+                rows: batch.to_vec(),
+            },
+        )?;
+        let FrameKind::WantFiles { needed } = read_frame(input)?.kind else {
             return Err(BulkloadRefusal::FrameCodec);
         };
-        if !needed {
-            continue;
-        }
-        if row.kind != FileKind::Regular {
+        if needed.len() != batch.len() {
             return Err(BulkloadRefusal::FrameCodec);
         }
-        let captured = capture(&root, &authority, &row, &store, &mut source_bytes_read);
-        let manifest = match captured {
-            Ok(manifest) => manifest,
-            Err(refusal) => {
-                write_frame(
-                    output,
-                    FrameKind::Refusal {
-                        code: refusal.code().to_owned(),
-                        rel_path: row.rel_path,
-                    },
-                )?;
-                continue;
-            }
-        };
-        send_content(input, output, &manifest, &store, &row)?;
+        if batch
+            .iter()
+            .zip(&needed)
+            .any(|(row, needed)| *needed && row.kind != FileKind::Regular)
+        {
+            return Err(BulkloadRefusal::FrameCodec);
+        }
+        source_bytes_read += send_batch(input, output, &root, &authority, &store, batch, &needed)?;
     }
     write_frame(
         output,
@@ -159,6 +161,74 @@ pub fn serve<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
             source_bytes_read,
         },
     )
+}
+
+fn send_batch<R: Read, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    root: &Path,
+    authority: &[u8],
+    store: &Store,
+    batch: &[RowSchema],
+    needed: &[bool],
+) -> Result<u64> {
+    let next = AtomicUsize::new(0);
+    let state = store.root();
+    std::thread::scope(|scope| -> Result<u64> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(CAPTURE_WORKERS);
+        for _ in 0..CAPTURE_WORKERS.min(needed.iter().filter(|value| **value).count()) {
+            let sender = sender.clone();
+            let next = &next;
+            std::thread::Builder::new().spawn_scoped(scope, move || {
+                let opened = Store::open(state);
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(row) = batch.get(index) else { break };
+                    if !needed.get(index).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let mut bytes = 0;
+                    let captured = opened
+                        .as_ref()
+                        .map_or(Err(BulkloadRefusal::Io(None)), |store| {
+                            capture(root, authority, row, store, &mut bytes)
+                        });
+                    if sender.send((index, bytes, captured)).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        }
+        drop(sender);
+        let mut bytes_read = 0_u64;
+        let mut completed = 0;
+        for (index, bytes, captured) in receiver {
+            bytes_read = bytes_read.saturating_add(bytes);
+            completed += 1;
+            let row = batch.get(index).ok_or(BulkloadRefusal::FrameCodec)?;
+            write_frame(
+                output,
+                FrameKind::FileContent {
+                    index: u32::try_from(index).map_err(|_| BulkloadRefusal::FrameCodec)?,
+                },
+            )?;
+            match captured {
+                Ok(manifest) => send_content(input, output, &manifest, store, row)?,
+                Err(refusal) => write_frame(
+                    output,
+                    FrameKind::Refusal {
+                        code: refusal.code().to_owned(),
+                        rel_path: row.rel_path.clone(),
+                    },
+                )?,
+            }
+        }
+        if completed != needed.iter().filter(|value| **value).count() {
+            return Err(BulkloadRefusal::Io(None));
+        }
+        write_frame(output, FrameKind::BatchDone)?;
+        Ok(bytes_read)
+    })
 }
 
 fn send_content<R: Read, W: Write>(
@@ -243,17 +313,45 @@ pub fn receive<R: Read, W: Write>(
     let mut rows = 0;
     loop {
         match read_frame(input)?.kind {
-            FrameKind::Row(row) => {
-                rows += 1;
-                receive_row(
-                    input,
+            FrameKind::TransferBatch { rows: batch } => {
+                if batch.is_empty() || batch.len() > BATCH_ROWS {
+                    return Err(BulkloadRefusal::BudgetExceeded);
+                }
+                rows += batch.len() as u64;
+                let mut needed = batch
+                    .iter()
+                    .map(|row| prepare_row(&mut target, &store, &output_authority, row, &mut stats))
+                    .collect::<Result<Vec<_>>>()?;
+                write_frame(
                     output,
-                    &mut target,
-                    &store,
-                    &output_authority,
-                    &row,
-                    &mut stats,
+                    FrameKind::WantFiles {
+                        needed: needed.clone(),
+                    },
                 )?;
+                loop {
+                    match read_frame(input)?.kind {
+                        FrameKind::FileContent { index } => {
+                            let index = index as usize;
+                            let requested =
+                                needed.get_mut(index).ok_or(BulkloadRefusal::FrameCodec)?;
+                            if !*requested {
+                                return Err(BulkloadRefusal::FrameCodec);
+                            }
+                            *requested = false;
+                            receive_content(
+                                input,
+                                output,
+                                &target,
+                                &store,
+                                &output_authority,
+                                batch.get(index).ok_or(BulkloadRefusal::FrameCodec)?,
+                                &mut stats,
+                            )?;
+                        }
+                        FrameKind::BatchDone if needed.iter().all(|value| !*value) => break,
+                        _ => return Err(BulkloadRefusal::FrameCodec),
+                    }
+                }
             }
             FrameKind::Refusal { code, rel_path } => stats.refusals.push((rel_path, code)),
             FrameKind::TransferDone {
@@ -271,15 +369,13 @@ pub fn receive<R: Read, W: Write>(
     }
 }
 
-fn receive_row<R: Read, W: Write>(
-    input: &mut R,
-    output: &mut W,
+fn prepare_row(
     target: &mut Destination,
     store: &Store,
     authority: &[u8],
     row: &RowSchema,
     stats: &mut TransferStats,
-) -> Result<()> {
+) -> Result<bool> {
     let key = row_key(authority, row)?;
     let preparation = match row.kind {
         FileKind::Directory => target.directory(row, store, authority).map(|()| false),
@@ -304,12 +400,23 @@ fn receive_row<R: Read, W: Write>(
             false
         }
     };
-    write_frame(output, FrameKind::WantFile { needed })?;
-    if !needed {
-        return Ok(());
-    }
+    Ok(needed)
+}
+
+fn receive_content<R: Read, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    target: &Destination,
+    store: &Store,
+    authority: &[u8],
+    row: &RowSchema,
+    stats: &mut TransferStats,
+) -> Result<()> {
+    let key = row_key(authority, row)?;
     let manifest = match read_frame(input)?.kind {
-        FrameKind::Manifest { digest, chunks } => Manifest { digest, chunks },
+        FrameKind::Manifest { digest, chunks } if chunks.len() <= MAX_MANIFEST_CHUNKS => {
+            Manifest { digest, chunks }
+        }
         FrameKind::Refusal { code, rel_path } => {
             stats.refusals.push((rel_path, code));
             return Ok(());
@@ -378,8 +485,14 @@ fn capture(
     store: &Store,
     bytes_read: &mut u64,
 ) -> Result<Manifest> {
+    if row.size > (MAX_MANIFEST_CHUNKS as u64) * u64::from(crate::hash::CDC_MAX_BYTES) {
+        return Err(BulkloadRefusal::BudgetExceeded);
+    }
     let key = row_key(authority, row)?;
     if let Some(manifest) = store.capture(&key)? {
+        if manifest.chunks.len() > MAX_MANIFEST_CHUNKS {
+            return Err(BulkloadRefusal::BudgetExceeded);
+        }
         let available =
             manifest
                 .chunks
@@ -424,6 +537,9 @@ fn capture(
         crate::hash::CDC_MAX_BYTES,
     ) {
         let chunk = chunk.map_err(|_| BulkloadRefusal::Io(None))?;
+        if chunks.len() >= MAX_MANIFEST_CHUNKS {
+            return Err(BulkloadRefusal::BudgetExceeded);
+        }
         hasher.update(&chunk.data);
         let digest = crate::hash::hash_bytes(&chunk.data);
         store.put_chunk(&digest, &chunk.data)?;
@@ -527,6 +643,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    #[test]
+    fn parallel_batches_resume_and_continue_after_a_refused_file() {
+        let corpus = Corpus::new();
+        let bytes = vec![71_u8; 65_536];
+        for index in 0..70 {
+            std::fs::write(
+                corpus.base.join("source").join(format!("file-{index:03}")),
+                &bytes,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            corpus.base.join("source/file-035.db"),
+            b"SQLite format 3\0refused",
+        )
+        .unwrap();
+        let first = corpus.run().unwrap();
+        assert_eq!(first.completed, 70);
+        assert_eq!(first.refusals.len(), 1);
+        assert_eq!(first.source_bytes_read, 70 * 65_536 + 16);
+        assert_eq!(first.bytes_received, 65_536);
+        for index in 0..70 {
+            assert_eq!(
+                std::fs::read(
+                    corpus
+                        .base
+                        .join("destination")
+                        .join(format!("file-{index:03}"))
+                )
+                .unwrap(),
+                bytes
+            );
+        }
+        let second = corpus.run().unwrap();
+        assert_eq!(second.reused, 70);
+        assert_eq!(second.refusals.len(), 1);
+        assert_eq!(second.source_bytes_read, 16);
+        assert_eq!(second.bytes_received, 0);
     }
 
     #[test]

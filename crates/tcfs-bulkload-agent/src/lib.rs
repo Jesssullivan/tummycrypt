@@ -18,6 +18,7 @@
 //! bench swap in a null cache.
 
 pub mod freshness;
+pub mod git_carry;
 pub mod hash;
 pub mod materialize;
 pub mod provider_sqlite;
