@@ -25,7 +25,7 @@ SUBCOMMANDS:
     walk PATH   Stat-walk PATH and print the row and refusal counts
     copy SOURCE DEST SOURCE_STATE DEST_STATE
                 Native local copy with private resumable chunk stores
-    pull HOST SOURCE DEST SOURCE_STATE DEST_STATE [REMOTE_EXECUTABLE]
+    pull HOST SOURCE DEST SOURCE_STATE DEST_STATE [REMOTE_EXECUTABLE [SSH_CONFIG]]
                 Native SSH pull; remote tcfs-bulkload-agent must be installed
     serve       Serve one framed request on stdin/stdout (for SSH)
     git-export REPO NEW_CAPTURE_DIR
@@ -34,12 +34,16 @@ SUBCOMMANDS:
                 Preserve bundle refs in a content-addressed carry namespace
     git-restore BUNDLE ABSENT_DEST SOURCE
                 Restore captured staged/unstaged work into a new repository
+    git-restore-linked BUNDLE REPOSITORY ABSENT_DEST SOURCE
+                Restore captured work into a new linked worktree without switching others
     snapshot SOURCE OUTPUT [MAX_STEPS]
                 Capture live SQLite through its online backup API
     compose BASE INCOMING OUTPUT SOURCE_ID [MAX_STEPS]
                 Compose retained SQLite snapshots into a private candidate
     compose-state BASE INCOMING OUTPUT SOURCE_ID SOURCE_HOME DEST_HOME [MAX_STEPS]
                 Compose Codex state with retained rollout path mapping
+    hydrate-state SNAPSHOT SOURCE_HOME DEST_HOME MAX_BYTES JOBS [GZIP ZSTD]
+                Add missing raw rollouts from retained compressed files; never replace
     help        Print this message
 
 BOUNDARIES:
@@ -66,7 +70,7 @@ fn main() -> ExitCode {
         }
         Some(
             "copy" | "pull" | "snapshot" | "compose" | "compose-state" | "git-export"
-            | "git-import" | "git-restore",
+            | "git-import" | "git-restore" | "git-restore-linked",
         ) => native_command(
             command
                 .as_ref()
@@ -74,6 +78,7 @@ fn main() -> ExitCode {
                 .unwrap_or(""),
             &args.collect::<Vec<_>>(),
         ),
+        Some("hydrate-state") => hydrate_command(&args.collect::<Vec<_>>()),
         Some("serve") => tcfs_bulkload_agent::transfer::serve(
             &mut std::io::stdin().lock(),
             &mut std::io::stdout().lock(),
@@ -107,6 +112,15 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
             .map(Path::new)
             .ok_or(BulkloadRefusal::RequiredFieldMissing)
     };
+    if command == "git-restore-linked" && args.len() == 4 {
+        let source = args
+            .get(3)
+            .and_then(|value| value.to_str())
+            .ok_or(BulkloadRefusal::PathNotPortable)?;
+        tcfs_bulkload_agent::git_carry::restore_linked(path(0)?, path(1)?, path(2)?, source)?;
+        println!("linked restoration complete");
+        return Ok(());
+    }
     match command {
         "git-restore" if args.len() == 3 => {
             let source = args
@@ -136,7 +150,7 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
                 tcfs_bulkload_agent::transfer::copy(path(0)?, path(1)?, path(2)?, path(3)?)?;
             report_transfer(&stats)
         }
-        "pull" if (5..=6).contains(&args.len()) => pull_command(args),
+        "pull" if (5..=7).contains(&args.len()) => pull_command(args),
         "snapshot" if (2..=3).contains(&args.len()) => {
             tcfs_bulkload_agent::provider_sqlite::snapshot(
                 path(0)?,
@@ -193,6 +207,61 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
     }
 }
 
+fn hydrate_command(args: &[std::ffi::OsString]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    if args.len() != 5 && args.len() != 7 {
+        return Err(BulkloadRefusal::RequiredFieldMissing);
+    }
+    let path = |index: usize| {
+        args.get(index)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let number = |index: usize| -> Result<u64> {
+        args.get(index)
+            .and_then(|value| value.to_str())
+            .ok_or(BulkloadRefusal::FieldDomainViolation)?
+            .parse()
+            .map_err(|_| BulkloadRefusal::FieldDomainViolation)
+    };
+    let mapping = tcfs_bulkload_agent::provider_sqlite::PathMapping {
+        source_home: path(1)?,
+        destination_home: path(2)?,
+    };
+    let gzip = args
+        .get(5)
+        .map_or_else(|| Path::new("/usr/bin/gzip"), Path::new);
+    let zstd = args
+        .get(6)
+        .map_or_else(|| Path::new("/usr/bin/zstd"), Path::new);
+    let receipt = |report: &tcfs_bulkload_agent::provider_sqlite::hydrate::Hydrated| -> Result<()> {
+        let mut output = std::io::stdout().lock();
+        writeln!(
+            output,
+            "published={} bytes={} blake3={} source_identity={:?} path={} source={}",
+            report.published,
+            report.bytes,
+            report.blake3,
+            report.source_identity,
+            report.path.as_os_str().as_bytes().escape_ascii(),
+            report.source.as_os_str().as_bytes().escape_ascii()
+        )?;
+        output.flush()?;
+        Ok(())
+    };
+    let reports = tcfs_bulkload_agent::provider_sqlite::hydrate::hydrate_state(
+        path(0)?,
+        &mapping,
+        number(3)?,
+        usize::try_from(number(4)?).map_err(|_| BulkloadRefusal::BudgetExceeded)?,
+        gzip,
+        zstd,
+        &receipt,
+    )?;
+    println!("hydrated_files={}", reports.len());
+    Ok(())
+}
+
 fn pull_command(args: &[std::ffi::OsString]) -> Result<()> {
     let path = |index: usize| {
         args.get(index)
@@ -214,8 +283,16 @@ fn pull_command(args: &[std::ffi::OsString]) -> Result<()> {
             value
         }
     };
-    let mut child = Command::new("ssh")
-        .args(["-T", "-oBatchMode=yes", "-oConnectTimeout=15", "--"])
+    let mut ssh = Command::new("ssh");
+    ssh.args(["-T", "-oBatchMode=yes", "-oConnectTimeout=15"]);
+    if let Some(config) = args.get(6) {
+        if !Path::new(config).is_absolute() {
+            return Err(BulkloadRefusal::PathNotAbsolute);
+        }
+        ssh.arg("-F").arg(config);
+    }
+    let mut child = ssh
+        .arg("--")
         .arg(host)
         .args([remote, "serve"])
         .stdin(Stdio::piped())

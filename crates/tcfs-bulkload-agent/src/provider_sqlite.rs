@@ -13,6 +13,30 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::{BulkloadRefusal, Result};
 
+pub mod hydrate;
+
+fn mapped_path(path: &Path, mapping: &PathMapping<'_>) -> std::path::PathBuf {
+    if mapping.source_home == Path::new("/Users/jess") {
+        if let Ok(relative) = path.strip_prefix("/Volumes/TinylandState/tinyland-state/codex") {
+            return mapping.destination_home.join(".codex").join(relative);
+        }
+    }
+    path.strip_prefix(mapping.source_home).map_or_else(
+        |_| path.to_path_buf(),
+        |relative| mapping.destination_home.join(relative),
+    )
+}
+
+fn mapped_rollout_path(path: &Path, mapping: &PathMapping<'_>) -> std::path::PathBuf {
+    let mapped = mapped_path(path, mapping);
+    match mapped.to_str() {
+        Some(value) if value.ends_with(".jsonl.gz") || value.ends_with(".jsonl.zst") => {
+            mapped.with_extension("")
+        }
+        _ => mapped,
+    }
+}
+
 /// Capture a standalone database in an existing private directory.
 ///
 /// `max_steps` bounds retries and total backup steps, including restarts caused
@@ -302,7 +326,7 @@ fn correct_base_paths(
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(sql_refusal)?;
         let needs_mapping = [rollout,cwd].iter().any(|index| {
-            matches!(values.get(*index), Some(Value::Text(path)) if Path::new(path).starts_with(mapping.source_home))
+            matches!(values.get(*index), Some(Value::Text(path)) if (if *index == rollout {mapped_rollout_path(Path::new(path), mapping)} else {mapped_path(Path::new(path), mapping)}) != Path::new(path))
         });
         if !needs_mapping {
             continue;
@@ -502,10 +526,11 @@ fn mapped_values(
             {
                 return Ok(None);
             }
-            let mapped = path.strip_prefix(mapping.source_home).map_or_else(
-                |_| path.to_path_buf(),
-                |relative| mapping.destination_home.join(relative),
-            );
+            let mapped = if column.0 == "rollout_path" {
+                mapped_rollout_path(path, mapping)
+            } else {
+                mapped_path(path, mapping)
+            };
             if column.0 == "rollout_path" && !mapped.is_file() {
                 return Ok(None);
             }

@@ -480,6 +480,118 @@ pub fn restore_bundle(bundle: &Path, destination: &Path, source: &str) -> Result
     Ok(())
 }
 
+/// Restore into a new linked worktree without changing any existing checkout.
+///
+/// The source branch is reused only when its tip matches and Git permits a new
+/// attachment; otherwise a private carry branch is created. Existing common
+/// ignore policy must match the capture: it is never overwritten.
+///
+/// # Errors
+/// Refuses occupied destinations, differing common excludes, and invalid capture.
+/// Partially created worktrees are retained on failure for explicit recovery.
+pub fn restore_linked(
+    bundle: &Path,
+    repository: &Path,
+    destination: &Path,
+    source: &str,
+) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    if destination.symlink_metadata().is_ok() {
+        return Err(BulkloadRefusal::GitDestinationOccupied);
+    }
+    let parent = fs::canonicalize(
+        destination
+            .parent()
+            .ok_or(BulkloadRefusal::PathNotAbsolute)?,
+    )?;
+    let destination = parent.join(
+        destination
+            .file_name()
+            .ok_or(BulkloadRefusal::PathNotAbsolute)?,
+    );
+    let bundle = fs::canonicalize(bundle)?;
+    let repository = fs::canonicalize(repository)?;
+    import_bundle(&repository, &bundle, source)?;
+    let heads = text(git(&repository).args(["bundle", "list-heads"]).arg(&bundle))?;
+    let find = |suffix: &str| -> Result<String> {
+        heads
+            .lines()
+            .find_map(|line| {
+                line.split_once(' ')
+                    .filter(|(_, name)| *name == format!("refs/carry-export/{suffix}"))
+            })
+            .map(|(value, _)| value.to_owned())
+            .filter(|value| oid(value))
+            .ok_or(BulkloadRefusal::GitInventoryMalformed)
+    };
+    let head = find("head")?;
+    let symbolic =
+        text(git(&repository).args(["show", &format!("{}:value", find("head-symbolic")?)]))?;
+    let exclude = output(git(&repository).args(["show", &format!("{}:value", find("exclude")?)]))?;
+    let exclude_path = text(git(&repository).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "info/exclude",
+    ]))?;
+    let existing_exclude = match fs::read(&exclude_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if exclude != existing_exclude {
+        return Err(BulkloadRefusal::GitDestinationOccupied);
+    }
+    let attached = text(git(&repository).args(["worktree", "list", "--porcelain"]))?;
+    let source_tip = text(git(&repository).args(["rev-parse", "--verify", &symbolic]));
+    let reuse = symbolic.starts_with("refs/heads/")
+        && source_tip.as_ref().is_ok_and(|value| value == &head)
+        && !attached
+            .lines()
+            .any(|line| line == format!("branch {symbolic}"));
+    let branch = if reuse {
+        symbolic
+            .strip_prefix("refs/heads/")
+            .ok_or(BulkloadRefusal::GitInventoryMalformed)?
+            .to_owned()
+    } else {
+        let digest = blake3::hash(destination.as_os_str().as_bytes()).to_hex();
+        format!("carry/{source}/{digest}")
+    };
+    let mut command = git(&repository);
+    command.args(["worktree", "add", "--no-checkout"]);
+    if !reuse {
+        command.args(["-b", &branch]);
+    }
+    command
+        .arg("--")
+        .arg(&destination)
+        .arg(if reuse { &branch } else { &head });
+    output(&mut command)?;
+    // --no-checkout has created administration only, not captured payload.
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o700))?;
+    if text(git(&destination).args(["rev-parse", "--verify", "HEAD"]))? != head {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    let entries = output(git(&destination).args(["ls-tree", "-r", "-z", &find("worktree")?]))?;
+    for entry in entries.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
+        restore_entry(&destination, entry)?;
+    }
+    output(git(&destination).args(["read-tree", &format!("{}^{{tree}}", find("staged")?)]))?;
+    let final_exclude = match fs::read(exclude_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if final_exclude != exclude
+        || text(git(&destination).args(["rev-parse", "--verify", "HEAD"]))? != head
+    {
+        return Err(BulkloadRefusal::GitAuthorityChanged);
+    }
+    Ok(())
+}
+
 fn restore_entry(destination: &Path, entry: &[u8]) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -581,6 +693,7 @@ mod tests {
             output(git(repo).args(["config", "user.name", "Test"])).unwrap();
             output(git(repo).args(["config", "user.email", "test@localhost"])).unwrap();
             fs::write(repo.join("tracked"), b"base").unwrap();
+            fs::write(repo.join("deleted"), b"staged deletion").unwrap();
             output(git(repo).args(["add", "."])).unwrap();
             output(git(repo).args(["-c", "commit.gpgsign=false", "commit", "-m", "base"])).unwrap();
         }
@@ -589,6 +702,8 @@ mod tests {
             output(git(&source).args(["stash", "push"])).unwrap();
         }
         fs::write(source.join("tracked"), b"staged").unwrap();
+        fs::remove_file(source.join("deleted")).unwrap();
+        fs::write(source.join("binary"), [0, 1, 128]).unwrap();
         output(git(&source).args(["add", "."])).unwrap();
         fs::write(source.join("tracked"), b"unstaged").unwrap();
         fs::write(source.join("binary"), [0, 255, 128]).unwrap();
@@ -657,6 +772,15 @@ mod tests {
         );
         let restored = root.join("restored");
         restore_bundle(&bundle, &restored, "neo").unwrap();
+        let linked = root.join("linked");
+        restore_linked(&bundle, &dest, &linked, "neo").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&linked).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
         for args in [
             vec![
                 "status",
@@ -673,7 +797,32 @@ mod tests {
                 output(git(&restored).args(&args)).unwrap(),
                 "{args:?}"
             );
+            if args.first() != Some(&"symbolic-ref") {
+                assert_eq!(
+                    output(git(&source).args(&args)).unwrap(),
+                    output(git(&linked).args(&args)).unwrap(),
+                    "linked {args:?}"
+                );
+            }
         }
+        assert!(linked.join(".git").is_file());
+        let common =
+            text(git(&linked).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+                .unwrap();
+        assert_eq!(
+            fs::canonicalize(common).unwrap(),
+            fs::canonicalize(dest.join(".git")).unwrap()
+        );
+        let admin = text(git(&linked).args(["rev-parse", "--absolute-git-dir"])).unwrap();
+        assert_eq!(
+            fs::read_to_string(Path::new(&admin).join("gitdir"))
+                .unwrap()
+                .trim(),
+            linked.join(".git").to_str().unwrap()
+        );
+        assert_eq!(dest_index, fs::read(dest.join(".git/index")).unwrap());
+        assert_eq!(dest_head, fs::read(dest.join(".git/HEAD")).unwrap());
+        assert!(restore_linked(&bundle, &dest, &linked, "neo").is_err());
         assert_eq!(fs::read(restored.join("binary")).unwrap(), [0, 255, 128]);
         assert!(restore_bundle(&bundle, &restored, "neo").is_err());
         fs::remove_dir_all(root).unwrap();
