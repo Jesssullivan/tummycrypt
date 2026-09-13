@@ -19,8 +19,9 @@
 //! | `Rollback*`           | "rollback end-state differs from its exact ..."    |
 //! | `Budget*`             | "`SQLite` row capture budget exceeded"               |
 //!
-//! Every variant is a *refusal*: the operation declined to proceed and made no
-//! partial mutation. Refusals are values, never panics (R33).
+//! Every variant is a *refusal*: the operation did not complete. Earlier durable
+//! progress or prepared state can remain; inspect its receipts before retrying.
+//! Refusals are values, never panics (R33).
 
 use core::fmt;
 
@@ -85,6 +86,8 @@ pub enum BulkloadRefusal {
     GitInventoryMalformed,
     /// The git destination already exists or is non-empty.
     GitDestinationOccupied,
+    /// Captured and destination Git ignore policies differ.
+    GitIgnorePolicyConflict,
 
     // ---- sqlite -----------------------------------------------------------
     /// `PRAGMA quick_check` or the foreign-key check failed.
@@ -145,6 +148,7 @@ impl BulkloadRefusal {
             Self::GitAuthorityChanged => "GIT_AUTHORITY_CHANGED",
             Self::GitInventoryMalformed => "GIT_INVENTORY_MALFORMED",
             Self::GitDestinationOccupied => "GIT_DESTINATION_OCCUPIED",
+            Self::GitIgnorePolicyConflict => "GIT_IGNORE_POLICY_CONFLICT",
             Self::SqliteIntegrityCheckFailed => "SQLITE_INTEGRITY_CHECK_FAILED",
             Self::SqliteUnsupportedValue => "SQLITE_UNSUPPORTED_VALUE",
             Self::SqliteStateChanged => "SQLITE_STATE_CHANGED",
@@ -216,6 +220,7 @@ mod tests {
             BulkloadRefusal::GitAuthorityChanged,
             BulkloadRefusal::GitInventoryMalformed,
             BulkloadRefusal::GitDestinationOccupied,
+            BulkloadRefusal::GitIgnorePolicyConflict,
             BulkloadRefusal::SqliteIntegrityCheckFailed,
             BulkloadRefusal::SqliteUnsupportedValue,
             BulkloadRefusal::SqliteStateChanged,

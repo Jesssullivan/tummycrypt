@@ -984,7 +984,7 @@ fn prepare_linked_attachment(
         Err(error) => return Err(error.into()),
     };
     if exclude != captured_exclude {
-        return Err(BulkloadRefusal::GitDestinationOccupied);
+        return Err(BulkloadRefusal::GitIgnorePolicyConflict);
     }
     let attached = text(git(repository).args(["worktree", "list", "--porcelain"]))?;
     let reuse = symbolic.starts_with("refs/heads/")
@@ -1055,7 +1055,10 @@ fn attachment_policy_matches(repository: &Path, private: &Path, heads: &str) -> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
-    Ok(expected == actual)
+    if expected != actual {
+        return Err(BulkloadRefusal::GitIgnorePolicyConflict);
+    }
+    Ok(true)
 }
 
 /// Attach captured source administration to an exactly matching payload only.
@@ -1113,8 +1116,10 @@ pub fn attach_matching_payload(
         "rev-parse",
         &format!("{}^{{tree}}", capture_revision(&heads, "worktree")?),
     ]))?;
+    // The raw reader checks each file's identity before and after its one byte
+    // pass. The outer census also rejects namespace or metadata changes; a
+    // second full byte pass does not make this an atomic snapshot.
     if capture_tree(&private, &destination, &comparison)? != expected_tree
-        || capture_tree(&private, &destination, &comparison)? != expected_tree
         || filesystem_rows(&destination)? != before
     {
         return Err(BulkloadRefusal::GitAuthorityChanged);
@@ -1298,7 +1303,7 @@ pub fn restore_linked(
         Err(error) => return Err(error.into()),
     };
     if exclude != existing_exclude {
-        return Err(BulkloadRefusal::GitDestinationOccupied);
+        return Err(BulkloadRefusal::GitIgnorePolicyConflict);
     }
     let attached = text(git(&repository).args(["worktree", "list", "--porcelain"]))?;
     let source_tip = text(git(&repository).args(["rev-parse", "--verify", &symbolic]));
@@ -1342,9 +1347,10 @@ pub fn restore_linked(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
-    if final_exclude != exclude
-        || text(git(&destination).args(["rev-parse", "--verify", "HEAD"]))? != head
-    {
+    if final_exclude != exclude {
+        return Err(BulkloadRefusal::GitIgnorePolicyConflict);
+    }
+    if text(git(&destination).args(["rev-parse", "--verify", "HEAD"]))? != head {
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
     Ok(())
@@ -1709,6 +1715,19 @@ mod tests {
         let restored = root.join("restored");
         restore_bundle(&bundle, &restored, "neo").unwrap();
         let linked = root.join("linked");
+        let exclude_path = dest.join(".git/info/exclude");
+        let original_exclude = fs::read(&exclude_path).unwrap_or_default();
+        fs::create_dir_all(dest.join(".git/info")).unwrap();
+        fs::write(&exclude_path, b"operator-local-policy\n").unwrap();
+        assert_eq!(
+            restore_linked(&bundle, &dest, &linked, "neo"),
+            Err(BulkloadRefusal::GitIgnorePolicyConflict)
+        );
+        assert!(!linked.exists());
+        assert_eq!(fs::read(&exclude_path).unwrap(), b"operator-local-policy\n");
+        assert_eq!(dest_index, fs::read(dest.join(".git/index")).unwrap());
+        assert_eq!(dest_head, fs::read(dest.join(".git/HEAD")).unwrap());
+        fs::write(&exclude_path, original_exclude).unwrap();
         restore_linked(&bundle, &dest, &linked, "neo").unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
