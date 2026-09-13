@@ -52,6 +52,8 @@ SUBCOMMANDS:
                 Attach exact matching payload using existing common Git administration
     git-attach-standalone-payload BUNDLE DESTINATION SOURCE NEW_RECEIPT ORIGIN_FROM ORIGIN_TO
                 Attach exact payload with retained config and explicit local origin mapping
+    git-restore-registered-payload BUNDLE REPOSITORY DESTINATION ADMIN SOURCE NEW_RECEIPT
+                Restore absent payload only, preserving matching retained registration/index
     snapshot SOURCE OUTPUT [MAX_STEPS]
                 Capture live SQLite through its online backup API
     compose BASE INCOMING OUTPUT SOURCE_ID [MAX_STEPS]
@@ -98,6 +100,7 @@ fn main() -> ExitCode {
         ),
         Some("hydrate-state") => hydrate_command(&args.collect::<Vec<_>>()),
         Some("git-repair-missing-index") => repair_index_command(&args.collect::<Vec<_>>()),
+        Some("git-restore-registered-payload") => registered_command(&args.collect::<Vec<_>>()),
         Some("git-attach-matching-payload") => attach_payload_command(&args.collect::<Vec<_>>()),
         Some("git-attach-standalone-payload") => {
             attach_standalone_command(&args.collect::<Vec<_>>())
@@ -253,6 +256,30 @@ fn repair_index_command(args: &[std::ffi::OsString]) -> Result<()> {
     Ok(())
 }
 
+fn registered_command(args: &[std::ffi::OsString]) -> Result<()> {
+    if args.len() != 6 {
+        return Err(BulkloadRefusal::RequiredFieldMissing);
+    }
+    let path = |i| {
+        args.get(i)
+            .map(Path::new)
+            .ok_or(BulkloadRefusal::RequiredFieldMissing)
+    };
+    let source = args
+        .get(4)
+        .and_then(|arg| arg.to_str())
+        .ok_or(BulkloadRefusal::PathNotPortable)?;
+    tcfs_bulkload_agent::git_carry::registered::restore(
+        path(0)?,
+        path(1)?,
+        path(2)?,
+        path(3)?,
+        source,
+        path(5)?,
+    )?;
+    println!("registered payload restored; original administration and staging preserved");
+    Ok(())
+}
 fn attach_standalone_command(args: &[std::ffi::OsString]) -> Result<()> {
     if args.len() != 6 {
         return Err(BulkloadRefusal::RequiredFieldMissing);

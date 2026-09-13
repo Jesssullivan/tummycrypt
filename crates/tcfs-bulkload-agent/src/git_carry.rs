@@ -11,6 +11,7 @@ use std::process::{Command, Output};
 use crate::{BulkloadRefusal, Result};
 
 mod raw_tree;
+pub mod registered;
 pub mod shared;
 
 fn git(repo: &Path) -> Command {
@@ -1057,17 +1058,21 @@ fn activate_standalone_configuration(
     private: &Path,
     heads: &str,
     receipt: &Path,
-    from: &Path,
-    to: &Path,
+    mapping: Option<(&Path, &Path)>,
 ) -> Result<()> {
-    if !from.is_absolute() || !to.is_absolute() {
-        return Err(BulkloadRefusal::PathNotAbsolute);
-    }
-    common_repository(to)?;
-    let from = from
-        .to_str()
-        .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
-    let to = to.to_str().ok_or(BulkloadRefusal::GitInventoryMalformed)?;
+    let mapping = mapping
+        .map(|(from, to)| {
+            if !from.is_absolute() || !to.is_absolute() {
+                return Err(BulkloadRefusal::PathNotAbsolute);
+            }
+            common_repository(to)?;
+            Ok((
+                from.to_str()
+                    .ok_or(BulkloadRefusal::GitInventoryMalformed)?,
+                to.to_str().ok_or(BulkloadRefusal::GitInventoryMalformed)?,
+            ))
+        })
+        .transpose()?;
     let files: Vec<(String, Vec<u8>)> = postcard::from_bytes(&output(git(private).args([
         "show",
         &format!("{}:value", capture_revision(heads, "configuration-v1")?),
@@ -1098,11 +1103,12 @@ fn activate_standalone_configuration(
                 std::str::from_utf8(entry).map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
             let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
             let value = if key == "remote.origin.url" {
-                if value != from {
-                    return Err(BulkloadRefusal::GitAuthorityChanged);
-                }
                 origin_seen = true;
-                to
+                match mapping {
+                    Some((from, to)) if value == from => to,
+                    None if safe_https_origin(value) => value,
+                    _ => return Err(BulkloadRefusal::GitAuthorityChanged),
+                }
             } else if safe_configuration_value(private, key, value) {
                 value
             } else {
@@ -1113,16 +1119,33 @@ fn activate_standalone_configuration(
             activated.push(key.to_owned());
         }
     }
-    if !origin_seen {
+    if mapping.is_some() && !origin_seen {
         return Err(BulkloadRefusal::GitInventoryMalformed);
     }
     // Keys, not potentially sensitive values, explain the deliberate policy boundary.
     fs::write(
         receipt.join("configuration-activation.postcard"),
-        postcard::to_allocvec(&(activated, preserved_only, from, to))
+        postcard::to_allocvec(&(activated, preserved_only, mapping))
             .map_err(|_| BulkloadRefusal::FrameCodec)?,
     )?;
     Ok(())
+}
+
+fn safe_https_origin(value: &str) -> bool {
+    let Some(address) = value.strip_prefix("https://") else {
+        return false;
+    };
+    let Some((host, path)) = address.split_once('/') else {
+        return false;
+    };
+    !host.is_empty()
+        && !path.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-._~%".contains(&b))
 }
 
 fn prepare_linked_attachment(
@@ -1343,7 +1366,7 @@ fn attach_payload(
         prepare_linked_attachment(repository, &destination, source, &receipt, &private, &heads)?
     } else {
         let (from, to) = mapping.ok_or(BulkloadRefusal::GitInventoryMalformed)?;
-        activate_standalone_configuration(&private, &heads, &receipt, from, to)?;
+        activate_standalone_configuration(&private, &heads, &receipt, Some((from, to)))?;
         private.clone()
     };
     let pointer = write_git_pointer(&receipt, &admin)?;
@@ -1415,6 +1438,25 @@ fn write_git_pointer(receipt: &Path, admin: &Path) -> Result<PathBuf> {
 /// Refuses malformed paths/modes, missing capture metadata, or an occupied target.
 /// Partial new destinations are retained, never cleaned by recursive deletion.
 pub fn restore_bundle(bundle: &Path, destination: &Path, source: &str) -> Result<()> {
+    restore_bundle_configured(bundle, destination, source, None)
+}
+
+/// Restore an absent standalone checkout with explicit local-origin mapping.
+///
+/// Without a mapping, a captured HTTPS origin is retained unchanged; no origin
+/// is invented when the source has none. Other origin schemes require a reviewed
+/// mapping. Configuration omissions remain named in .git/carry-config receipts.
+/// No network operation or captured executable configuration is activated.
+///
+/// # Errors
+/// Refuses old captures lacking configuration, unsafe/unmapped origins, occupied
+/// destinations, or any malformed filesystem/capture state.
+pub fn restore_bundle_configured(
+    bundle: &Path,
+    destination: &Path,
+    source: &str,
+    mapping: Option<(&Path, &Path)>,
+) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let bundle = fs::canonicalize(bundle)?;
     fs::DirBuilder::new().mode(0o700).create(destination)?;
@@ -1437,6 +1479,7 @@ pub fn restore_bundle(bundle: &Path, destination: &Path, source: &str) -> Result
             .ok_or(BulkloadRefusal::GitInventoryMalformed)
     };
     let head = find("head")?;
+    find("configuration-v1")?;
     let format = if head.len() == 40 { "sha1" } else { "sha256" };
     output(git(&destination).args(["init", "--template=", &format!("--object-format={format}")]))?;
     import_bundle(&destination, &bundle, source)?;
@@ -1463,6 +1506,9 @@ pub fn restore_bundle(bundle: &Path, destination: &Path, source: &str) -> Result
     let staged = find("staged")?;
     output(git(&destination).args(["read-tree", &format!("{staged}^{{tree}}")]))?;
     restore_filesystem_rows(&destination, &find("filesystem-v1")?)?;
+    let config_receipt = destination.join(".git/carry-config");
+    fs::DirBuilder::new().mode(0o700).create(&config_receipt)?;
+    activate_standalone_configuration(&destination, &heads, &config_receipt, mapping)?;
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
@@ -1704,7 +1750,7 @@ mod tests {
         fs::write(source.join("tracked"), b"dirty").unwrap();
         let bundle = export_repository(&source, &root.join("capture")).unwrap();
         let payload = root.join("payload");
-        restore_bundle(&bundle, &payload, "neo").unwrap();
+        restore_bundle_configured(&bundle, &payload, "neo", Some((from, &upstream))).unwrap();
         fs::rename(payload.join(".git"), root.join("original-git")).unwrap();
         let before = filesystem_rows(&payload).unwrap();
         let receipt = root.join("receipt");
@@ -1736,7 +1782,63 @@ mod tests {
             output(git(&source).args(["diff", "--binary"])).unwrap(),
             output(git(&payload).args(["diff", "--binary"])).unwrap()
         );
+        assert_https_restore(&root, &source);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn assert_https_restore(root: &Path, source: &Path) {
+        let origin =
+            "https://github.com/Medical-Massage-Specialists/medical-massage-specialists-infra.git";
+        output(git(source).args(["config", "remote.origin.url", origin])).unwrap();
+        let capture = root.join("https-capture");
+        let bundle = export_repository(source, &capture).unwrap();
+        let destination = root.join("https-restored");
+        restore_bundle(&bundle, &destination, "neo").unwrap();
+        assert_eq!(
+            text(git(&destination).args(["config", "remote.origin.url"])).unwrap(),
+            origin
+        );
+        assert_eq!(
+            text(git(&destination).args(["config", "remote.origin.fetch"])).unwrap(),
+            "+refs/heads/*:refs/remotes/origin/*"
+        );
+        let symbolic = text(git(source).args(["symbolic-ref", "HEAD"])).unwrap();
+        let branch = symbolic.strip_prefix("refs/heads/").unwrap();
+        assert_eq!(
+            text(git(&destination).args(["config", &format!("branch.{branch}.remote")])).unwrap(),
+            "origin"
+        );
+        assert_eq!(
+            text(git(&destination).args(["config", &format!("branch.{branch}.merge")])).unwrap(),
+            symbolic
+        );
+        assert!(text(git(&destination).args(["config", "credential.helper"])).is_err());
+        assert_eq!(
+            output(git(source).args(["status", "--porcelain"])).unwrap(),
+            output(git(&destination).args(["status", "--porcelain"])).unwrap()
+        );
+        for unsafe_origin in [
+            "ext::bad",
+            "https://user:secret@host/repo",
+            "https://host/repo?token=secret",
+            "/Users/jess/git/legalab",
+        ] {
+            assert!(!safe_https_origin(unsafe_origin));
+        }
+        let private = capture.join("repository.git");
+        output(git(&private).args(["update-ref", "-d", "refs/carry-export/configuration-v1"]))
+            .unwrap();
+        let old_bundle = capture.join("old-format.bundle");
+        output(
+            git(&private)
+                .args(["bundle", "create"])
+                .arg(&old_bundle)
+                .arg("--all"),
+        )
+        .unwrap();
+        let old_destination = root.join("old-format-refused");
+        assert!(restore_bundle(&old_bundle, &old_destination, "neo").is_err());
+        assert!(!old_destination.join(".git").exists());
     }
 
     #[test]
