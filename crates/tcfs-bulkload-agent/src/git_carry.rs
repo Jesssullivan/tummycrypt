@@ -228,6 +228,7 @@ pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
         return Err(BulkloadRefusal::GitAuthorityOutsideRoot);
     }
     let before_refs = refs(&repo)?;
+    let seats = filesystem_rows(&repo)?;
     let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
     let (index_path, before_index) = source_index(&repo)?;
     let private = prepare_private(&repo, &capture)?;
@@ -260,6 +261,7 @@ pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
         || before_refs != refs(&repo)?
         || before_index != fs::read(index_path)?
         || head != text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?
+        || seats != filesystem_rows(&repo)?
     {
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
@@ -272,6 +274,11 @@ pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
             "bulkload worktree including untracked and ignored files",
         )?,
     )?;
+    metadata(
+        &private,
+        "filesystem-v1",
+        &postcard::to_allocvec(&seats).map_err(|_| BulkloadRefusal::FrameCodec)?,
+    )?;
     let bundle = capture.join("capture.bundle");
     output(
         git(&private)
@@ -281,6 +288,129 @@ pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
     )?;
     output(git(&private).args(["bundle", "verify"]).arg(&bundle))?;
     Ok(bundle)
+}
+
+// Reuse the transport's typed filesystem seats instead of treating Git's
+// executable-bit-only tree modes as complete filesystem metadata. .git is
+// administration owned by Git-native capture; nested repositories refuse.
+fn filesystem_rows(root: &Path) -> Result<Vec<crate::RowSchema>> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use tcfs_bulkload_proto::FileKind;
+    let mut pending = vec![root.to_path_buf()];
+    let mut rows = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            if entry.file_name() == ".git" {
+                if directory == root {
+                    continue;
+                }
+                return Err(BulkloadRefusal::GitInventoryMalformed);
+            }
+            let path = entry.path();
+            let meta = fs::symlink_metadata(&path)?;
+            let identity = crate::freshness::StatIdentity::from_metadata(&meta);
+            let kind = if meta.is_dir() {
+                FileKind::Directory
+            } else if meta.is_file() {
+                FileKind::Regular
+            } else if meta.is_symlink() {
+                FileKind::Symlink
+            } else {
+                return Err(BulkloadRefusal::GitInventoryMalformed);
+            };
+            if kind == FileKind::Directory {
+                pending.push(path.clone());
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| BulkloadRefusal::PathEscapesRoot)?;
+            rows.push(crate::RowSchema {
+                rel_path: relative.as_os_str().as_bytes().to_vec(),
+                kind,
+                dev: identity.dev,
+                ino: identity.ino,
+                size: identity.size,
+                mtime_ns: identity.mtime_ns,
+                ctime_ns: identity.ctime_ns,
+                mode: meta.mode(),
+                nlink: meta.nlink(),
+                link_target: if kind == FileKind::Symlink {
+                    Some(fs::read_link(&path)?.as_os_str().as_bytes().to_vec())
+                } else {
+                    None
+                },
+                blake3: None,
+            });
+        }
+    }
+    rows.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(rows)
+}
+
+fn restore_filesystem_rows(destination: &Path, revision: &str) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    use tcfs_bulkload_proto::FileKind;
+    let bytes = output(git(destination).args(["show", &format!("{revision}:value")]))?;
+    let rows: Vec<crate::RowSchema> =
+        postcard::from_bytes(&bytes).map_err(|_| BulkloadRefusal::FrameCodec)?;
+    for row in &rows {
+        let path = safe_destination(
+            destination,
+            Path::new(std::ffi::OsStr::from_bytes(&row.rel_path)),
+        )?;
+        match row.kind {
+            FileKind::Directory => match fs::create_dir(&path) {
+                Ok(()) => (),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && fs::symlink_metadata(&path)?.is_dir() => {}
+                Err(error) => return Err(error.into()),
+            },
+            FileKind::Regular if fs::symlink_metadata(&path)?.is_file() => {
+                fs::set_permissions(&path, fs::Permissions::from_mode(row.mode & 0o777))?;
+            }
+            FileKind::Symlink if fs::symlink_metadata(&path)?.is_symlink() => {
+                if row.link_target.as_deref() != Some(fs::read_link(&path)?.as_os_str().as_bytes())
+                {
+                    return Err(BulkloadRefusal::GitInventoryMalformed);
+                }
+            }
+            _ => return Err(BulkloadRefusal::GitInventoryMalformed),
+        }
+    }
+    // Parents become readonly only after all descendants have materialized.
+    for row in rows
+        .iter()
+        .rev()
+        .filter(|row| row.kind == FileKind::Directory)
+    {
+        let path = safe_destination(
+            destination,
+            Path::new(std::ffi::OsStr::from_bytes(&row.rel_path)),
+        )?;
+        fs::set_permissions(path, fs::Permissions::from_mode(row.mode & 0o777))?;
+    }
+    Ok(())
+}
+
+fn safe_destination(root: &Path, relative: &Path) -> Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+    if relative.as_os_str().is_empty() || relative.components().any(|part| !matches!(part, Component::Normal(name) if !name.as_bytes().eq_ignore_ascii_case(b".git"))) {
+        return Err(BulkloadRefusal::PathEscapesRoot);
+    }
+    let mut path = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(part) = components.next() {
+        path.push(part);
+        if components.peek().is_some() && !fs::symlink_metadata(&path)?.is_dir() {
+            return Err(BulkloadRefusal::PathEscapesRoot);
+        }
+    }
+    Ok(path)
 }
 
 fn source_index(repo: &Path) -> Result<(PathBuf, Vec<u8>)> {
@@ -476,6 +606,7 @@ pub fn restore_bundle(bundle: &Path, destination: &Path, source: &str) -> Result
     }
     let staged = find("staged")?;
     output(git(&destination).args(["read-tree", &format!("{staged}^{{tree}}")]))?;
+    restore_filesystem_rows(&destination, &find("filesystem-v1")?)?;
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
@@ -579,6 +710,7 @@ pub fn restore_linked(
         restore_entry(&destination, entry)?;
     }
     output(git(&destination).args(["read-tree", &format!("{}^{{tree}}", find("staged")?)]))?;
+    restore_filesystem_rows(&destination, &find("filesystem-v1")?)?;
     let final_exclude = match fs::read(exclude_path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -711,6 +843,16 @@ mod tests {
         fs::write(source.join("raw.txt"), b"raw\r\nbytes\r\n").unwrap();
         fs::write(source.join(".gitignore"), b"ignored\n").unwrap();
         fs::write(source.join("ignored"), b"unique ignored bytes").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(source.join("ignored"), fs::Permissions::from_mode(0o600)).unwrap();
+            fs::create_dir_all(source.join("empty/nested")).unwrap();
+            fs::set_permissions(source.join("empty"), fs::Permissions::from_mode(0o750)).unwrap();
+            fs::write(source.join("executable"), b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(source.join("executable"), fs::Permissions::from_mode(0o700))
+                .unwrap();
+            std::os::unix::fs::symlink("ignored", source.join("symlink")).unwrap();
+        }
         fs::write(dest.join("tracked"), b"destination divergence").unwrap();
         output(git(&dest).args(["add", "."])).unwrap();
         output(git(&dest).args(["-c", "commit.gpgsign=false", "commit", "-m", "destination"]))
@@ -776,6 +918,37 @@ mod tests {
         restore_linked(&bundle, &dest, &linked, "neo").unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
+            for target in [&restored, &linked] {
+                assert_eq!(
+                    fs::metadata(target.join("ignored"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+                assert_eq!(
+                    fs::metadata(target.join("empty"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o750
+                );
+                assert_eq!(
+                    fs::metadata(target.join("executable"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
+                assert!(target.join("empty/nested").is_dir());
+                assert_eq!(
+                    fs::read_link(target.join("symlink")).unwrap(),
+                    PathBuf::from("ignored")
+                );
+            }
             assert_eq!(
                 fs::metadata(&linked).unwrap().permissions().mode() & 0o777,
                 0o700
