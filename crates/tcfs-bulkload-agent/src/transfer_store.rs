@@ -22,8 +22,9 @@ static FILE_SYNC_NS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNCS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNC_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Maximum buffered chunks per producer (at most 2 MiB of chunk payload).
-pub(crate) const PERSIST_BATCH: usize = 8;
+/// Maximum buffered chunks per producer (at most 16 MiB of chunk payload).
+pub(crate) const PERSIST_BATCH: usize = 64;
+#[cfg(test)]
 const PERSIST_WORKERS: usize = 2;
 
 /// Process-local chunk persistence instrumentation.
@@ -138,6 +139,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS captures (key BLOB PRIMARY KEY, manifest BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS outputs (key BLOB PRIMARY KEY, identity BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS directories (key BLOB PRIMARY KEY, identity BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS chunks (digest BLOB PRIMARY KEY, payload BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
         )
         .map_err(sqlite_error)?;
@@ -310,6 +312,23 @@ impl Store {
     /// # Errors
     /// Refuses unexpected filesystem failures.
     pub fn chunk(&self, digest: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        let stored: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT payload FROM chunks WHERE digest = ?1",
+                [digest.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        if let Some(data) = stored {
+            if data.len() > crate::hash::CDC_MAX_BYTES as usize
+                || crate::hash::hash_bytes(&data) != *digest
+            {
+                return Err(BulkloadRefusal::DigestMismatch);
+            }
+            return Ok(Some(data));
+        }
         Self::chunk_at(&self.root, digest)
     }
 
@@ -341,24 +360,41 @@ impl Store {
         Self::put_chunk_at(&self.root, digest, data, true)
     }
 
-    /// Persist a bounded batch; every worker is joined before returning, including
-    /// on refusal. Chunk data is durable before publication, and the shared chunk
-    /// directory is durable before this method makes the batch observable to a
-    /// manifest or completion record.
+    /// Persist a bounded batch in one synchronous `SQLite` commit before a caller
+    /// may publish a manifest or completion record.
     pub(crate) fn put_chunks(&self, chunks: &[([u8; 32], Vec<u8>)]) -> Result<()> {
         if chunks.is_empty() {
             return Ok(());
         }
-        let root = self.root.as_path();
-        persist_batch_with(chunks, &|digest, data| {
-            Self::put_chunk_at(root, digest, data, false)
-        })?;
-        timed_sync(
-            &fs::File::open(root.join("chunks"))?,
-            &DIR_SYNCS,
-            &DIR_SYNC_NS,
-        )?;
-        Ok(())
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error)?;
+        let persisted = (|| {
+            for (digest, data) in chunks {
+                if crate::hash::hash_bytes(data) != *digest {
+                    return Err(BulkloadRefusal::DigestMismatch);
+                }
+                if self.chunk(digest)?.is_some() {
+                    continue;
+                }
+                self.conn
+                    .execute(
+                        "INSERT INTO chunks (digest, payload) VALUES (?1, ?2)",
+                        rusqlite::params![digest.as_slice(), data],
+                    )
+                    .map_err(sqlite_error)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = persisted {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        FILE_SYNCS.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let committed = self.conn.execute_batch("COMMIT").map_err(sqlite_error);
+        FILE_SYNC_NS.fetch_add(nanos(started), Ordering::Relaxed);
+        committed
     }
 
     fn put_chunk_at(
@@ -418,6 +454,7 @@ impl Store {
     }
 }
 
+#[cfg(test)]
 fn persist_batch_with<F>(chunks: &[([u8; 32], Vec<u8>)], persist: &F) -> Result<()>
 where
     F: Fn(&[u8; 32], &[u8]) -> Result<()> + Sync,
