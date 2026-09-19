@@ -338,19 +338,35 @@ impl Store {
     /// # Errors
     /// Refuses a digest mismatch or failed durable publication.
     pub fn put_chunk(&self, digest: &[u8; 32], data: &[u8]) -> Result<()> {
-        Self::put_chunk_at(&self.root, digest, data)
+        Self::put_chunk_at(&self.root, digest, data, true)
     }
 
     /// Persist a bounded batch; every worker is joined before returning, including
-    /// on refusal. Each chunk retains its own file and directory durability fence.
+    /// on refusal. Chunk data is durable before publication, and the shared chunk
+    /// directory is durable before this method makes the batch observable to a
+    /// manifest or completion record.
     pub(crate) fn put_chunks(&self, chunks: &[([u8; 32], Vec<u8>)]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
         let root = self.root.as_path();
         persist_batch_with(chunks, &|digest, data| {
-            Self::put_chunk_at(root, digest, data)
-        })
+            Self::put_chunk_at(root, digest, data, false)
+        })?;
+        timed_sync(
+            &fs::File::open(root.join("chunks"))?,
+            &DIR_SYNCS,
+            &DIR_SYNC_NS,
+        )?;
+        Ok(())
     }
 
-    fn put_chunk_at(root: &Path, digest: &[u8; 32], data: &[u8]) -> Result<()> {
+    fn put_chunk_at(
+        root: &Path,
+        digest: &[u8; 32],
+        data: &[u8],
+        sync_directory: bool,
+    ) -> Result<()> {
         PUT_CALLS.fetch_add(1, Ordering::Relaxed);
         let _timer = PutTimer(Instant::now());
         if data.len() > crate::hash::CDC_MAX_BYTES as usize
@@ -361,11 +377,13 @@ impl Store {
         if Self::chunk_at(root, digest)?.is_some() {
             // A concurrent publisher may have linked the already-synced inode
             // but not yet synced its directory. Fence that link before reuse.
-            timed_sync(
-                &fs::File::open(root.join("chunks"))?,
-                &DIR_SYNCS,
-                &DIR_SYNC_NS,
-            )?;
+            if sync_directory {
+                timed_sync(
+                    &fs::File::open(root.join("chunks"))?,
+                    &DIR_SYNCS,
+                    &DIR_SYNC_NS,
+                )?;
+            }
             return Ok(());
         }
         let chunks = root.join("chunks");
@@ -393,7 +411,9 @@ impl Store {
             Ok(())
         })();
         fs::remove_file(staging)?;
-        timed_sync(&fs::File::open(chunks)?, &DIR_SYNCS, &DIR_SYNC_NS)?;
+        if sync_directory {
+            timed_sync(&fs::File::open(chunks)?, &DIR_SYNCS, &DIR_SYNC_NS)?;
+        }
         result
     }
 }
@@ -487,6 +507,26 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new() -> Result<Self> {
+            let path = std::env::temp_dir().join(format!(
+                "tcfs-transfer-store-{}-{}",
+                std::process::id(),
+                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn batch_joins_success_and_refusal_before_returning() -> Result<()> {
         let chunks = vec![([0; 32], vec![0]), ([1; 32], vec![1])];
@@ -507,6 +547,43 @@ mod tests {
         assert_eq!(failed, Err(BulkloadRefusal::DigestMismatch));
         // The second worker finishes even if the first worker failed first.
         assert_eq!(finished.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_persists_chunks_before_capture_record() -> Result<()> {
+        let root = TestRoot::new()?;
+        let store = Store::open(&root.0.join("state"))?;
+        let first = b"first persisted chunk".to_vec();
+        let second = b"second persisted chunk".to_vec();
+        let first_digest = crate::hash::hash_bytes(&first);
+        let second_digest = crate::hash::hash_bytes(&second);
+        let chunks = vec![
+            (first_digest, first.clone()),
+            (second_digest, second.clone()),
+        ];
+
+        store.put_chunks(&chunks)?;
+        let manifest = Manifest {
+            digest: crate::hash::hash_bytes(b"capture"),
+            chunks: vec![
+                ChunkSpec {
+                    digest: first_digest,
+                    size: first.len() as u64,
+                },
+                ChunkSpec {
+                    digest: second_digest,
+                    size: second.len() as u64,
+                },
+            ],
+        };
+        store.record_capture(b"capture", &manifest)?;
+        drop(store);
+
+        let reopened = Store::open(&root.0.join("state"))?;
+        assert!(reopened.capture(b"capture")?.is_some());
+        assert_eq!(reopened.chunk(&first_digest)?, Some(first));
+        assert_eq!(reopened.chunk(&second_digest)?, Some(second));
         Ok(())
     }
 
