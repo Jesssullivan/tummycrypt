@@ -1,7 +1,7 @@
 //! Private, durable chunk storage and completion records for native transfers.
 
 use std::fs::{self, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,8 +22,8 @@ static FILE_SYNC_NS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNCS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNC_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Maximum buffered chunks per producer (at most 16 MiB of chunk payload).
-pub(crate) const PERSIST_BATCH: usize = 64;
+/// Maximum buffered chunks per producer (at most 64 MiB of chunk payload).
+pub(crate) const PERSIST_BATCH: usize = 256;
 #[cfg(test)]
 const PERSIST_WORKERS: usize = 2;
 
@@ -119,6 +119,18 @@ impl Store {
     pub fn open(root: &Path) -> Result<Self> {
         private_dir(root)?;
         private_dir(&root.join("chunks"))?;
+        let pack = root.join("chunks.pack");
+        if let Ok(meta) = fs::symlink_metadata(&pack) {
+            if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
+                return Err(BulkloadRefusal::PathEscapesRoot);
+            }
+        } else {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&pack)?;
+        }
         let db = root.join("transfer.sqlite");
         if let Ok(meta) = fs::symlink_metadata(&db) {
             if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
@@ -140,6 +152,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS outputs (key BLOB PRIMARY KEY, identity BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS directories (key BLOB PRIMARY KEY, identity BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS chunks (digest BLOB PRIMARY KEY, payload BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS chunk_locations (digest BLOB PRIMARY KEY, offset INTEGER NOT NULL, size INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
         )
         .map_err(sqlite_error)?;
@@ -329,6 +342,30 @@ impl Store {
             }
             return Ok(Some(data));
         }
+        let location: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT offset, size FROM chunk_locations WHERE digest = ?1",
+                [digest.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        if let Some((offset, size)) = location {
+            let offset = u64::try_from(offset).map_err(|_| BulkloadRefusal::DigestMismatch)?;
+            let size = usize::try_from(size).map_err(|_| BulkloadRefusal::DigestMismatch)?;
+            if size > crate::hash::CDC_MAX_BYTES as usize {
+                return Err(BulkloadRefusal::DigestMismatch);
+            }
+            let mut pack = crate::hash::open_nofollow(&self.root.join("chunks.pack"))?;
+            pack.seek(std::io::SeekFrom::Start(offset))?;
+            let mut data = vec![0_u8; size];
+            pack.read_exact(&mut data)?;
+            if crate::hash::hash_bytes(&data) != *digest {
+                return Err(BulkloadRefusal::DigestMismatch);
+            }
+            return Ok(Some(data));
+        }
         Self::chunk_at(&self.root, digest)
     }
 
@@ -360,8 +397,8 @@ impl Store {
         Self::put_chunk_at(&self.root, digest, data, true)
     }
 
-    /// Persist a bounded batch in one synchronous `SQLite` commit before a caller
-    /// may publish a manifest or completion record.
+    /// Append a bounded batch to the durable chunk pack before committing indexes
+    /// for a caller to publish in a manifest or completion record.
     pub(crate) fn put_chunks(&self, chunks: &[([u8; 32], Vec<u8>)]) -> Result<()> {
         if chunks.is_empty() {
             return Ok(());
@@ -370,6 +407,8 @@ impl Store {
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error)?;
         let persisted = (|| {
+            let mut pack = None;
+            let mut locations = Vec::new();
             for (digest, data) in chunks {
                 if crate::hash::hash_bytes(data) != *digest {
                     return Err(BulkloadRefusal::DigestMismatch);
@@ -377,10 +416,34 @@ impl Store {
                 if self.chunk(digest)?.is_some() {
                     continue;
                 }
+                if pack.is_none() {
+                    pack = Some(
+                        OpenOptions::new()
+                            .append(true)
+                            .open(self.root.join("chunks.pack"))?,
+                    );
+                }
+                let pack = pack.as_mut().ok_or(BulkloadRefusal::Io(None))?;
+                let offset = pack.metadata()?.len();
+                pack.write_all(data)?;
+                locations.push((digest, offset, data.len()));
+            }
+            if let Some(pack) = pack {
+                FILE_SYNCS.fetch_add(1, Ordering::Relaxed);
+                let started = Instant::now();
+                let synced = pack.sync_all();
+                FILE_SYNC_NS.fetch_add(nanos(started), Ordering::Relaxed);
+                synced?;
+            }
+            for (digest, offset, size) in locations {
                 self.conn
                     .execute(
-                        "INSERT INTO chunks (digest, payload) VALUES (?1, ?2)",
-                        rusqlite::params![digest.as_slice(), data],
+                        "INSERT INTO chunk_locations (digest, offset, size) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![
+                            digest.as_slice(),
+                            i64::try_from(offset).map_err(|_| BulkloadRefusal::BudgetExceeded)?,
+                            i64::try_from(size).map_err(|_| BulkloadRefusal::BudgetExceeded)?,
+                        ],
                     )
                     .map_err(sqlite_error)?;
             }
@@ -390,11 +453,7 @@ impl Store {
             let _ = self.conn.execute_batch("ROLLBACK");
             return Err(error);
         }
-        FILE_SYNCS.fetch_add(1, Ordering::Relaxed);
-        let started = Instant::now();
-        let committed = self.conn.execute_batch("COMMIT").map_err(sqlite_error);
-        FILE_SYNC_NS.fetch_add(nanos(started), Ordering::Relaxed);
-        committed
+        self.conn.execute_batch("COMMIT").map_err(sqlite_error)
     }
 
     fn put_chunk_at(
