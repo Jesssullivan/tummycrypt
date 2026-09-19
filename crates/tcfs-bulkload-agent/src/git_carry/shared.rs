@@ -36,14 +36,19 @@ pub fn export_base(repo: &Path, capture: &Path) -> Result<PathBuf> {
         return Err(BulkloadRefusal::GitAuthorityOutsideRoot);
     }
     let inventory = refs(&repo)?;
+    let boundary = super::shallow::frontier(&repo)?;
     let stashes = stash_history(&repo, &inventory)?;
     let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
     let private = prepare_private(&repo, &capture)?;
+    if !boundary.is_empty() {
+        super::metadata(&private, "shallow-frontier-v1", &boundary)?;
+    }
     capture_refs(&repo, &private, &inventory)?;
     set_ref(&private, "refs/carry-export/shared-base-head", &head)?;
     let bundle = capture.join("base.bundle");
     write_bundle(&private, &bundle, None)?;
     if inventory != refs(&repo)?
+        || boundary != super::shallow::frontier(&repo)?
         || stashes != stash_history(&repo, &inventory)?
         || head != text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?
     {
@@ -117,6 +122,12 @@ pub fn requires_base(bundle: &Path) -> Result<bool> {
 }
 
 pub(super) fn write_bundle(private: &Path, bundle: &Path, base: Option<&Path>) -> Result<()> {
+    let boundary = super::shallow::frontier(private)?;
+    if !boundary.is_empty() {
+        // A shallow frontier is not a bundle prerequisite. Preserve the entire
+        // locally available shallow closure as explicit custody instead.
+        return super::shallow::write_bundle(private, bundle, &boundary);
+    }
     let Some(base) = base else {
         output(
             git(private)

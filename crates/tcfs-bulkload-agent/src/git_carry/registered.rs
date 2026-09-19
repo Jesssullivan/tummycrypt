@@ -172,11 +172,7 @@ pub fn restore(
     sync_private_tree(&receipt)?;
     fs::File::open(&receipt_parent)?.sync_all()?;
     import_bundle(&repository, &receipt.join("capture.bundle"), source)?;
-    let heads = text(
-        git(&repository)
-            .args(["bundle", "list-heads"])
-            .arg(receipt.join("capture.bundle")),
-    )?;
+    let heads = super::shallow::headers(&repository, &receipt.join("capture.bundle"))?;
     let head = capture_revision(&heads, "head")?;
     let staged = capture_revision(&heads, "staged")?;
     authority(&repository, &admin, &head, &staged)?;

@@ -357,9 +357,11 @@ fn estate_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
     };
     match command {
         "estate-show" if args.len() == 1 => {
+            let mut output = std::io::stdout().lock();
             for item in estate::inspect(path(0)?)? {
-                println!("{item:?}");
+                writeln!(output, "{item:?}")?;
             }
+            output.flush()?;
             Ok(())
         }
         "estate-add" if (3..=4).contains(&args.len()) => {

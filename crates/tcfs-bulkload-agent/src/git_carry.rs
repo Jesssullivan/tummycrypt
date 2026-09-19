@@ -13,6 +13,7 @@ use crate::{BulkloadRefusal, Result};
 mod batch_objects;
 mod raw_tree;
 pub mod registered;
+mod shallow;
 pub mod shared;
 
 fn git(repo: &Path) -> Command {
@@ -274,6 +275,7 @@ pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
         postcard::to_allocvec(&filesystem_rows(&repo)?).map_err(|_| BulkloadRefusal::FrameCodec)?;
     let configuration = postcard::to_allocvec(&source_configuration(&repo)?)
         .map_err(|_| BulkloadRefusal::FrameCodec)?;
+    let boundary = shallow::frontier(&repo)?;
     let mut hash = blake3::Hasher::new();
     hash.update(b"tcfs-git-reusable-capture-v1\0");
     for bytes in [
@@ -287,6 +289,7 @@ pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
         &stash,
         &rows,
         &configuration,
+        &boundary,
     ] {
         hash.update(
             &u64::try_from(bytes.len())
@@ -352,7 +355,7 @@ fn repair_missing_index_inner(
         require_missing(&admin.join(name))?;
     }
     let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
-    let heads = text(git(&repo).args(["bundle", "list-heads"]).arg(&bundle))?;
+    let heads = shallow::headers(&repo, &bundle)?;
     let find = |suffix: &str| -> Result<String> {
         heads
             .lines()
@@ -540,6 +543,7 @@ fn export_repository_inner(
     }
     let before_refs = refs(&repo)?;
     let configuration = source_configuration(&repo)?;
+    let boundary = shallow::frontier(&repo)?;
     let seats = filesystem_rows(&repo)?;
     let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
     let (index_path, before_index) = source_index(&repo)?;
@@ -560,6 +564,9 @@ fn export_repository_inner(
         Err(error) => return Err(error.into()),
     };
     metadata(&private, "exclude", &exclude)?;
+    if !boundary.is_empty() {
+        metadata(&private, "shallow-frontier-v1", &boundary)?;
+    }
     metadata(
         &private,
         "configuration-v1",
@@ -576,6 +583,7 @@ fn export_repository_inner(
     let (tree, _) = raw_tree::capture(&private, &repo, &seats)?;
     if before_refs != refs(&repo)?
         || configuration != source_configuration(&repo)?
+        || boundary != shallow::frontier(&repo)?
         || before_index != fs::read(index_path)?
         || head != text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?
         || seats != filesystem_rows(&repo)?
@@ -813,6 +821,10 @@ fn prepare_private(repo: &Path, capture: &Path) -> Result<PathBuf> {
         private.join("objects/info/alternates"),
         format!("{objects}\n"),
     )?;
+    let boundary = shallow::frontier(repo)?;
+    if !boundary.is_empty() {
+        fs::write(private.join("shallow"), boundary)?;
+    }
     Ok(private)
 }
 
@@ -832,6 +844,8 @@ pub fn import_bundle(repo: &Path, bundle: &Path, source: &str) -> Result<usize> 
     let bundle = fs::canonicalize(bundle)?;
     output(git(repo).args(["bundle", "verify"]).arg(&bundle))?;
     let heads = text(git(repo).args(["bundle", "list-heads"]).arg(&bundle))?;
+    let unpacked = shallow::unpack(repo, &bundle, &heads)?;
+    let heads = unpacked.as_ref().unwrap_or(&heads);
     let mut native: Vec<_> = heads
         .lines()
         .filter(|line| {
@@ -870,18 +884,20 @@ pub fn import_bundle(repo: &Path, bundle: &Path, source: &str) -> Result<usize> 
         names.push((value.to_owned(), name.to_owned(), target));
     }
     // Fetch objects only. Compare-and-create below cannot clobber a native ref.
-    output(
-        git(repo)
-            .args([
-                "fetch",
-                "--no-write-fetch-head",
-                "--no-auto-maintenance",
-                "--no-tags",
-                "--no-recurse-submodules",
-            ])
-            .arg(&bundle)
-            .args(names.iter().map(|(_, name, _)| name)),
-    )?;
+    if unpacked.is_none() {
+        output(
+            git(repo)
+                .args([
+                    "fetch",
+                    "--no-write-fetch-head",
+                    "--no-auto-maintenance",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                ])
+                .arg(&bundle)
+                .args(names.iter().map(|(_, name, _)| name)),
+        )?;
+    }
     let inventory = text(git(repo).args([
         "for-each-ref",
         "--format=%(objectname) %(refname)",
@@ -938,6 +954,17 @@ fn capture_revision(heads: &str, suffix: &str) -> Result<String> {
         .ok_or(BulkloadRefusal::GitInventoryMalformed)
 }
 
+fn bundle_object_format(heads: &str) -> Result<&'static str> {
+    let value = heads
+        .lines()
+        .next()
+        .and_then(|line| line.split_once(' '))
+        .map(|(value, _)| value)
+        .filter(|value| oid(value))
+        .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
+    Ok(if value.len() == 40 { "sha1" } else { "sha256" })
+}
+
 fn payload_shape_equal(a: &[crate::RowSchema], b: &[crate::RowSchema]) -> bool {
     use tcfs_bulkload_proto::FileKind;
     a.len() == b.len()
@@ -977,8 +1004,7 @@ fn prepare_attachment(
     let retained = receipt.join("capture.bundle");
     fs::copy(bundle, &retained)?;
     let heads = text(git(receipt).args(["bundle", "list-heads"]).arg(&retained))?;
-    let head = capture_revision(&heads, "head")?;
-    let format = if head.len() == 40 { "sha1" } else { "sha256" };
+    let format = bundle_object_format(&heads)?;
     let private = receipt.join("repository.git");
     output(
         git(receipt)
@@ -991,6 +1017,8 @@ fn prepare_attachment(
             .arg(&private),
     )?;
     import_bundle(&private, &retained, source)?;
+    let heads = shallow::headers(&private, &retained)?;
+    let head = capture_revision(&heads, "head")?;
     let symbolic = text(git(&private).args([
         "show",
         &format!("{}:value", capture_revision(&heads, "head-symbolic")?),
@@ -1498,6 +1526,13 @@ pub fn restore_bundle_configured(
             .args(["bundle", "list-heads"])
             .arg(&bundle),
     )?;
+    if !shallow::is_custody(&heads) {
+        capture_revision(&heads, "configuration-v1")?;
+    }
+    let format = bundle_object_format(&heads)?;
+    output(git(&destination).args(["init", "--template=", &format!("--object-format={format}")]))?;
+    import_bundle(&destination, &bundle, source)?;
+    let heads = shallow::headers(&destination, &bundle)?;
     let find = |suffix: &str| -> Result<String> {
         heads
             .lines()
@@ -1511,9 +1546,6 @@ pub fn restore_bundle_configured(
     };
     let head = find("head")?;
     find("configuration-v1")?;
-    let format = if head.len() == 40 { "sha1" } else { "sha256" };
-    output(git(&destination).args(["init", "--template=", &format!("--object-format={format}")]))?;
-    import_bundle(&destination, &bundle, source)?;
     let symbolic =
         text(git(&destination).args(["show", &format!("{}:value", find("head-symbolic")?)]))?;
     if symbolic.is_empty() {
@@ -1575,7 +1607,7 @@ pub fn restore_linked(
     let bundle = fs::canonicalize(bundle)?;
     let repository = fs::canonicalize(repository)?;
     import_bundle(&repository, &bundle, source)?;
-    let heads = text(git(&repository).args(["bundle", "list-heads"]).arg(&bundle))?;
+    let heads = shallow::headers(&repository, &bundle)?;
     let find = |suffix: &str| -> Result<String> {
         heads
             .lines()
@@ -2259,11 +2291,14 @@ mod tests {
             fs::canonicalize(dest.join(".git")).unwrap()
         );
         let admin = text(git(&linked).args(["rev-parse", "--absolute-git-dir"])).unwrap();
-        assert_eq!(
+        let recorded_gitdir = PathBuf::from(
             fs::read_to_string(Path::new(&admin).join("gitdir"))
                 .unwrap()
                 .trim(),
-            linked.join(".git").to_str().unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(&recorded_gitdir).unwrap(),
+            fs::canonicalize(linked.join(".git")).unwrap()
         );
         assert_eq!(dest_index, fs::read(dest.join(".git/index")).unwrap());
         assert_eq!(dest_head, fs::read(dest.join(".git/HEAD")).unwrap());
