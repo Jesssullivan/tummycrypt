@@ -5348,7 +5348,10 @@ dependencies = [
 name = "tcfs-bulkload-bench"
 version = "0.12.17"
 dependencies = [
+ "blake3",
  "clap",
+ "libc",
+ "postcard",
  "tcfs-bulkload-agent",
  "tcfs-bulkload-proto",
  "tempfile",

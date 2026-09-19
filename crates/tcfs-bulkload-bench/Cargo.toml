@@ -14,7 +14,10 @@ path = "src/main.rs"
 [dependencies]
 tcfs-bulkload-agent = { path = "../tcfs-bulkload-agent" }
 tcfs-bulkload-proto = { path = "../tcfs-bulkload-proto" }
+blake3.workspace = true
 clap = { workspace = true }
+libc.workspace = true
+postcard.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
