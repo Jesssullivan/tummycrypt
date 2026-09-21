@@ -53,3 +53,23 @@ Never substitute a raw-transfer receipt for a native receipt. The rclone
 comparison remains a benchmark control only: R23 requires three alternating
 native/rclone repetitions on the same sealed corpus, with verification outside
 the timed transfer, before an initial-copy win is claimed.
+
+## Current R23/R25 Gate
+
+The corrected 2026-09-18 matrix is archived in
+[`neo-sting-bulkload-r23-evidence-2026-09-18.md`](neo-sting-bulkload-r23-evidence-2026-09-18.md).
+It used revision `c6cead96f325+worktree-d7f9f8d33baf0e99`, rclone 1.75.0,
+three alternating native/rclone/native/rclone/native samples, a deterministic
+`2,426,057`-byte mutation, and full-BLAKE3 verification outside timing.
+
+| Gate | Native median/result | Control/limit | Verdict |
+|---|---:|---:|---|
+| Initial copy | 3015.294 ms | rclone 601.010 ms | **R23 fail** |
+| 1%-byte delta | 58.842 ms | rclone 127.064 ms | pass |
+| Unchanged warm resume | 0 read, 0 received | exactly zero | pass |
+| Interrupted resume | 0 read, 0 received | exactly zero | pass |
+| Cumulative native peak RSS | 234,400 KiB | below 2 GiB | pass |
+
+The initial-copy loss keeps all estate transport and apply operations blocked.
+Do not reinterpret the delta win or the approximately 10.7× improvement over
+the prior 32.369-second native result as an R23 pass.
