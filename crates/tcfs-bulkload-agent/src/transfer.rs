@@ -9,20 +9,33 @@ use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 const BATCH_ROWS: usize = 32;
 const CAPTURE_WORKERS: usize = 4;
-// At most four queued plus four in-flight manifests (5 MiB each), with
-// CDC buffers bounded separately. The existing full census remains O(N).
+// Each event carries at most PERSIST_BATCH payloads (64 MiB). Eight queued
+// events plus four producer batches and one publisher group remain below 1 GiB.
+const CAPTURE_QUEUE: usize = CAPTURE_WORKERS * 2;
+const PUBLISH_GROUP_EVENTS: usize = CAPTURE_QUEUE + 1;
+// Manifests are bounded separately. The existing full census remains O(N).
 const MAX_MANIFEST_CHUNKS: usize = 131_072;
+
+static WALK_NS: AtomicU64 = AtomicU64::new(0);
+static REUSE_CENSUS_NS: AtomicU64 = AtomicU64::new(0);
+static CDC_HASH_NS: AtomicU64 = AtomicU64::new(0);
+static QUEUE_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static TRANSFER_NS: AtomicU64 = AtomicU64::new(0);
+static MATERIALIZE_NS: AtomicU64 = AtomicU64::new(0);
 
 use tcfs_bulkload_proto::frame::{ChunkSpec, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 use tcfs_bulkload_proto::FileKind;
 
 use crate::freshness::{NullCache, StatIdentity};
 use crate::materialize::Destination;
-use crate::transfer_store::{row_key, Manifest, Store, PERSIST_BATCH};
+use crate::transfer_store::{
+    row_key, Manifest, PreparedEvent, Store, StorePublisher, PERSIST_BATCH,
+};
 use crate::walk::{walk, WalkOptions};
 use crate::{BulkloadRefusal, Frame, FrameKind, Result, RowSchema};
 
@@ -39,6 +52,79 @@ pub struct TransferStats {
     pub source_bytes_read: u64,
     /// Relative paths and refusal codes. Contents and credentials are never logged.
     pub refusals: Vec<(Vec<u8>, String)>,
+}
+
+/// Cumulative process-scope phase counters; concurrent transfers may overlap.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferTiming {
+    pub walk_ns: u64,
+    pub reuse_census_ns: u64,
+    pub cdc_hash_ns: u64,
+    pub queue_wait_ns: u64,
+    pub transfer_ns: u64,
+    pub materialize_ns: u64,
+}
+
+impl TransferTiming {
+    #[must_use]
+    pub fn snapshot() -> Self {
+        Self {
+            walk_ns: WALK_NS.load(Ordering::Relaxed),
+            reuse_census_ns: REUSE_CENSUS_NS.load(Ordering::Relaxed),
+            cdc_hash_ns: CDC_HASH_NS.load(Ordering::Relaxed),
+            queue_wait_ns: QUEUE_WAIT_NS.load(Ordering::Relaxed),
+            transfer_ns: TRANSFER_NS.load(Ordering::Relaxed),
+            materialize_ns: MATERIALIZE_NS.load(Ordering::Relaxed),
+        }
+    }
+
+    #[must_use]
+    pub const fn since(self, before: Self) -> Self {
+        Self {
+            walk_ns: self.walk_ns.saturating_sub(before.walk_ns),
+            reuse_census_ns: self.reuse_census_ns.saturating_sub(before.reuse_census_ns),
+            cdc_hash_ns: self.cdc_hash_ns.saturating_sub(before.cdc_hash_ns),
+            queue_wait_ns: self.queue_wait_ns.saturating_sub(before.queue_wait_ns),
+            transfer_ns: self.transfer_ns.saturating_sub(before.transfer_ns),
+            materialize_ns: self.materialize_ns.saturating_sub(before.materialize_ns),
+        }
+    }
+}
+
+struct PhaseTimer(&'static AtomicU64, Instant);
+
+impl Drop for PhaseTimer {
+    fn drop(&mut self) {
+        self.0.fetch_add(elapsed_ns(self.1), Ordering::Relaxed);
+    }
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn send_prepared(
+    sender: &std::sync::mpsc::SyncSender<PreparedEvent>,
+    event: PreparedEvent,
+) -> Result<()> {
+    let started = Instant::now();
+    let sent = sender.send(event).map_err(|_| BulkloadRefusal::Io(None));
+    QUEUE_WAIT_NS.fetch_add(elapsed_ns(started), Ordering::Relaxed);
+    sent
+}
+
+struct SendBatchContext<'a> {
+    root: &'a Path,
+    authority: &'a [u8],
+    store: &'a Store,
+    batch: &'a [RowSchema],
+    needed: &'a [bool],
+}
+
+struct ReceiveContext<'a> {
+    target: &'a Destination,
+    store: &'a Store,
+    authority: &'a [u8],
 }
 
 /// Run the same framed protocol locally over a bounded Unix stream pair.
@@ -104,12 +190,14 @@ pub fn serve<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
         meta.dev(),
         meta.ino(),
     ))?;
+    let mut publisher = store.publisher()?;
     write_frame(
         output,
         FrameKind::TransferStart {
             authority: authority.clone(),
         },
     )?;
+    let walk_started = Instant::now();
     let mut census = walk(
         &WalkOptions {
             cross_device: true,
@@ -117,6 +205,7 @@ pub fn serve<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
         },
         &mut NullCache,
     )?;
+    WALK_NS.fetch_add(elapsed_ns(walk_started), Ordering::Relaxed);
     census
         .rows
         .sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
@@ -152,7 +241,18 @@ pub fn serve<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
         {
             return Err(BulkloadRefusal::FrameCodec);
         }
-        source_bytes_read += send_batch(input, output, &root, &authority, &store, batch, &needed)?;
+        source_bytes_read += send_batch(
+            input,
+            output,
+            &mut publisher,
+            &SendBatchContext {
+                root: &root,
+                authority: &authority,
+                store: &store,
+                batch,
+                needed: &needed,
+            },
+        )?;
     }
     write_frame(
         output,
@@ -166,34 +266,52 @@ pub fn serve<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
 fn send_batch<R: Read, W: Write>(
     input: &mut R,
     output: &mut W,
-    root: &Path,
-    authority: &[u8],
-    store: &Store,
-    batch: &[RowSchema],
-    needed: &[bool],
+    publisher: &mut StorePublisher<'_>,
+    context: &SendBatchContext<'_>,
 ) -> Result<u64> {
     let next = AtomicUsize::new(0);
+    let root = context.root;
+    let authority = context.authority;
+    let store = context.store;
+    let batch = context.batch;
+    let needed = context.needed;
     let state = store.root();
     std::thread::scope(|scope| -> Result<u64> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(CAPTURE_WORKERS);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(CAPTURE_QUEUE);
         for _ in 0..CAPTURE_WORKERS.min(needed.iter().filter(|value| **value).count()) {
             let sender = sender.clone();
             let next = &next;
             std::thread::Builder::new().spawn_scoped(scope, move || {
-                let opened = Store::open(state);
+                let opened = Store::open_reader(state);
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(row) = batch.get(index) else { break };
+                    let Some(row) = batch.get(index) else {
+                        break;
+                    };
                     if !needed.get(index).copied().unwrap_or(false) {
                         continue;
                     }
                     let mut bytes = 0;
-                    let captured = opened
+                    let prepared = opened
                         .as_ref()
                         .map_or(Err(BulkloadRefusal::Io(None)), |store| {
-                            capture(root, authority, row, store, &mut bytes)
+                            capture(root, authority, row, store, index, &sender, &mut bytes)
                         });
-                    if sender.send((index, bytes, captured)).is_err() {
+                    if let Err(refusal) = prepared {
+                        if send_prepared(
+                            &sender,
+                            PreparedEvent::Refused {
+                                capture_id: index,
+                                bytes_read: bytes,
+                                refusal,
+                            },
+                        )
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    if opened.is_err() {
                         break;
                     }
                 }
@@ -202,25 +320,43 @@ fn send_batch<R: Read, W: Write>(
         drop(sender);
         let mut bytes_read = 0_u64;
         let mut completed = 0;
-        for (index, bytes, captured) in receiver {
-            bytes_read = bytes_read.saturating_add(bytes);
-            completed += 1;
-            let row = batch.get(index).ok_or(BulkloadRefusal::FrameCodec)?;
-            write_frame(
-                output,
-                FrameKind::FileContent {
-                    index: u32::try_from(index).map_err(|_| BulkloadRefusal::FrameCodec)?,
-                },
-            )?;
-            match captured {
-                Ok(manifest) => send_content(input, output, &manifest, store, row)?,
-                Err(refusal) => write_frame(
+        while let Ok(first) = receiver.recv() {
+            let mut group = Vec::with_capacity(PUBLISH_GROUP_EVENTS);
+            group.push(first);
+            while group.len() < PUBLISH_GROUP_EVENTS {
+                match receiver.try_recv() {
+                    Ok(event) => group.push(event),
+                    Err(
+                        std::sync::mpsc::TryRecvError::Empty
+                        | std::sync::mpsc::TryRecvError::Disconnected,
+                    ) => break,
+                }
+            }
+            for ack in publisher.publish_group(group)? {
+                bytes_read = bytes_read.saturating_add(ack.bytes_read);
+                completed += 1;
+                let row = batch
+                    .get(ack.capture_id)
+                    .ok_or(BulkloadRefusal::FrameCodec)?;
+                write_frame(
                     output,
-                    FrameKind::Refusal {
-                        code: refusal.code().to_owned(),
-                        rel_path: row.rel_path.clone(),
+                    FrameKind::FileContent {
+                        index: u32::try_from(ack.capture_id)
+                            .map_err(|_| BulkloadRefusal::FrameCodec)?,
                     },
-                )?,
+                )?;
+                match ack.captured {
+                    Ok(manifest) => {
+                        send_content(input, output, &manifest, store, row)?;
+                    }
+                    Err(refusal) => write_frame(
+                        output,
+                        FrameKind::Refusal {
+                            code: refusal.code().to_owned(),
+                            rel_path: row.rel_path.clone(),
+                        },
+                    )?,
+                }
             }
         }
         if completed != needed.iter().filter(|value| **value).count() {
@@ -309,6 +445,7 @@ pub fn receive<R: Read, W: Write>(
         target_meta.dev(),
         target_meta.ino(),
     ))?;
+    let mut publisher = store.publisher()?;
     let mut stats = TransferStats::default();
     let mut rows = 0;
     loop {
@@ -318,10 +455,12 @@ pub fn receive<R: Read, W: Write>(
                     return Err(BulkloadRefusal::BudgetExceeded);
                 }
                 rows += batch.len() as u64;
+                let census_started = Instant::now();
                 let mut needed = batch
                     .iter()
                     .map(|row| prepare_row(&mut target, &store, &output_authority, row, &mut stats))
                     .collect::<Result<Vec<_>>>()?;
+                REUSE_CENSUS_NS.fetch_add(elapsed_ns(census_started), Ordering::Relaxed);
                 write_frame(
                     output,
                     FrameKind::WantFiles {
@@ -341,9 +480,12 @@ pub fn receive<R: Read, W: Write>(
                             receive_content(
                                 input,
                                 output,
-                                &target,
-                                &store,
-                                &output_authority,
+                                &mut publisher,
+                                &ReceiveContext {
+                                    target: &target,
+                                    store: &store,
+                                    authority: &output_authority,
+                                },
                                 batch.get(index).ok_or(BulkloadRefusal::FrameCodec)?,
                                 &mut stats,
                             )?;
@@ -406,13 +548,12 @@ fn prepare_row(
 fn receive_content<R: Read, W: Write>(
     input: &mut R,
     output: &mut W,
-    target: &Destination,
-    store: &Store,
-    authority: &[u8],
+    publisher: &mut StorePublisher<'_>,
+    context: &ReceiveContext<'_>,
     row: &RowSchema,
     stats: &mut TransferStats,
 ) -> Result<()> {
-    let key = row_key(authority, row)?;
+    let key = row_key(context.authority, row)?;
     let manifest = match read_frame(input)?.kind {
         FrameKind::Manifest { digest, chunks } if chunks.len() <= MAX_MANIFEST_CHUNKS => {
             Manifest { digest, chunks }
@@ -423,10 +564,12 @@ fn receive_content<R: Read, W: Write>(
         }
         _ => return Err(BulkloadRefusal::FrameCodec),
     };
-    let received = receive_chunks(input, output, &manifest, store, stats);
+    let received = receive_chunks(input, output, &manifest, context.store, publisher, stats);
+    let materialize_started = Instant::now();
     let applied = received
-        .and_then(|()| target.file(row, &manifest, store))
-        .and_then(|identity| store.record_output(&key, &identity));
+        .and_then(|()| context.target.file(row, &manifest, context.store))
+        .and_then(|identity| context.store.record_output(&key, &identity));
+    MATERIALIZE_NS.fetch_add(elapsed_ns(materialize_started), Ordering::Relaxed);
     write_frame(
         output,
         FrameKind::Applied {
@@ -447,8 +590,10 @@ fn receive_chunks<R: Read, W: Write>(
     output: &mut W,
     manifest: &Manifest,
     store: &Store,
+    publisher: &mut StorePublisher<'_>,
     stats: &mut TransferStats,
 ) -> Result<()> {
+    let _transfer_timer = PhaseTimer(&TRANSFER_NS, Instant::now());
     let mut missing = Vec::new();
     let mut seen = HashSet::new();
     for chunk in &manifest.chunks {
@@ -475,15 +620,21 @@ fn receive_chunks<R: Read, W: Write>(
                 stats.bytes_received = stats.bytes_received.saturating_add(data.len() as u64);
                 pending.push((digest, data));
                 if pending.len() == PERSIST_BATCH {
-                    store.put_chunks(&pending)?;
-                    pending.clear();
+                    publisher.publish_group(vec![PreparedEvent::Chunks {
+                        capture_id: 0,
+                        chunks: std::mem::take(&mut pending),
+                    }])?;
                 }
             }
             FrameKind::Refusal { .. } => return Err(BulkloadRefusal::SealedObjectMissing),
             _ => return Err(BulkloadRefusal::FrameCodec),
         }
     }
-    store.put_chunks(&pending)
+    publisher.publish_group(vec![PreparedEvent::Chunks {
+        capture_id: 0,
+        chunks: pending,
+    }])?;
+    Ok(())
 }
 
 fn capture(
@@ -491,8 +642,10 @@ fn capture(
     authority: &[u8],
     row: &RowSchema,
     store: &Store,
+    capture_id: usize,
+    sender: &std::sync::mpsc::SyncSender<PreparedEvent>,
     bytes_read: &mut u64,
-) -> Result<Manifest> {
+) -> Result<()> {
     if row.size > (MAX_MANIFEST_CHUNKS as u64) * u64::from(crate::hash::CDC_MAX_BYTES) {
         return Err(BulkloadRefusal::BudgetExceeded);
     }
@@ -509,9 +662,29 @@ fn capture(
                     Ok(available && store.chunk(&chunk.digest)?.is_some())
                 })?;
         if available {
-            return Ok(manifest);
+            send_prepared(
+                sender,
+                PreparedEvent::Complete {
+                    capture_id,
+                    bytes_read: *bytes_read,
+                    key,
+                    manifest,
+                },
+            )?;
+            return Ok(());
         }
     }
+    capture_uncached(root, row, key, capture_id, sender, bytes_read)
+}
+
+fn capture_uncached(
+    root: &Path,
+    row: &RowSchema,
+    key: Vec<u8>,
+    capture_id: usize,
+    sender: &std::sync::mpsc::SyncSender<PreparedEvent>,
+    bytes_read: &mut u64,
+) -> Result<()> {
     if row.rel_path.ends_with(b"-wal")
         || row.rel_path.ends_with(b"-shm")
         || row.rel_path.ends_with(b"-journal")
@@ -539,6 +712,7 @@ fn capture(
     let mut hasher = blake3::Hasher::new();
     let mut chunks = Vec::new();
     let mut pending = Vec::with_capacity(PERSIST_BATCH);
+    let _cdc_timer = PhaseTimer(&CDC_HASH_NS, Instant::now());
     for chunk in fastcdc::v2020::StreamCDC::new(
         prefix.as_slice().chain(reader),
         crate::hash::CDC_MIN_BYTES,
@@ -557,11 +731,24 @@ fn capture(
         });
         pending.push((digest, chunk.data));
         if pending.len() == PERSIST_BATCH {
-            store.put_chunks(&pending)?;
-            pending.clear();
+            send_prepared(
+                sender,
+                PreparedEvent::Chunks {
+                    capture_id,
+                    chunks: std::mem::take(&mut pending),
+                },
+            )?;
         }
     }
-    store.put_chunks(&pending)?;
+    if !pending.is_empty() {
+        send_prepared(
+            sender,
+            PreparedEvent::Chunks {
+                capture_id,
+                chunks: pending,
+            },
+        )?;
+    }
     if StatIdentity::from_metadata(&file.metadata()?) != expected {
         return Err(BulkloadRefusal::SourceChangedAfterSnapshot);
     }
@@ -569,8 +756,16 @@ fn capture(
         digest: *hasher.finalize().as_bytes(),
         chunks,
     };
-    store.record_capture(&key, &manifest)?;
-    Ok(manifest)
+    send_prepared(
+        sender,
+        PreparedEvent::Complete {
+            capture_id,
+            bytes_read: *bytes_read,
+            key,
+            manifest,
+        },
+    )?;
+    Ok(())
 }
 
 struct CountReader<'a, R> {

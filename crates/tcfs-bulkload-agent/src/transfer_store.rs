@@ -1,7 +1,9 @@
 //! Private, durable chunk storage and completion records for native transfers.
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Seek as _, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +23,48 @@ static FILE_SYNCS: AtomicU64 = AtomicU64::new(0);
 static FILE_SYNC_NS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNCS: AtomicU64 = AtomicU64::new(0);
 static DIR_SYNC_NS: AtomicU64 = AtomicU64::new(0);
+static PUBLISH_GROUPS: AtomicU64 = AtomicU64::new(0);
+static PACK_APPEND_NS: AtomicU64 = AtomicU64::new(0);
+static SQLITE_COMMITS: AtomicU64 = AtomicU64::new(0);
+static SQLITE_COMMIT_NS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PublishFault {
+    None,
+    AfterAppend,
+    AfterSync,
+    AfterLocationInsert,
+    AfterManifestInsert,
+    BeforeCommit,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PUBLISH_FAULT: std::cell::Cell<PublishFault> = const {
+        std::cell::Cell::new(PublishFault::None)
+    };
+}
+
+#[cfg(test)]
+fn inject_fault(point: PublishFault) -> Result<()> {
+    if PUBLISH_FAULT.with(std::cell::Cell::get) == point {
+        return Err(BulkloadRefusal::Io(None));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+macro_rules! publication_fault {
+    ($point:ident) => {{
+        inject_fault(PublishFault::$point)?;
+    }};
+}
+
+#[cfg(not(test))]
+macro_rules! publication_fault {
+    ($point:ident) => {{}};
+}
 
 /// Maximum buffered chunks per producer (at most 64 MiB of chunk payload).
 pub(crate) const PERSIST_BATCH: usize = 256;
@@ -46,6 +90,14 @@ pub struct ChunkTiming {
     pub dir_syncs: u64,
     /// Aggregate chunk-directory sync worker nanoseconds.
     pub dir_sync_ns: u64,
+    /// Durable publication groups attempted by this process.
+    pub publish_groups: u64,
+    /// Aggregate nanoseconds spent appending payload bytes to the pack.
+    pub pack_append_ns: u64,
+    /// Durable `SQLite` publication commits attempted by this process.
+    pub sqlite_commits: u64,
+    /// Aggregate nanoseconds spent committing publication transactions.
+    pub sqlite_commit_ns: u64,
 }
 
 impl ChunkTiming {
@@ -59,6 +111,10 @@ impl ChunkTiming {
             file_sync_ns: FILE_SYNC_NS.load(Ordering::Relaxed),
             dir_syncs: DIR_SYNCS.load(Ordering::Relaxed),
             dir_sync_ns: DIR_SYNC_NS.load(Ordering::Relaxed),
+            publish_groups: PUBLISH_GROUPS.load(Ordering::Relaxed),
+            pack_append_ns: PACK_APPEND_NS.load(Ordering::Relaxed),
+            sqlite_commits: SQLITE_COMMITS.load(Ordering::Relaxed),
+            sqlite_commit_ns: SQLITE_COMMIT_NS.load(Ordering::Relaxed),
         }
     }
 
@@ -72,6 +128,12 @@ impl ChunkTiming {
             file_sync_ns: self.file_sync_ns.saturating_sub(before.file_sync_ns),
             dir_syncs: self.dir_syncs.saturating_sub(before.dir_syncs),
             dir_sync_ns: self.dir_sync_ns.saturating_sub(before.dir_sync_ns),
+            publish_groups: self.publish_groups.saturating_sub(before.publish_groups),
+            pack_append_ns: self.pack_append_ns.saturating_sub(before.pack_append_ns),
+            sqlite_commits: self.sqlite_commits.saturating_sub(before.sqlite_commits),
+            sqlite_commit_ns: self
+                .sqlite_commit_ns
+                .saturating_sub(before.sqlite_commit_ns),
         }
     }
 }
@@ -103,6 +165,48 @@ pub struct Manifest {
     pub digest: [u8; 32],
     /// Content-defined chunks in order.
     pub chunks: Vec<ChunkSpec>,
+}
+
+/// Bounded preparation output consumed by the sole durable publisher.
+pub(crate) enum PreparedEvent {
+    Chunks {
+        capture_id: usize,
+        chunks: Vec<([u8; 32], Vec<u8>)>,
+    },
+    Complete {
+        capture_id: usize,
+        bytes_read: u64,
+        key: Vec<u8>,
+        manifest: Manifest,
+    },
+    Refused {
+        capture_id: usize,
+        bytes_read: u64,
+        refusal: BulkloadRefusal,
+    },
+}
+
+/// A completed preparation whose publication outcome can cross the protocol.
+pub(crate) struct PublishAck {
+    pub capture_id: usize,
+    pub bytes_read: u64,
+    pub captured: Result<Manifest>,
+}
+
+struct Exclusive(fs::File);
+
+impl Drop for Exclusive {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns a live descriptor for the acquired flock.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Exclusive owner of pack offsets and durable capture publication.
+pub(crate) struct StorePublisher<'a> {
+    store: &'a Store,
+    pack: fs::File,
+    _exclusive: Exclusive,
 }
 
 /// A private, source-bound transfer state directory.
@@ -144,7 +248,7 @@ impl Store {
                 .open(&db)?;
         }
         let conn = rusqlite::Connection::open(db).map_err(sqlite_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
+        conn.busy_timeout(std::time::Duration::from_secs(60))
             .map_err(sqlite_error)?;
         conn.execute_batch(
             "PRAGMA synchronous=FULL;
@@ -160,6 +264,29 @@ impl Store {
             root: fs::canonicalize(root)?,
             conn,
         })
+    }
+
+    /// Open an initialized store without obtaining any write capability.
+    pub(crate) fn open_reader(root: &Path) -> Result<Self> {
+        let root = fs::canonicalize(root)?;
+        let db = root.join("transfer.sqlite");
+        let meta = fs::symlink_metadata(&db)?;
+        if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
+            return Err(BulkloadRefusal::PathEscapesRoot);
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(sqlite_error)?;
+        conn.busy_timeout(std::time::Duration::from_secs(60))
+            .map_err(sqlite_error)?;
+        Ok(Self { root, conn })
+    }
+
+    /// Acquire the nonblocking single-writer guard and reconcile the pack tail.
+    pub(crate) fn publisher(&self) -> Result<StorePublisher<'_>> {
+        StorePublisher::open(self)
     }
 
     /// Canonical state root, used to reject recursive self-capture.
@@ -397,65 +524,6 @@ impl Store {
         Self::put_chunk_at(&self.root, digest, data, true)
     }
 
-    /// Append a bounded batch to the durable chunk pack before committing indexes
-    /// for a caller to publish in a manifest or completion record.
-    pub(crate) fn put_chunks(&self, chunks: &[([u8; 32], Vec<u8>)]) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(sqlite_error)?;
-        let persisted = (|| {
-            let mut pack = None;
-            let mut locations = Vec::new();
-            for (digest, data) in chunks {
-                if crate::hash::hash_bytes(data) != *digest {
-                    return Err(BulkloadRefusal::DigestMismatch);
-                }
-                if self.chunk(digest)?.is_some() {
-                    continue;
-                }
-                if pack.is_none() {
-                    pack = Some(
-                        OpenOptions::new()
-                            .append(true)
-                            .open(self.root.join("chunks.pack"))?,
-                    );
-                }
-                let pack = pack.as_mut().ok_or(BulkloadRefusal::Io(None))?;
-                let offset = pack.metadata()?.len();
-                pack.write_all(data)?;
-                locations.push((digest, offset, data.len()));
-            }
-            if let Some(pack) = pack {
-                FILE_SYNCS.fetch_add(1, Ordering::Relaxed);
-                let started = Instant::now();
-                let synced = pack.sync_all();
-                FILE_SYNC_NS.fetch_add(nanos(started), Ordering::Relaxed);
-                synced?;
-            }
-            for (digest, offset, size) in locations {
-                self.conn
-                    .execute(
-                        "INSERT INTO chunk_locations (digest, offset, size) VALUES (?1, ?2, ?3)",
-                        rusqlite::params![
-                            digest.as_slice(),
-                            i64::try_from(offset).map_err(|_| BulkloadRefusal::BudgetExceeded)?,
-                            i64::try_from(size).map_err(|_| BulkloadRefusal::BudgetExceeded)?,
-                        ],
-                    )
-                    .map_err(sqlite_error)?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = persisted {
-            let _ = self.conn.execute_batch("ROLLBACK");
-            return Err(error);
-        }
-        self.conn.execute_batch("COMMIT").map_err(sqlite_error)
-    }
-
     fn put_chunk_at(
         root: &Path,
         digest: &[u8; 32],
@@ -510,6 +578,257 @@ impl Store {
             timed_sync(&fs::File::open(chunks)?, &DIR_SYNCS, &DIR_SYNC_NS)?;
         }
         result
+    }
+}
+
+impl StorePublisher<'_> {
+    fn open(store: &Store) -> Result<StorePublisher<'_>> {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(store.root.join("writer.lock"))?;
+        // SAFETY: the owned descriptor remains open for the guard lifetime.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let exclusive = Exclusive(lock);
+        let mut pack = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(store.root.join("chunks.pack"))?;
+        let pack_len = pack.metadata()?.len();
+        let mut committed_end = 0_u64;
+        {
+            let mut statement = store
+                .conn
+                .prepare("SELECT offset, size FROM chunk_locations ORDER BY offset, size")
+                .map_err(sqlite_error)?;
+            let ranges = statement
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .map_err(sqlite_error)?;
+            for range in ranges {
+                let (offset, size) = range.map_err(sqlite_error)?;
+                let offset = u64::try_from(offset).map_err(|_| BulkloadRefusal::DigestMismatch)?;
+                let size = u64::try_from(size).map_err(|_| BulkloadRefusal::DigestMismatch)?;
+                let end = offset
+                    .checked_add(size)
+                    .ok_or(BulkloadRefusal::DigestMismatch)?;
+                if size > u64::from(crate::hash::CDC_MAX_BYTES)
+                    || offset < committed_end
+                    || end > pack_len
+                {
+                    return Err(BulkloadRefusal::DigestMismatch);
+                }
+                committed_end = end;
+            }
+        }
+        if pack_len > committed_end {
+            pack.set_len(committed_end)?;
+            timed_sync(&pack, &FILE_SYNCS, &FILE_SYNC_NS)?;
+        }
+        pack.seek(std::io::SeekFrom::Start(committed_end))?;
+        Ok(StorePublisher {
+            store,
+            pack,
+            _exclusive: exclusive,
+        })
+    }
+
+    fn indexed_or_legacy(&self, digest: &[u8; 32]) -> Result<bool> {
+        let indexed: bool = self
+            .store
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM chunks WHERE digest = ?1
+                    UNION ALL
+                    SELECT 1 FROM chunk_locations WHERE digest = ?1
+                )",
+                [digest.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error)?;
+        Ok(indexed || Store::chunk_at(&self.store.root, digest)?.is_some())
+    }
+
+    fn missing_chunks<'a>(&self, events: &'a [PreparedEvent]) -> Result<Vec<([u8; 32], &'a [u8])>> {
+        let mut known = HashSet::new();
+        let mut missing = Vec::new();
+        for event in events {
+            if let PreparedEvent::Chunks { chunks, .. } = event {
+                if chunks.len() > PERSIST_BATCH {
+                    return Err(BulkloadRefusal::BudgetExceeded);
+                }
+                for (digest, data) in chunks {
+                    if data.len() > crate::hash::CDC_MAX_BYTES as usize
+                        || crate::hash::hash_bytes(data) != *digest
+                    {
+                        return Err(BulkloadRefusal::DigestMismatch);
+                    }
+                    if known.insert(*digest) && !self.indexed_or_legacy(digest)? {
+                        missing.push((*digest, data.as_slice()));
+                    }
+                }
+            }
+        }
+        for event in events {
+            if let PreparedEvent::Complete { manifest, .. } = event {
+                if manifest
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.size > u64::from(crate::hash::CDC_MAX_BYTES))
+                {
+                    return Err(BulkloadRefusal::BudgetExceeded);
+                }
+                for chunk in &manifest.chunks {
+                    if !known.contains(&chunk.digest) && !self.indexed_or_legacy(&chunk.digest)? {
+                        return Err(BulkloadRefusal::SealedObjectMissing);
+                    }
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    fn append_chunks(
+        &mut self,
+        missing: Vec<([u8; 32], &[u8])>,
+    ) -> Result<Vec<([u8; 32], u64, usize)>> {
+        let append_started = Instant::now();
+        let mut locations = Vec::with_capacity(missing.len());
+        for (digest, data) in missing {
+            let offset = self.pack.stream_position()?;
+            self.pack.write_all(data)?;
+            locations.push((digest, offset, data.len()));
+        }
+        PACK_APPEND_NS.fetch_add(nanos(append_started), Ordering::Relaxed);
+        publication_fault!(AfterAppend);
+        if !locations.is_empty() {
+            timed_sync(&self.pack, &FILE_SYNCS, &FILE_SYNC_NS)?;
+        }
+        publication_fault!(AfterSync);
+        Ok(locations)
+    }
+
+    fn commit_group(
+        &self,
+        locations: &[([u8; 32], u64, usize)],
+        events: &[PreparedEvent],
+    ) -> Result<()> {
+        let has_captures = events
+            .iter()
+            .any(|event| matches!(event, PreparedEvent::Complete { .. }));
+        if locations.is_empty() && !has_captures {
+            return Ok(());
+        }
+        self.store
+            .conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error)?;
+        let persisted = (|| -> Result<()> {
+            for (digest, offset, size) in locations {
+                self.store
+                    .conn
+                    .execute(
+                        "INSERT OR IGNORE INTO chunk_locations (digest, offset, size)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![
+                            digest.as_slice(),
+                            i64::try_from(*offset).map_err(|_| BulkloadRefusal::BudgetExceeded)?,
+                            i64::try_from(*size).map_err(|_| BulkloadRefusal::BudgetExceeded)?,
+                        ],
+                    )
+                    .map_err(sqlite_error)?;
+            }
+            publication_fault!(AfterLocationInsert);
+            for event in events {
+                if let PreparedEvent::Complete { key, manifest, .. } = event {
+                    self.store
+                        .conn
+                        .execute(
+                            "INSERT INTO captures VALUES (?1, ?2)
+                             ON CONFLICT(key) DO UPDATE SET manifest=excluded.manifest",
+                            (key, postcard::to_stdvec(manifest)?),
+                        )
+                        .map_err(sqlite_error)?;
+                }
+            }
+            publication_fault!(AfterManifestInsert);
+            Ok(())
+        })();
+        if let Err(error) = persisted {
+            let _ = self.store.conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        SQLITE_COMMITS.fetch_add(1, Ordering::Relaxed);
+        let commit_started = Instant::now();
+        #[cfg(test)]
+        let committed = inject_fault(PublishFault::BeforeCommit).and_then(|()| {
+            self.store
+                .conn
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error)
+        });
+        #[cfg(not(test))]
+        let committed = self
+            .store
+            .conn
+            .execute_batch("COMMIT")
+            .map_err(sqlite_error);
+        SQLITE_COMMIT_NS.fetch_add(nanos(commit_started), Ordering::Relaxed);
+        if let Err(error) = committed {
+            let _ = self.store.conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn acknowledgements(events: Vec<PreparedEvent>) -> Vec<PublishAck> {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                PreparedEvent::Complete {
+                    capture_id,
+                    bytes_read,
+                    manifest,
+                    ..
+                } => Some(PublishAck {
+                    capture_id,
+                    bytes_read,
+                    captured: Ok(manifest),
+                }),
+                PreparedEvent::Refused {
+                    capture_id,
+                    bytes_read,
+                    refusal,
+                } => Some(PublishAck {
+                    capture_id,
+                    bytes_read,
+                    captured: Err(refusal),
+                }),
+                PreparedEvent::Chunks { capture_id, .. } => {
+                    let _ = capture_id;
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Append, sync, and then atomically expose chunk locations and captures.
+    pub(crate) fn publish_group(&mut self, events: Vec<PreparedEvent>) -> Result<Vec<PublishAck>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        PUBLISH_GROUPS.fetch_add(1, Ordering::Relaxed);
+        let missing = self.missing_chunks(&events)?;
+        let locations = self.append_chunks(missing)?;
+        self.commit_group(&locations, &events)?;
+        Ok(Self::acknowledgements(events))
     }
 }
 
@@ -623,6 +942,38 @@ mod tests {
         }
     }
 
+    fn publication(data: &[u8]) -> (Vec<PreparedEvent>, Manifest) {
+        let digest = crate::hash::hash_bytes(data);
+        let manifest = Manifest {
+            digest,
+            chunks: vec![
+                ChunkSpec {
+                    digest,
+                    size: data.len() as u64,
+                },
+                ChunkSpec {
+                    digest,
+                    size: data.len() as u64,
+                },
+            ],
+        };
+        (
+            vec![
+                PreparedEvent::Chunks {
+                    capture_id: 7,
+                    chunks: vec![(digest, data.to_vec()), (digest, data.to_vec())],
+                },
+                PreparedEvent::Complete {
+                    capture_id: 7,
+                    bytes_read: data.len() as u64,
+                    key: b"capture".to_vec(),
+                    manifest: manifest.clone(),
+                },
+            ],
+            manifest,
+        )
+    }
+
     #[test]
     fn batch_joins_success_and_refusal_before_returning() -> Result<()> {
         let chunks = vec![([0; 32], vec![0]), ([1; 32], vec![1])];
@@ -647,22 +998,20 @@ mod tests {
     }
 
     #[test]
-    fn batch_persists_chunks_before_capture_record() -> Result<()> {
+    fn group_deduplicates_chunks_and_preserves_manifest_order() -> Result<()> {
         let root = TestRoot::new()?;
         let store = Store::open(&root.0.join("state"))?;
         let first = b"first persisted chunk".to_vec();
         let second = b"second persisted chunk".to_vec();
         let first_digest = crate::hash::hash_bytes(&first);
         let second_digest = crate::hash::hash_bytes(&second);
-        let chunks = vec![
-            (first_digest, first.clone()),
-            (second_digest, second.clone()),
-        ];
-
-        store.put_chunks(&chunks)?;
         let manifest = Manifest {
             digest: crate::hash::hash_bytes(b"capture"),
             chunks: vec![
+                ChunkSpec {
+                    digest: first_digest,
+                    size: first.len() as u64,
+                },
                 ChunkSpec {
                     digest: first_digest,
                     size: first.len() as u64,
@@ -673,13 +1022,142 @@ mod tests {
                 },
             ],
         };
-        store.record_capture(b"capture", &manifest)?;
+        let mut publisher = store.publisher()?;
+        let acknowledgements = publisher.publish_group(vec![
+            PreparedEvent::Chunks {
+                capture_id: 1,
+                chunks: vec![(first_digest, first.clone()), (first_digest, first.clone())],
+            },
+            PreparedEvent::Chunks {
+                capture_id: 1,
+                chunks: vec![
+                    (first_digest, first.clone()),
+                    (second_digest, second.clone()),
+                ],
+            },
+            PreparedEvent::Complete {
+                capture_id: 1,
+                bytes_read: 0,
+                key: b"capture".to_vec(),
+                manifest,
+            },
+        ])?;
+        assert_eq!(acknowledgements.len(), 1);
+        drop(publisher);
         drop(store);
 
         let reopened = Store::open(&root.0.join("state"))?;
-        assert!(reopened.capture(b"capture")?.is_some());
+        let captured = reopened
+            .capture(b"capture")?
+            .ok_or(BulkloadRefusal::SealedObjectMissing)?;
+        assert_eq!(captured.chunks.len(), 3);
+        assert_eq!(
+            captured.chunks.first().map(|chunk| chunk.digest),
+            Some(first_digest)
+        );
+        assert_eq!(
+            captured.chunks.get(1).map(|chunk| chunk.digest),
+            Some(first_digest)
+        );
+        assert_eq!(
+            captured.chunks.get(2).map(|chunk| chunk.digest),
+            Some(second_digest)
+        );
         assert_eq!(reopened.chunk(&first_digest)?, Some(first));
         assert_eq!(reopened.chunk(&second_digest)?, Some(second));
+        assert_eq!(
+            fs::metadata(reopened.root.join("chunks.pack"))?.len(),
+            (b"first persisted chunk".len() + b"second persisted chunk".len()) as u64
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn publisher_is_exclusive_and_reconciles_unindexed_tail() -> Result<()> {
+        let root = TestRoot::new()?;
+        let state = root.0.join("state");
+        let store = Store::open(&state)?;
+        let publisher = store.publisher()?;
+        let contender = Store::open(&state)?;
+        assert!(contender.publisher().is_err());
+        drop(publisher);
+        drop(contender);
+        drop(store);
+
+        let mut pack = OpenOptions::new()
+            .append(true)
+            .open(state.join("chunks.pack"))?;
+        pack.write_all(b"unindexed tail")?;
+        pack.sync_all()?;
+        drop(pack);
+        let reopened = Store::open(&state)?;
+        let reconciled = reopened.publisher()?;
+        assert_eq!(fs::metadata(state.join("chunks.pack"))?.len(), 0);
+        drop(reconciled);
+        Ok(())
+    }
+
+    #[test]
+    fn publisher_refuses_indexed_ranges_beyond_pack() -> Result<()> {
+        let root = TestRoot::new()?;
+        let state = root.0.join("state");
+        let store = Store::open(&state)?;
+        let (events, _) = publication(b"indexed content");
+        let mut publisher = store.publisher()?;
+        publisher.publish_group(events)?;
+        drop(publisher);
+        drop(store);
+        OpenOptions::new()
+            .write(true)
+            .open(state.join("chunks.pack"))?
+            .set_len(0)?;
+        let reopened = Store::open(&state)?;
+        assert!(matches!(
+            reopened.publisher(),
+            Err(BulkloadRefusal::DigestMismatch)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_publication_hides_manifest_and_retries_cleanly() -> Result<()> {
+        for fault in [
+            PublishFault::AfterAppend,
+            PublishFault::AfterSync,
+            PublishFault::AfterLocationInsert,
+            PublishFault::AfterManifestInsert,
+            PublishFault::BeforeCommit,
+        ] {
+            let root = TestRoot::new()?;
+            let state = root.0.join("state");
+            let store = Store::open(&state)?;
+            let (events, manifest) = publication(b"fault recovery content");
+            let mut publisher = store.publisher()?;
+            PUBLISH_FAULT.with(|active| active.set(fault));
+            assert!(matches!(
+                publisher.publish_group(events),
+                Err(BulkloadRefusal::Io(None))
+            ));
+            PUBLISH_FAULT.with(|active| active.set(PublishFault::None));
+            assert!(store.capture(b"capture")?.is_none());
+            drop(publisher);
+            drop(store);
+
+            let reopened = Store::open(&state)?;
+            let mut publisher = reopened.publisher()?;
+            assert_eq!(fs::metadata(state.join("chunks.pack"))?.len(), 0);
+            let (retry, _) = publication(b"fault recovery content");
+            let acknowledgements = publisher.publish_group(retry)?;
+            assert_eq!(acknowledgements.len(), 1);
+            drop(publisher);
+            assert_eq!(
+                reopened
+                    .capture(b"capture")?
+                    .ok_or(BulkloadRefusal::SealedObjectMissing)?
+                    .digest,
+                manifest.digest
+            );
+        }
         Ok(())
     }
 
