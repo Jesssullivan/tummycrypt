@@ -114,6 +114,15 @@ pub enum BulkloadRefusal {
     TransportAuthorityMismatch,
     /// The frame could not be encoded or decoded.
     FrameCodec,
+
+    // ---- handoff proof ------------------------------------------------------
+    /// A credential-class probe did not prove what it set out to prove.
+    ///
+    /// Raised by `handoff-verify` when the receipt's verdict is not a pass:
+    /// some probe failed, or a class produced no passing probe at all. The
+    /// receipt is still written -- this refusal carries the nonzero exit, not
+    /// the evidence.
+    ProbeFailed,
     /// An underlying I/O operation refused; carries the OS errno when known.
     Io(Option<i32>),
 }
@@ -159,6 +168,7 @@ impl BulkloadRefusal {
             Self::BudgetExceeded => "BUDGET_EXCEEDED",
             Self::TransportAuthorityMismatch => "TRANSPORT_AUTHORITY_MISMATCH",
             Self::FrameCodec => "FRAME_CODEC",
+            Self::ProbeFailed => "PROBE_FAILED",
             Self::Io(_) => "IO",
         }
     }
@@ -231,6 +241,7 @@ mod tests {
             BulkloadRefusal::BudgetExceeded,
             BulkloadRefusal::TransportAuthorityMismatch,
             BulkloadRefusal::FrameCodec,
+            BulkloadRefusal::ProbeFailed,
             BulkloadRefusal::Io(None),
         ];
 

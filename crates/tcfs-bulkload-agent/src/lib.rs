@@ -20,6 +20,7 @@
 pub mod estate;
 pub mod freshness;
 pub mod git_carry;
+pub mod handoff;
 pub mod hash;
 pub mod materialize;
 pub mod provider_sqlite;
