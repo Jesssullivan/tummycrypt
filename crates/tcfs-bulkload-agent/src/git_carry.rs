@@ -2,9 +2,11 @@
 //!
 //! Bundles preserve staged state separately from the worktree (including ignored
 //! files), minus the fixed rebuildable set in [`REBUILDABLE_DIRECTORIES`], which
-//! is recorded as custody instead of carried. Submodules must be captured
-//! separately; this is not Git administration reconstruction. Capture is
-//! optimistic, not an atomic filesystem snapshot.
+//! is recorded as custody instead of carried. Foreign repositories nested under
+//! the worktree and gitlink (submodule) index entries are likewise recorded as
+//! [`NestedRepository`] custody and never carried: each is its own estate item.
+//! This is not Git administration reconstruction. Capture is optimistic, not an
+//! atomic filesystem snapshot.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -269,7 +271,7 @@ pub fn reusable_capture_key_with_policy(repo: &Path, policy: CapturePolicy) -> R
     if !symbolic.status.success() && symbolic.status.code() != Some(1) {
         return Err(BulkloadRefusal::GitInventoryMalformed);
     }
-    let (_, index) = source_index(&repo)?;
+    let (_, index, gitlinks) = source_index(&repo)?;
     let exclude_path = text(git(&repo).args([
         "rev-parse",
         "--path-format=absolute",
@@ -319,6 +321,21 @@ pub fn reusable_capture_key_with_policy(repo: &Path, policy: CapturePolicy) -> R
         let nested = postcard::to_allocvec(&census.nested_worktrees)
             .map_err(|_| BulkloadRefusal::FrameCodec)?;
         hash.update(NESTED_WORKTREES_DOMAIN);
+        hash.update(
+            &u64::try_from(nested.len())
+                .map_err(|_| BulkloadRefusal::BudgetExceeded)?
+                .to_le_bytes(),
+        );
+        hash.update(&nested);
+    }
+    // A sidecar, hashed only when present: repos without a foreign nested
+    // repository or a gitlink keep their exact keys. The nested HEAD is part of
+    // it: a foreign object we do not carry moving is still drift to name.
+    let nested_repositories = nested_custody(&census.nested_repositories, &gitlinks);
+    if !nested_repositories.is_empty() {
+        let nested =
+            postcard::to_allocvec(&nested_repositories).map_err(|_| BulkloadRefusal::FrameCodec)?;
+        hash.update(NESTED_REPOSITORIES_DOMAIN);
         hash.update(
             &u64::try_from(nested.len())
                 .map_err(|_| BulkloadRefusal::BudgetExceeded)?
@@ -554,9 +571,11 @@ fn admin_controls(admin: &Path) -> Result<Vec<(String, Option<Vec<u8>>)>> {
 /// fidelity.
 ///
 /// # Errors
-/// Refuses unsupported/unmerged indexes, changing refs/index/worktree, and
-/// populated submodules (which require their own capture). On refusal the
-/// private capture is retained for diagnosis; source state is never changed.
+/// Refuses unsupported/unmerged indexes and changing refs/index/worktree. A
+/// gitlink (submodule) entry or a foreign nested repository is recorded as
+/// [`NestedRepository`] custody, never carried: it is its own capture. On
+/// refusal the private capture is retained for diagnosis; source state is
+/// never changed.
 pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
     Ok(export_repository_inner(repo, capture, None, CapturePolicy::default())?.bundle)
 }
@@ -564,7 +583,8 @@ pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
 /// Export one worktree under an explicit capture policy and prerequisite.
 ///
 /// The returned [`Export`] names every omitted rebuildable root and its
-/// measured size, which is the same custody the bundle's metadata ref carries.
+/// measured size, and every nested repository or gitlink whose content the
+/// capture does not carry: the same custody the bundle's metadata refs carry.
 ///
 /// # Errors
 /// Refuses everything [`export_repository`] refuses, plus invalid prerequisites.
@@ -612,7 +632,7 @@ fn export_repository_inner(
     let census = capture_census(&repo, &common, policy)?;
     let seats = &census.rows;
     let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
-    let (index_path, before_index) = source_index(&repo)?;
+    let (index_path, before_index, gitlinks) = source_index(&repo)?;
     let private = prepare_private(&repo, &capture)?;
     capture_refs(&repo, &private, &before_refs)?;
     set_ref(&private, "refs/carry-export/head", &head)?;
@@ -640,6 +660,7 @@ fn export_repository_inner(
     )?;
     let index = capture.join("index");
     fs::write(&index, &before_index)?;
+    strip_gitlinks(&private, &repo, &index, &gitlinks)?;
     let staged = text(snapshot_command(&private, &repo, &index).arg("write-tree"))?;
     set_ref(
         &private,
@@ -681,6 +702,14 @@ fn export_repository_inner(
                 .map_err(|_| BulkloadRefusal::FrameCodec)?,
         )?;
     }
+    // Typed custody for foreign repositories nested under this checkout and for
+    // gitlink index entries. Neither's content is carried: a nested repository
+    // (a vendored checkout, a tool cache, a build dependency, a populated
+    // submodule) must be captured as its own estate item, and a gitlink names a
+    // commit this bundle does not hold. Directory nests hold still or the
+    // census comparison above refuses; gitlinks hold still or the index does.
+    let nested_repositories = nested_custody(&census.nested_repositories, &gitlinks);
+    nested_repositories_metadata(&private, &nested_repositories)?;
     // Omission is recorded, never silent. Sizes are measured once, here, and
     // deliberately excluded from both the reusable key and the before/after
     // census comparison: they are custody evidence about bytes this capture
@@ -696,7 +725,11 @@ fn export_repository_inner(
     let bundle = capture.join("capture.bundle");
     shared::write_bundle(&private, &bundle, prerequisite)?;
     output(git(&private).args(["bundle", "verify"]).arg(&bundle))?;
-    Ok(Export { bundle, omitted })
+    Ok(Export {
+        bundle,
+        omitted,
+        nested_repositories,
+    })
 }
 
 /// Directory names whose contents a capture omits, at any depth below a root.
@@ -795,6 +828,8 @@ pub struct Export {
     pub bundle: PathBuf,
     /// Rebuildable roots omitted from the capture, with measured sizes.
     pub omitted: Vec<RebuildableOmission>,
+    /// Foreign nested repositories and gitlinks whose content is not carried.
+    pub nested_repositories: Vec<NestedRepository>,
 }
 
 /// One metadata census of a checkout: typed seats plus custody for what the
@@ -805,6 +840,10 @@ struct Census {
     /// Registered worktrees of the same repository nested below the root;
     /// their HEADs are part of the census, their bytes are their own item's.
     nested_worktrees: Vec<NestedWorktree>,
+    /// Foreign repositories nested below the root (directory nests only; the
+    /// index contributes gitlinks separately). Their HEADs are part of the
+    /// census, their bytes are their own item's.
+    nested_repositories: Vec<NestedRepository>,
     /// Omitted roots, relative to the census root. Sizes are not part of the
     /// census: a rebuildable root's contents are exactly what must not be able
     /// to invalidate a capture in flight.
@@ -926,32 +965,191 @@ pub struct NestedWorktree {
 /// This is the custody the enclosing capture records instead of their bytes.
 ///
 /// # Errors
-/// Refuses any other nested Git administration, exactly as capture does.
+/// Refuses malformed nested Git administration, exactly as capture does.
 pub fn nested_worktrees(repo: &Path) -> Result<Vec<NestedWorktree>> {
     let repo = fs::canonicalize(repo)?;
     let common = common_repository(&repo)?;
     Ok(repository_census(&repo, &common)?.nested_worktrees)
 }
 
+/// Metadata ref naming foreign repositories and gitlinks nested in a capture.
+const NESTED_REPOSITORIES_METADATA: &str = "nested-repositories-v1";
+/// Reusable-key domain for the nested-repository sidecar; only hashed when present.
+const NESTED_REPOSITORIES_DOMAIN: &[u8] = b"tcfs-git-nested-repositories-v1\0";
+
+/// How a nested repository was found.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum NestedRepositoryKind {
+    /// A directory under the worktree holding a `.git` of another repository.
+    Directory,
+    /// A mode `160000` index entry (a submodule), whether or not populated.
+    Gitlink,
+}
+
+/// What the nested `.git` is, for a [`NestedRepositoryKind::Directory`] nest.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum GitdirKind {
+    /// `.git` is a directory: an independent repository (a vendored checkout,
+    /// a tool's git cache, a fetched build dependency).
+    Directory,
+    /// `.git` is a `gitdir:` pointer file resolving to administration of a
+    /// different repository (its linked worktree, or a populated submodule).
+    PointerFile,
+    /// Not applicable: the nest is a gitlink, found in the index.
+    None,
+}
+
+/// A repository nested under the captured checkout that is NOT a registered
+/// worktree of the same repository, or a gitlink entry in its index.
+///
+/// Its content is never carried by the enclosing capture: nothing below a
+/// directory nest is walked, and a gitlink is removed from the staged tree
+/// the bundle writes. The nested repository must be its own estate item; this
+/// row is the enclosing capture's custody statement for it (R-N32).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct NestedRepository {
+    /// Nest root relative to the captured checkout, as raw OS bytes.
+    pub rel_path: Vec<u8>,
+    /// Whether the nest was found on disk or in the index.
+    pub kind: NestedRepositoryKind,
+    /// HEAD of the nested repository at census time (a directory nest), or the
+    /// commit the gitlink records. `None` for an unborn or missing HEAD.
+    pub head_oid: Option<String>,
+    /// What the on-disk `.git` is; [`GitdirKind::None`] for a gitlink.
+    pub gitdir_kind: GitdirKind,
+}
+
+/// Foreign repositories nested inside `repo`, and gitlinks in its index.
+///
+/// This is the custody the enclosing capture records instead of their content.
+///
+/// # Errors
+/// Refuses malformed nested Git administration, exactly as capture does.
+pub fn nested_repositories(repo: &Path) -> Result<Vec<NestedRepository>> {
+    let repo = fs::canonicalize(repo)?;
+    let common = common_repository(&repo)?;
+    let census = repository_census(&repo, &common)?;
+    let (_, _, gitlinks) = source_index(&repo)?;
+    Ok(nested_custody(&census.nested_repositories, &gitlinks))
+}
+
+// The staged tree must not name a gitlink to a commit the bundle does not
+// carry. Gitlinks leave the private index copy (never the source index) and
+// travel as custody; the submodule's content is its own estate item.
+fn strip_gitlinks(
+    private: &Path,
+    repo: &Path,
+    index: &Path,
+    gitlinks: &[NestedRepository],
+) -> Result<()> {
+    if gitlinks.is_empty() {
+        return Ok(());
+    }
+    let mut paths = Vec::new();
+    for gitlink in gitlinks {
+        paths.extend_from_slice(&gitlink.rel_path);
+        paths.push(0);
+    }
+    input(
+        snapshot_command(private, repo, index).args([
+            "update-index",
+            "--force-remove",
+            "-z",
+            "--stdin",
+        ]),
+        &paths,
+    )?;
+    Ok(())
+}
+
+// The in-bundle custody ref, written only when there is custody to record, so
+// a repository without nests keeps a byte-identical bundle.
+fn nested_repositories_metadata(private: &Path, nested: &[NestedRepository]) -> Result<()> {
+    if nested.is_empty() {
+        return Ok(());
+    }
+    metadata(
+        private,
+        NESTED_REPOSITORIES_METADATA,
+        &postcard::to_allocvec(nested).map_err(|_| BulkloadRefusal::FrameCodec)?,
+    )
+}
+
+// The sidecar both the key and the bundle carry: directory nests from the
+// census and gitlinks from the index, in one sorted list. A populated
+// submodule appears twice, once per kind, which is the truth of it.
+fn nested_custody(
+    directories: &[NestedRepository],
+    gitlinks: &[NestedRepository],
+) -> Vec<NestedRepository> {
+    let mut custody = Vec::with_capacity(directories.len() + gitlinks.len());
+    custody.extend_from_slice(directories);
+    custody.extend_from_slice(gitlinks);
+    custody.sort();
+    custody
+}
+
+// HEAD of a nested repository, read through its own `.git` with the hardened
+// invocation (no hooks, no fsmonitor, no config). An unborn HEAD is `None`;
+// a `.git` Git cannot read at all is malformed inventory.
+fn nested_head(directory: &Path) -> Result<Option<String>> {
+    let result = git(directory)
+        .args(["--git-dir=.git", "rev-parse", "--verify", "-q", "HEAD"])
+        .output()?;
+    if result.status.success() {
+        let head = String::from_utf8(result.stdout)
+            .map_err(|_| BulkloadRefusal::GitInventoryMalformed)?
+            .trim_end()
+            .to_owned();
+        if !oid(&head) {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
+        return Ok(Some(head));
+    }
+    if result.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(BulkloadRefusal::GitInventoryMalformed)
+}
+
+// One directory below the root whose `.git` classified as custody.
+enum NestedCustody {
+    Worktree(NestedWorktree),
+    Repository(NestedRepository),
+}
+
 // Reuse the transport's typed filesystem seats instead of treating Git's
 // executable-bit-only tree modes as complete filesystem metadata. .git is
-// administration owned by Git-native capture; nested repositories refuse.
+// administration owned by Git-native capture; on these attach and comparison
+// paths (no custody) any nested .git refuses: restored payload never has one.
 fn filesystem_rows(root: &Path) -> Result<Vec<crate::RowSchema>> {
     Ok(filesystem_census(root, None, CapturePolicy::including_rebuildable())?.rows)
 }
 
-// A checkout census: registered worktrees of `common` nested below `root` are
-// recorded as custody and not descended; every other nested .git still refuses.
-// Full fidelity: nothing rebuildable is omitted.
+// A checkout census: registered worktrees of `common` and foreign repositories
+// nested below `root` are recorded as custody and not descended; a malformed
+// nested .git still refuses. Full fidelity: nothing rebuildable is omitted.
 fn repository_census(root: &Path, common: &Path) -> Result<Census> {
     filesystem_census(root, Some(common), CapturePolicy::including_rebuildable())
 }
 
 // Classify a directory below the root that contains an entry named .git.
-// Only a regular gitdir-pointer file resolving to a worktree administration
-// directory of `common`, registered back to this checkout, is custody; a nested
-// independent repository, a foreign pointer or a symlink keeps the refusal.
-fn nested_worktree(root: &Path, directory: &Path, common: &Path) -> Result<Option<NestedWorktree>> {
+// A `.git` directory is a foreign nested repository. A regular gitdir-pointer
+// file resolving to a worktree administration directory of `common`,
+// registered back to this checkout, is a nested worktree of the same
+// repository; a pointer resolving to administration of a different repository
+// is a foreign nested repository. A symlink, an unreadable `.git`, an
+// unresolvable pointer, or a pointer into `common` that is not a registered
+// worktree keeps the refusal: that is malformed inventory, not custody.
+fn nested_administration(
+    root: &Path,
+    directory: &Path,
+    common: &Path,
+) -> Result<Option<NestedCustody>> {
     use std::io::Read;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
@@ -961,6 +1159,22 @@ fn nested_worktree(root: &Path, directory: &Path, common: &Path) -> Result<Optio
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    let rel_path = || -> Result<Vec<u8>> {
+        Ok(directory
+            .strip_prefix(root)
+            .map_err(|_| BulkloadRefusal::PathEscapesRoot)?
+            .as_os_str()
+            .as_bytes()
+            .to_vec())
+    };
+    if meta.is_dir() {
+        return Ok(Some(NestedCustody::Repository(NestedRepository {
+            rel_path: rel_path()?,
+            kind: NestedRepositoryKind::Directory,
+            head_oid: nested_head(directory)?,
+            gitdir_kind: GitdirKind::Directory,
+        })));
+    }
     if !meta.is_file() || meta.len() > GITDIR_POINTER_LIMIT {
         return Err(BulkloadRefusal::GitInventoryMalformed);
     }
@@ -982,9 +1196,25 @@ fn nested_worktree(root: &Path, directory: &Path, common: &Path) -> Result<Optio
     // Any unresolvable pointer is malformed inventory, never a transient IO fault.
     let admin = fs::canonicalize(directory.join(target))
         .map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
-    let worktrees = common.join("worktrees");
-    if !admin.is_dir() || admin.parent() != Some(worktrees.as_path()) {
+    if !admin.is_dir() {
         return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    let worktrees = common.join("worktrees");
+    if admin.parent() != Some(worktrees.as_path()) {
+        // Not our administration at all: a worktree of another repository, or
+        // a populated submodule (`<common>/modules/<name>`). Git must be able
+        // to read it and must not report it as this repository.
+        let seen =
+            text(git(directory).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]))?;
+        if fs::canonicalize(seen).ok().as_deref() == Some(common) {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
+        return Ok(Some(NestedCustody::Repository(NestedRepository {
+            rel_path: rel_path()?,
+            kind: NestedRepositoryKind::Directory,
+            head_oid: nested_head(directory)?,
+            gitdir_kind: GitdirKind::PointerFile,
+        })));
     }
     let worktree_name = admin
         .file_name()
@@ -1008,16 +1238,11 @@ fn nested_worktree(root: &Path, directory: &Path, common: &Path) -> Result<Optio
     if !oid(&head_oid) {
         return Err(BulkloadRefusal::GitInventoryMalformed);
     }
-    Ok(Some(NestedWorktree {
-        rel_path: directory
-            .strip_prefix(root)
-            .map_err(|_| BulkloadRefusal::PathEscapesRoot)?
-            .as_os_str()
-            .as_bytes()
-            .to_vec(),
+    Ok(Some(NestedCustody::Worktree(NestedWorktree {
+        rel_path: rel_path()?,
         worktree_name,
         head_oid,
-    }))
+    })))
 }
 
 fn filesystem_census(root: &Path, common: Option<&Path>, policy: CapturePolicy) -> Result<Census> {
@@ -1027,6 +1252,7 @@ fn filesystem_census(root: &Path, common: Option<&Path>, policy: CapturePolicy) 
     let mut pending = vec![root.to_path_buf()];
     let mut rows = Vec::new();
     let mut nested_worktrees = Vec::new();
+    let mut nested_repositories = Vec::new();
     let mut omitted = Vec::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory)? {
@@ -1053,15 +1279,23 @@ fn filesystem_census(root: &Path, common: Option<&Path>, policy: CapturePolicy) 
                 .strip_prefix(root)
                 .map_err(|_| BulkloadRefusal::PathEscapesRoot)?;
             if kind == FileKind::Directory {
-                // A registered nested worktree is custody, not seats: no row for
-                // its root, no descent, no contents. Its own item carries them.
-                if let Some(custody) = common
-                    .map(|common| nested_worktree(root, &path, common))
+                // A registered nested worktree or a foreign nested repository is
+                // custody, not seats: no row for its root, no descent, no
+                // contents. Its own item carries them.
+                match common
+                    .map(|common| nested_administration(root, &path, common))
                     .transpose()?
                     .flatten()
                 {
-                    nested_worktrees.push(custody);
-                    continue;
+                    Some(NestedCustody::Worktree(custody)) => {
+                        nested_worktrees.push(custody);
+                        continue;
+                    }
+                    Some(NestedCustody::Repository(custody)) => {
+                        nested_repositories.push(custody);
+                        continue;
+                    }
+                    None => {}
                 }
                 // A rebuildable root is custody, not seats: no row for the root
                 // itself, no descent, no contents. `cargo build` rebuilds it.
@@ -1094,10 +1328,12 @@ fn filesystem_census(root: &Path, common: Option<&Path>, policy: CapturePolicy) 
     }
     rows.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     nested_worktrees.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    nested_repositories.sort();
     omitted.sort();
     Ok(Census {
         rows,
         nested_worktrees,
+        nested_repositories,
         omitted,
     })
 }
@@ -1196,7 +1432,11 @@ fn safe_destination(root: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn source_index(repo: &Path) -> Result<(PathBuf, Vec<u8>)> {
+// The source index path, its exact bytes, and every gitlink it holds as
+// custody. A gitlink names a submodule commit this repository's objects do not
+// contain; it is recorded, removed from the staged tree the capture writes,
+// and never carried. The submodule's own content is its own estate item.
+fn source_index(repo: &Path) -> Result<(PathBuf, Vec<u8>, Vec<NestedRepository>)> {
     let index_path = PathBuf::from(text(git(repo).args([
         "rev-parse",
         "--path-format=absolute",
@@ -1216,13 +1456,42 @@ fn source_index(repo: &Path) -> Result<(PathBuf, Vec<u8>)> {
         return Err(BulkloadRefusal::GitInventoryMalformed);
     }
     let entries = output(git(repo).args(["ls-files", "--stage", "-z"]))?;
-    if entries
+    let mut gitlinks = Vec::new();
+    for entry in entries
         .split(|b| *b == 0)
-        .any(|entry| entry.starts_with(b"160000 "))
+        .filter(|entry| entry.starts_with(b"160000 "))
     {
-        return Err(BulkloadRefusal::GitInventoryMalformed);
+        let tab = entry
+            .iter()
+            .position(|b| *b == b'\t')
+            .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
+        let header = std::str::from_utf8(
+            entry
+                .get(..tab)
+                .ok_or(BulkloadRefusal::GitInventoryMalformed)?,
+        )
+        .map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
+        let mut fields = header.split_whitespace().skip(1);
+        let value = fields
+            .next()
+            .filter(|value| oid(value))
+            .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
+        if fields.next() != Some("0") || fields.next().is_some() {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
+        let rel_path = entry
+            .get(tab + 1..)
+            .filter(|path| !path.is_empty())
+            .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
+        gitlinks.push(NestedRepository {
+            rel_path: rel_path.to_vec(),
+            kind: NestedRepositoryKind::Gitlink,
+            head_oid: Some(value.to_owned()),
+            gitdir_kind: GitdirKind::None,
+        });
     }
-    Ok((index_path, before_index))
+    gitlinks.sort();
+    Ok((index_path, before_index, gitlinks))
 }
 
 fn prepare_private(repo: &Path, capture: &Path) -> Result<PathBuf> {
@@ -2910,60 +3179,301 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn nested_sidecar(private: &Path) -> Option<Vec<NestedRepository>> {
+        let value = git(private)
+            .args([
+                "show",
+                &format!("refs/carry-export/{NESTED_REPOSITORIES_METADATA}:value"),
+            ])
+            .output()
+            .unwrap();
+        value
+            .status
+            .success()
+            .then(|| postcard::from_bytes(&value.stdout).unwrap())
+    }
+
+    // The custody a restored repository holds for the nests its bundle did
+    // not carry: the imported metadata ref, decoded.
+    fn imported_nested_custody(repo: &Path) -> Option<Vec<NestedRepository>> {
+        let refs = text(git(repo).args(["for-each-ref", "--format=%(refname)", "refs/carry/v1/"]))
+            .unwrap();
+        let name = refs
+            .lines()
+            .find(|name| name.ends_with(&format!("/{NESTED_REPOSITORIES_METADATA}")))?;
+        Some(
+            postcard::from_bytes(
+                &output(git(repo).args(["show", &format!("{name}:value")])).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn directory_nest(rel_path: &[u8], head: Option<String>) -> NestedRepository {
+        NestedRepository {
+            rel_path: rel_path.to_vec(),
+            kind: NestedRepositoryKind::Directory,
+            head_oid: head,
+            gitdir_kind: GitdirKind::Directory,
+        }
+    }
+
+    fn head_of(repo: &Path) -> String {
+        text(git(repo).args(["rev-parse", "--verify", "HEAD"])).unwrap()
+    }
+
+    // R-N32, measured on neo: medical-massage-specialists-infra refused on
+    // .terraform-data/edge-security/modules/zone_custom_ruleset/.git, a
+    // Terraform module cache under an ignored directory. It is a foreign
+    // repository: custody, not malformed inventory.
     #[test]
-    fn nested_independent_repository_still_refuses() {
-        let root = std::env::temp_dir().join(format!(
-            "bulkload-nested-independent-{}",
-            std::process::id()
-        ));
+    fn foreign_repository_under_an_ignored_cache_is_typed_custody_not_refusal() {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-foreign-cache-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
-        let source = root.join("outer");
-        committed_repository(&source, b"outer");
-        committed_repository(&source.join("vendor/inner"), b"inner");
-        assert!(source.join("vendor/inner/.git").is_dir());
+        let source = root.join("infra");
+        committed_repository(&source, b"infra");
+        fs::write(source.join(".gitignore"), b".terraform-data/\n").unwrap();
+        output(git(&source).args(["add", ".gitignore"])).unwrap();
+        output(git(&source).args(["-c", "commit.gpgsign=false", "commit", "-m", "ignore"]))
+            .unwrap();
+        let rel = b".terraform-data/edge-security/modules/zone_custom_ruleset";
+        let module = source.join(std::str::from_utf8(rel).unwrap());
+        committed_repository(&module, b"module");
+        fs::write(
+            source.join(".terraform-data/edge-security/lock"),
+            b"carried",
+        )
+        .unwrap();
+        assert!(module.join(".git").is_dir());
+
         assert_eq!(
-            reusable_capture_key(&source),
-            Err(BulkloadRefusal::GitInventoryMalformed)
+            nested_repositories(&source).unwrap(),
+            vec![directory_nest(rel, Some(head_of(&module)))]
         );
-        assert_eq!(
-            export_repository(&source, &root.join("capture")),
-            Err(BulkloadRefusal::GitInventoryMalformed)
-        );
-        assert_eq!(
-            nested_worktrees(&source),
-            Err(BulkloadRefusal::GitInventoryMalformed)
-        );
+        assert!(nested_worktrees(&source).unwrap().is_empty());
+        let key = reusable_capture_key(&source).unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        // Nested payload is not this item's census; the nested HEAD is.
+        fs::write(module.join("tracked"), b"changed nested bytes").unwrap();
+        fs::write(module.join("untracked"), b"more nested bytes").unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        output(git(&module).args(["add", "."])).unwrap();
+        output(git(&module).args(["-c", "commit.gpgsign=false", "commit", "-m", "moved"])).unwrap();
+        assert_ne!(key, reusable_capture_key(&source).unwrap());
+        let key = reusable_capture_key(&source).unwrap();
+
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_policy(&source, &capture, None, CapturePolicy::default())
+                .unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        let expected = vec![directory_nest(rel, Some(head_of(&module)))];
+        assert_eq!(export.nested_repositories, expected);
+        let private = capture.join("repository.git");
+        assert_eq!(nested_sidecar(&private), Some(expected.clone()));
+        let paths = manifest_paths(&private);
+        assert!(paths.contains(&b".terraform-data".to_vec()));
+        assert!(paths.contains(&b".terraform-data/edge-security/lock".to_vec()));
+        assert!(paths.contains(&b".terraform-data/edge-security/modules".to_vec()));
+        assert!(!paths.iter().any(|path| path.starts_with(rel)));
+        assert!(!carried_paths(&private).contains("zone_custom_ruleset"));
+
+        let restored = root.join("restored");
+        restore_bundle(&export.bundle, &restored, "neo").unwrap();
+        assert_eq!(fs::read(restored.join("tracked")).unwrap(), b"infra");
+        assert!(restored
+            .join(".terraform-data/edge-security/modules")
+            .is_dir());
+        assert!(!restored
+            .join(".terraform-data/edge-security/modules/zone_custom_ruleset")
+            .exists());
+        assert_eq!(imported_nested_custody(&restored), Some(expected));
         fs::remove_dir_all(root).unwrap();
     }
 
+    // R-N32, measured on neo: asfirewire-legalab holds googletest checkouts
+    // under two CMake build trees and a SwiftPM checkout under DerivedData.
+    // Every one is recorded; nothing below any of them is walked.
     #[test]
-    fn pointer_to_a_worktree_of_a_different_repository_still_refuses() {
+    fn three_foreign_repositories_at_different_depths_are_all_recorded_and_none_descended() {
         let root =
-            std::env::temp_dir().join(format!("bulkload-nested-foreign-{}", std::process::id()));
+            std::env::temp_dir().join(format!("bulkload-foreign-depths-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
-        let source = root.join("outer");
-        let other = root.join("other");
-        committed_repository(&source, b"outer");
-        committed_repository(&other, b"other");
-        // A real registered worktree, but of `other`, placed inside `source`.
-        let foreign = source.join(".claude/worktrees/foreign");
-        fs::create_dir_all(source.join(".claude/worktrees")).unwrap();
-        output(
-            git(&other)
-                .args(["worktree", "add", "-b", "foreign"])
-                .arg(&foreign),
+        let source = root.join("legalab");
+        committed_repository(&source, b"legalab");
+        let nests: [&[u8]; 3] = [
+            b"build/DerivedData/SourcePackages/checkouts/eventsource",
+            b"build/tests_a15/_deps/googletest-src",
+            b"build/tests_build/_deps/googletest-src",
+        ];
+        for rel in &nests[1..] {
+            let nest = source.join(std::str::from_utf8(rel).unwrap());
+            committed_repository(&nest, b"gtest");
+            fs::write(nest.join("sentinel"), b"never a seat of the enclosing item").unwrap();
+        }
+        // An unborn HEAD (init, no commit) is custody with no oid, not a refusal.
+        let unborn = source.join(std::str::from_utf8(nests[0]).unwrap());
+        fs::create_dir_all(&unborn).unwrap();
+        output(git(&unborn).args(["init", "--template="])).unwrap();
+        fs::write(unborn.join("sentinel"), b"unborn").unwrap();
+        fs::write(source.join("build/tests_build/CMakeCache.txt"), b"carried").unwrap();
+
+        let custody = nested_repositories(&source).unwrap();
+        assert_eq!(
+            custody,
+            vec![
+                directory_nest(nests[0], None),
+                directory_nest(
+                    nests[1],
+                    Some(head_of(
+                        &source.join("build/tests_a15/_deps/googletest-src")
+                    ))
+                ),
+                directory_nest(
+                    nests[2],
+                    Some(head_of(
+                        &source.join("build/tests_build/_deps/googletest-src")
+                    ))
+                ),
+            ]
+        );
+        let common = common_repository(&source).unwrap();
+        let census = capture_census(&source, &common, CapturePolicy::default()).unwrap();
+        assert_eq!(census.nested_repositories, custody);
+        let rows: Vec<&[u8]> = census
+            .rows
+            .iter()
+            .map(|row| row.rel_path.as_slice())
+            .collect();
+        assert!(rows.contains(&b"build".as_slice()));
+        assert!(rows.contains(&b"build/tests_build/_deps".as_slice()));
+        assert!(rows.contains(&b"build/tests_build/CMakeCache.txt".as_slice()));
+        assert!(rows.contains(&b"build/DerivedData/SourcePackages/checkouts".as_slice()));
+        assert!(!rows
+            .iter()
+            .any(|row| nests.iter().any(|nest| row.starts_with(nest))));
+        assert!(!rows.iter().any(|row| row.ends_with(b"sentinel")));
+
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_policy(&source, &capture, None, CapturePolicy::default())
+                .unwrap();
+        assert_eq!(export.nested_repositories, custody);
+        let private = capture.join("repository.git");
+        assert_eq!(nested_sidecar(&private), Some(custody));
+        let carried = carried_paths(&private);
+        assert!(carried.contains("build/tests_build/CMakeCache.txt"));
+        assert!(!carried.contains("sentinel"));
+        assert!(!carried.contains("googletest-src"));
+        assert!(!carried.contains("eventsource"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // R-N32, measured on neo: crs310-8g-2s-in holds one 160000 gitlink. The
+    // index keeps it (source state is never changed); the staged tree the
+    // bundle writes does not, because the bundle does not carry that commit.
+    #[test]
+    fn a_gitlink_index_entry_is_custody_and_absent_from_the_staged_tree() {
+        let root = std::env::temp_dir().join(format!("bulkload-gitlink-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("crs310");
+        committed_repository(&source, b"firmware");
+        let commit = head_of(&source);
+        // An uninitialized submodule: a gitlink in the index, an empty directory
+        // on disk, exactly what `git clone` without --recurse-submodules leaves.
+        fs::create_dir_all(source.join("lib/vendor")).unwrap();
+        output(git(&source).args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{commit},lib/vendor"),
+        ]))
+        .unwrap();
+        let gitlink = NestedRepository {
+            rel_path: b"lib/vendor".to_vec(),
+            kind: NestedRepositoryKind::Gitlink,
+            head_oid: Some(commit),
+            gitdir_kind: GitdirKind::None,
+        };
+        let (_, before_index, gitlinks) = source_index(&source).unwrap();
+        assert_eq!(gitlinks, vec![gitlink.clone()]);
+        assert_eq!(nested_repositories(&source).unwrap(), vec![gitlink.clone()]);
+        let key = reusable_capture_key(&source).unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_policy(&source, &capture, None, CapturePolicy::default())
+                .unwrap();
+        assert_eq!(export.nested_repositories, vec![gitlink.clone()]);
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        // The source index is byte-identical: the gitlink left a private copy.
+        let (index_path, after_index, _) = source_index(&source).unwrap();
+        assert_eq!(before_index, after_index);
+        assert_eq!(fs::read(index_path).unwrap(), before_index);
+        let private = capture.join("repository.git");
+        let staged = String::from_utf8(
+            output(git(&private).args(["ls-tree", "-r", "refs/carry-export/staged"])).unwrap(),
         )
         .unwrap();
-        assert!(foreign.join(".git").is_file());
+        assert!(staged.contains("tracked"));
+        assert!(!staged.contains("160000"));
+        assert!(!staged.contains("lib/vendor"));
+        assert_eq!(nested_sidecar(&private), Some(vec![gitlink.clone()]));
+        // The empty submodule seat is an ordinary directory row; no contents.
+        let paths = manifest_paths(&private);
+        assert!(paths.contains(&b"lib/vendor".to_vec()));
+        assert!(!paths.iter().any(|path| path.starts_with(b"lib/vendor/")));
+
+        let restored = root.join("restored");
+        restore_bundle(&export.bundle, &restored, "neo").unwrap();
+        assert_eq!(fs::read(restored.join("tracked")).unwrap(), b"firmware");
+        assert!(restored.join("lib/vendor").is_dir());
+        assert!(fs::read_dir(restored.join("lib/vendor"))
+            .unwrap()
+            .next()
+            .is_none());
+        let index =
+            String::from_utf8(output(git(&restored).args(["ls-files", "--stage"])).unwrap())
+                .unwrap();
+        assert!(index.contains("tracked"));
+        assert!(!index.contains("160000"));
+        assert_eq!(imported_nested_custody(&restored), Some(vec![gitlink]));
+        // A same-HEAD index repair reads the gitlink-free staged tree.
+        fs::remove_file(restored.join(".git/index")).unwrap();
+        repair_missing_index(&export.bundle, &restored, "neo", &root.join("repair")).unwrap();
+        assert!(restored.join(".git/index").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // Custody is for repositories Git can read. A symlink named .git, an
+    // unresolvable pointer, and a directory named .git that is not a
+    // repository are malformed inventory, exactly as before R-N32.
+    #[test]
+    fn a_symlinked_dot_git_still_refuses() {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-symlinked-git-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("outer");
+        committed_repository(&source, b"outer");
+        let linked = source.join("linked");
+        fs::create_dir(&linked).unwrap();
+        std::os::unix::fs::symlink(source.join(".git"), linked.join(".git")).unwrap();
         assert_eq!(
             reusable_capture_key(&source),
             Err(BulkloadRefusal::GitInventoryMalformed)
         );
         assert_eq!(
-            export_repository(&source, &root.join("capture-foreign")),
+            export_repository(&source, &root.join("capture-symlink")),
             Err(BulkloadRefusal::GitInventoryMalformed)
         );
-        // A pointer file that is not a registered worktree of anything.
+        assert_eq!(
+            nested_repositories(&source),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        fs::remove_dir_all(&linked).unwrap();
+        // A pointer file that resolves to nothing.
         let stray = source.join("stray");
         fs::create_dir(&stray).unwrap();
         fs::write(
@@ -2979,14 +3489,215 @@ mod tests {
             Err(BulkloadRefusal::GitInventoryMalformed)
         );
         fs::remove_dir_all(&stray).unwrap();
-        // A symlink named .git is never custody.
-        let linked = source.join("linked");
-        fs::create_dir(&linked).unwrap();
-        std::os::unix::fs::symlink(source.join(".git"), linked.join(".git")).unwrap();
+        // A directory named .git that Git cannot read as a repository.
+        let hollow = source.join("hollow");
+        fs::create_dir_all(hollow.join(".git")).unwrap();
         assert_eq!(
             reusable_capture_key(&source),
             Err(BulkloadRefusal::GitInventoryMalformed)
         );
+        fs::remove_dir_all(&hollow).unwrap();
+        assert!(nested_repositories(&source).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // A repository with no foreign nest and no gitlink hashes and encodes
+    // exactly as it did before R-N32: the sidecar is only hashed and only
+    // written when non-empty, no RowSchema field or variant was added, and
+    // the estate Capture record gained no field.
+    #[test]
+    fn a_repository_without_nested_repositories_keeps_its_exact_capture_key() {
+        let root = std::env::temp_dir().join(format!("bulkload-no-nests-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        rebuildable_fixture(&source);
+        fs::create_dir_all(source.join("vendor/plain")).unwrap();
+        fs::write(source.join("vendor/plain/file"), b"no administration here").unwrap();
+        let (_, _, gitlinks) = source_index(&source).unwrap();
+        assert!(gitlinks.is_empty());
+        assert!(nested_repositories(&source).unwrap().is_empty());
+        let common = common_repository(&source).unwrap();
+        let census = capture_census(&source, &common, CapturePolicy::default()).unwrap();
+        assert!(census.nested_repositories.is_empty());
+        assert!(census.nested_worktrees.is_empty());
+        assert_eq!(census.rows, filesystem_rows(&source).unwrap());
+        assert_eq!(
+            reusable_capture_key(&source).unwrap(),
+            reusable_capture_key_with_policy(&source, CapturePolicy::including_rebuildable())
+                .unwrap()
+        );
+        let export = export_repository_with_policy(
+            &source,
+            &root.join("capture"),
+            None,
+            CapturePolicy::default(),
+        )
+        .unwrap();
+        assert!(export.nested_repositories.is_empty());
+        let private = root.join("capture/repository.git");
+        assert_eq!(nested_sidecar(&private), None);
+        assert!(!sidecar_present(&private));
+        assert!(carried_paths(&private).contains("vendor/plain/file"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // #595 custody is unchanged by R-N32: a registered worktree of the same
+    // repository is a NestedWorktree, never a NestedRepository. A registered
+    // worktree of a DIFFERENT repository placed inside the checkout, which
+    // #595 refused, is now a foreign nested repository found by pointer file.
+    #[test]
+    fn nested_worktree_of_the_same_repository_is_still_nested_worktree_custody_not_repository_custody(
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-same-vs-foreign-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("outer");
+        let other = root.join("other");
+        committed_repository(&source, b"outer");
+        committed_repository(&other, b"other");
+        fs::create_dir_all(source.join(".claude/worktrees")).unwrap();
+        let own = source.join(".claude/worktrees/agent-x");
+        output(
+            git(&source)
+                .args(["worktree", "add", "-b", "agent-x"])
+                .arg(&own),
+        )
+        .unwrap();
+        let foreign = source.join(".claude/worktrees/foreign");
+        output(
+            git(&other)
+                .args(["worktree", "add", "-b", "foreign"])
+                .arg(&foreign),
+        )
+        .unwrap();
+        assert!(own.join(".git").is_file());
+        assert!(foreign.join(".git").is_file());
+        fs::write(foreign.join("sentinel"), b"belongs to other").unwrap();
+
+        assert_eq!(
+            nested_worktrees(&source).unwrap(),
+            vec![NestedWorktree {
+                rel_path: b".claude/worktrees/agent-x".to_vec(),
+                worktree_name: "agent-x".to_owned(),
+                head_oid: head_of(&own),
+            }]
+        );
+        let expected = vec![NestedRepository {
+            rel_path: b".claude/worktrees/foreign".to_vec(),
+            kind: NestedRepositoryKind::Directory,
+            head_oid: Some(head_of(&foreign)),
+            gitdir_kind: GitdirKind::PointerFile,
+        }];
+        assert_eq!(nested_repositories(&source).unwrap(), expected);
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_policy(&source, &capture, None, CapturePolicy::default())
+                .unwrap();
+        assert_eq!(export.nested_repositories, expected);
+        let private = capture.join("repository.git");
+        assert_eq!(nested_sidecar(&private), Some(expected));
+        let worktrees: Vec<NestedWorktree> = postcard::from_bytes(
+            &output(git(&private).args([
+                "show",
+                &format!("refs/carry-export/{NESTED_WORKTREES_METADATA}:value"),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            worktrees
+                .iter()
+                .map(|worktree| worktree.worktree_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-x"]
+        );
+        let paths = manifest_paths(&private);
+        assert!(paths.contains(&b".claude/worktrees".to_vec()));
+        assert!(!paths
+            .iter()
+            .any(|path| path.starts_with(b".claude/worktrees/")));
+        assert!(!carried_paths(&private).contains("sentinel"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // R-N32, measured on neo: printstack's uv cache holds repositories under
+    // .tmp/uv-cache/git-v0/db/*/.git and checkouts/*/*/.git. No seat below a
+    // nest, on the census or in the filesystem-v1 manifest; the parents stay.
+    #[test]
+    fn filesystem_rows_never_list_seats_below_a_nested_repository() {
+        let root = std::env::temp_dir().join(format!("bulkload-uv-cache-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("printstack");
+        committed_repository(&source, b"printstack");
+        let db = source.join(".tmp/uv-cache/git-v0/db/0a1b2c");
+        let checkout = source.join(".tmp/uv-cache/git-v0/checkouts/0a1b2c/3d4e5f");
+        committed_repository(&db, b"db");
+        committed_repository(&checkout, b"checkout");
+        fs::create_dir_all(db.join("deep/er")).unwrap();
+        fs::write(db.join("deep/er/leaf"), b"below a nest").unwrap();
+        fs::write(checkout.join("pyproject.toml"), b"below a nest").unwrap();
+        fs::write(source.join(".tmp/uv-cache/CACHEDIR.TAG"), b"carried").unwrap();
+
+        let common = common_repository(&source).unwrap();
+        let census = capture_census(&source, &common, CapturePolicy::default()).unwrap();
+        assert_eq!(census.nested_repositories.len(), 2);
+        let capture = root.join("capture");
+        export_repository_with_policy(&source, &capture, None, CapturePolicy::default()).unwrap();
+        let manifest = manifest_paths(&capture.join("repository.git"));
+        let census_paths: Vec<Vec<u8>> = census.rows.into_iter().map(|row| row.rel_path).collect();
+        assert_eq!(census_paths, manifest);
+        for paths in [&census_paths, &manifest] {
+            assert!(paths.contains(&b".tmp/uv-cache/CACHEDIR.TAG".to_vec()));
+            assert!(paths.contains(&b".tmp/uv-cache/git-v0/db".to_vec()));
+            assert!(paths.contains(&b".tmp/uv-cache/git-v0/checkouts/0a1b2c".to_vec()));
+            assert!(!paths
+                .iter()
+                .any(|path| path.starts_with(b".tmp/uv-cache/git-v0/db/0a1b2c")
+                    || path.starts_with(b".tmp/uv-cache/git-v0/checkouts/0a1b2c/3d4e5f")));
+            assert!(!paths
+                .iter()
+                .any(|path| path.ends_with(b"leaf") || path.ends_with(b"pyproject.toml")));
+        }
+        // The attach-side census (no custody) still refuses a nested .git: a
+        // restored payload never contains one, so this is a divergence signal.
+        assert_eq!(
+            filesystem_rows(&source),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // Restore side: applying a bundle with nested-repository custody yields a
+    // worktree without the nest, and the imported metadata ref names it.
+    #[test]
+    fn restoring_nested_repository_custody_leaves_the_nest_absent_and_names_it() {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-restore-nest-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        committed_repository(&source, b"source");
+        let nest = source.join("vendor/inner");
+        committed_repository(&nest, b"inner");
+        fs::write(source.join("vendor/README"), b"carried").unwrap();
+        let expected = vec![directory_nest(b"vendor/inner", Some(head_of(&nest)))];
+        let bundle = export_repository(&source, &root.join("capture")).unwrap();
+
+        let restored = root.join("restored");
+        restore_bundle(&bundle, &restored, "neo").unwrap();
+        assert_eq!(fs::read(restored.join("tracked")).unwrap(), b"source");
+        assert_eq!(
+            fs::read(restored.join("vendor/README")).unwrap(),
+            b"carried"
+        );
+        assert!(restored.join("vendor").is_dir());
+        assert!(!restored.join("vendor/inner").exists());
+        assert_eq!(imported_nested_custody(&restored), Some(expected.clone()));
+
+        let linked = root.join("linked");
+        restore_linked(&bundle, &restored, &linked, "neo").unwrap();
+        assert_eq!(fs::read(linked.join("vendor/README")).unwrap(), b"carried");
+        assert!(!linked.join("vendor/inner").exists());
+        assert_eq!(imported_nested_custody(&restored), Some(expected));
         fs::remove_dir_all(root).unwrap();
     }
 
