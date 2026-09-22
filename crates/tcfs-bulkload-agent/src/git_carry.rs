@@ -271,8 +271,8 @@ pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
     } else {
         Vec::new()
     };
-    let rows =
-        postcard::to_allocvec(&filesystem_rows(&repo)?).map_err(|_| BulkloadRefusal::FrameCodec)?;
+    let census = repository_census(&repo, &common)?;
+    let rows = postcard::to_allocvec(&census.rows).map_err(|_| BulkloadRefusal::FrameCodec)?;
     let configuration = postcard::to_allocvec(&source_configuration(&repo)?)
         .map_err(|_| BulkloadRefusal::FrameCodec)?;
     let boundary = shallow::frontier(&repo)?;
@@ -297,6 +297,19 @@ pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
                 .to_le_bytes(),
         );
         hash.update(bytes);
+    }
+    // A sidecar, hashed only when present: repos without nested worktrees keep
+    // their existing keys, so retained captures are not re-done for a schema.
+    if !census.nested_worktrees.is_empty() {
+        let nested = postcard::to_allocvec(&census.nested_worktrees)
+            .map_err(|_| BulkloadRefusal::FrameCodec)?;
+        hash.update(NESTED_WORKTREES_DOMAIN);
+        hash.update(
+            &u64::try_from(nested.len())
+                .map_err(|_| BulkloadRefusal::BudgetExceeded)?
+                .to_le_bytes(),
+        );
+        hash.update(&nested);
     }
     for directory in [&repo, &common] {
         let identity = crate::freshness::StatIdentity::from_metadata(&fs::metadata(directory)?);
@@ -544,7 +557,9 @@ fn export_repository_inner(
     let before_refs = refs(&repo)?;
     let configuration = source_configuration(&repo)?;
     let boundary = shallow::frontier(&repo)?;
-    let seats = filesystem_rows(&repo)?;
+    let common = common_repository(&repo)?;
+    let census = repository_census(&repo, &common)?;
+    let seats = &census.rows;
     let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
     let (index_path, before_index) = source_index(&repo)?;
     let private = prepare_private(&repo, &capture)?;
@@ -580,13 +595,13 @@ fn export_repository_inner(
         "refs/carry-export/staged",
         &commit_tree(&private, &staged, "bulkload staged tree")?,
     )?;
-    let (tree, _) = raw_tree::capture(&private, &repo, &seats)?;
+    let (tree, _) = raw_tree::capture(&private, &repo, seats)?;
     if before_refs != refs(&repo)?
         || configuration != source_configuration(&repo)?
         || boundary != shallow::frontier(&repo)?
         || before_index != fs::read(index_path)?
         || head != text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?
-        || seats != filesystem_rows(&repo)?
+        || census != repository_census(&repo, &common)?
     {
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
@@ -602,23 +617,159 @@ fn export_repository_inner(
     metadata(
         &private,
         "filesystem-v1",
-        &postcard::to_allocvec(&seats).map_err(|_| BulkloadRefusal::FrameCodec)?,
+        &postcard::to_allocvec(seats).map_err(|_| BulkloadRefusal::FrameCodec)?,
     )?;
+    // Typed custody for registered worktrees nested inside this checkout. Their
+    // bytes are captured as their own estate items; this manifest names them so
+    // the receipt and the parity audit can account for the skipped subtrees.
+    if !census.nested_worktrees.is_empty() {
+        metadata(
+            &private,
+            NESTED_WORKTREES_METADATA,
+            &postcard::to_allocvec(&census.nested_worktrees)
+                .map_err(|_| BulkloadRefusal::FrameCodec)?,
+        )?;
+    }
     let bundle = capture.join("capture.bundle");
     shared::write_bundle(&private, &bundle, prerequisite)?;
     output(git(&private).args(["bundle", "verify"]).arg(&bundle))?;
     Ok(bundle)
 }
 
+/// Metadata ref naming registered worktrees nested inside a captured checkout.
+const NESTED_WORKTREES_METADATA: &str = "nested-worktrees-v1";
+/// Reusable-key domain for the nested-worktree sidecar; only hashed when present.
+const NESTED_WORKTREES_DOMAIN: &[u8] = b"tcfs-git-nested-worktrees-v1\0";
+/// Largest `.git` gitdir-pointer file this census will read.
+const GITDIR_POINTER_LIMIT: u64 = 64 * 1024;
+
+/// A registered linked worktree of the same repository nested inside the checkout.
+///
+/// Its subtree is not walked or carried by the enclosing capture: it is its own
+/// estate item. This row is the enclosing capture's custody statement for it.
+/// Claude Code's `<repo>/.claude/worktrees/<name>` convention is the common case.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NestedWorktree {
+    /// Worktree root relative to the captured checkout, as raw OS bytes.
+    pub rel_path: Vec<u8>,
+    /// Name under the common `worktrees/` administration directory.
+    pub worktree_name: String,
+    /// HEAD of the nested worktree at census time.
+    pub head_oid: String,
+}
+
+/// One metadata census of a checkout: typed seats plus nested-worktree custody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Census {
+    rows: Vec<crate::RowSchema>,
+    nested_worktrees: Vec<NestedWorktree>,
+}
+
+/// Registered worktrees of the same repository nested inside `repo`.
+///
+/// This is the custody the enclosing capture records instead of their bytes.
+///
+/// # Errors
+/// Refuses any other nested Git administration, exactly as capture does.
+pub fn nested_worktrees(repo: &Path) -> Result<Vec<NestedWorktree>> {
+    let repo = fs::canonicalize(repo)?;
+    let common = common_repository(&repo)?;
+    Ok(repository_census(&repo, &common)?.nested_worktrees)
+}
+
 // Reuse the transport's typed filesystem seats instead of treating Git's
 // executable-bit-only tree modes as complete filesystem metadata. .git is
 // administration owned by Git-native capture; nested repositories refuse.
 fn filesystem_rows(root: &Path) -> Result<Vec<crate::RowSchema>> {
+    Ok(filesystem_census(root, None)?.rows)
+}
+
+// A checkout census: registered worktrees of `common` nested below `root` are
+// recorded as custody and not descended; every other nested .git still refuses.
+fn repository_census(root: &Path, common: &Path) -> Result<Census> {
+    filesystem_census(root, Some(common))
+}
+
+// Classify a directory below the root that contains an entry named .git.
+// Only a regular gitdir-pointer file resolving to a worktree administration
+// directory of `common`, registered back to this checkout, is custody; a nested
+// independent repository, a foreign pointer or a symlink keeps the refusal.
+fn nested_worktree(root: &Path, directory: &Path, common: &Path) -> Result<Option<NestedWorktree>> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let pointer = directory.join(".git");
+    let meta = match fs::symlink_metadata(&pointer) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !meta.is_file() || meta.len() > GITDIR_POINTER_LIMIT {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    let mut contents = String::new();
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&pointer)?
+        .take(GITDIR_POINTER_LIMIT)
+        .read_to_string(&mut contents)
+        .map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
+    let target = contents
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir: "))
+        .map(str::trim_end)
+        .filter(|value| !value.is_empty())
+        .ok_or(BulkloadRefusal::GitInventoryMalformed)?;
+    // Any unresolvable pointer is malformed inventory, never a transient IO fault.
+    let admin = fs::canonicalize(directory.join(target))
+        .map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
+    let worktrees = common.join("worktrees");
+    if !admin.is_dir() || admin.parent() != Some(worktrees.as_path()) {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    let worktree_name = admin
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or(BulkloadRefusal::GitInventoryMalformed)?
+        .to_owned();
+    // Registration is the administration's back-pointer to this very checkout.
+    let registered = fs::read_to_string(admin.join("gitdir"))
+        .map_err(|_| BulkloadRefusal::GitInventoryMalformed)?;
+    if fs::canonicalize(registered.trim_end()).ok() != Some(fs::canonicalize(&pointer)?) {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    // Git itself must agree that this is a linked worktree of the same repository.
+    let seen =
+        text(git(directory).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]))?;
+    if fs::canonicalize(seen).ok().as_deref() != Some(common) {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    let head_oid = text(git(directory).args(["rev-parse", "--verify", "HEAD"]))?;
+    if !oid(&head_oid) {
+        return Err(BulkloadRefusal::GitInventoryMalformed);
+    }
+    Ok(Some(NestedWorktree {
+        rel_path: directory
+            .strip_prefix(root)
+            .map_err(|_| BulkloadRefusal::PathEscapesRoot)?
+            .as_os_str()
+            .as_bytes()
+            .to_vec(),
+        worktree_name,
+        head_oid,
+    }))
+}
+
+fn filesystem_census(root: &Path, common: Option<&Path>) -> Result<Census> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     use tcfs_bulkload_proto::FileKind;
     let mut pending = vec![root.to_path_buf()];
     let mut rows = Vec::new();
+    let mut nested_worktrees = Vec::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory)? {
             let entry = entry?;
@@ -641,6 +792,16 @@ fn filesystem_rows(root: &Path) -> Result<Vec<crate::RowSchema>> {
                 return Err(BulkloadRefusal::GitInventoryMalformed);
             };
             if kind == FileKind::Directory {
+                // A registered nested worktree is custody, not seats: no row for
+                // its root, no descent, no contents. Its own item carries them.
+                if let Some(custody) = common
+                    .map(|common| nested_worktree(root, &path, common))
+                    .transpose()?
+                    .flatten()
+                {
+                    nested_worktrees.push(custody);
+                    continue;
+                }
                 pending.push(path.clone());
             }
             let relative = path
@@ -666,7 +827,11 @@ fn filesystem_rows(root: &Path) -> Result<Vec<crate::RowSchema>> {
         }
     }
     rows.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    Ok(rows)
+    nested_worktrees.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(Census {
+        rows,
+        nested_worktrees,
+    })
 }
 
 fn restore_filesystem_rows(destination: &Path, revision: &str) -> Result<()> {
@@ -2371,6 +2536,189 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(target.join("empty"), fs::Permissions::from_mode(0o700)).unwrap();
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn committed_repository(repo: &Path, content: &[u8]) {
+        fs::create_dir_all(repo).unwrap();
+        output(git(repo).args(["init", "--template="])).unwrap();
+        output(git(repo).args(["config", "user.name", "Test"])).unwrap();
+        output(git(repo).args(["config", "user.email", "test@localhost"])).unwrap();
+        fs::write(repo.join("tracked"), content).unwrap();
+        output(git(repo).args(["add", "."])).unwrap();
+        output(git(repo).args(["-c", "commit.gpgsign=false", "commit", "-m", "base"])).unwrap();
+    }
+
+    // Regression for the lab capture refusal: `.claude/worktrees/<name>/.git`
+    // is a gitdir pointer for a registered linked worktree of the same
+    // repository (Claude Code's EnterWorktree convention). It is custody, not
+    // malformed inventory, and its bytes belong to its own estate item.
+    #[test]
+    fn registered_worktree_nested_inside_the_checkout_is_typed_custody() {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-nested-worktree-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("lab");
+        committed_repository(&source, b"lab");
+        let nested = source.join(".claude/worktrees/agent-x");
+        fs::create_dir_all(source.join(".claude/worktrees")).unwrap();
+        fs::write(source.join(".claude/settings.json"), b"{}").unwrap();
+        output(
+            git(&source)
+                .args(["worktree", "add", "-b", "agent-x"])
+                .arg(&nested),
+        )
+        .unwrap();
+        assert!(nested.join(".git").is_file());
+        fs::write(nested.join("agent-only"), b"belongs to the nested item").unwrap();
+        let nested_head = text(git(&nested).args(["rev-parse", "--verify", "HEAD"])).unwrap();
+
+        let custody = nested_worktrees(&source).unwrap();
+        assert_eq!(
+            custody,
+            vec![NestedWorktree {
+                rel_path: b".claude/worktrees/agent-x".to_vec(),
+                worktree_name: "agent-x".to_owned(),
+                head_oid: nested_head,
+            }]
+        );
+        let key = reusable_capture_key(&source).unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        // Nested payload is not this item's census; its own HEAD is.
+        fs::write(nested.join("agent-only"), b"changed nested bytes").unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        output(git(&nested).args(["add", "."])).unwrap();
+        output(git(&nested).args(["-c", "commit.gpgsign=false", "commit", "-m", "agent"])).unwrap();
+        assert_ne!(key, reusable_capture_key(&source).unwrap());
+        let key = reusable_capture_key(&source).unwrap();
+
+        let capture = root.join("capture");
+        let bundle = export_repository(&source, &capture).unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        let private = capture.join("repository.git");
+        let manifest: Vec<NestedWorktree> = postcard::from_bytes(
+            &output(git(&private).args([
+                "show",
+                &format!("refs/carry-export/{NESTED_WORKTREES_METADATA}:value"),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest,
+            vec![NestedWorktree {
+                rel_path: b".claude/worktrees/agent-x".to_vec(),
+                worktree_name: "agent-x".to_owned(),
+                head_oid: text(git(&nested).args(["rev-parse", "--verify", "HEAD"])).unwrap(),
+            }]
+        );
+        let seats: Vec<crate::RowSchema> = postcard::from_bytes(
+            &output(git(&private).args(["show", "refs/carry-export/filesystem-v1:value"])).unwrap(),
+        )
+        .unwrap();
+        let paths: Vec<&[u8]> = seats.iter().map(|row| row.rel_path.as_slice()).collect();
+        assert!(paths.contains(&b".claude".as_slice()));
+        assert!(paths.contains(&b".claude/settings.json".as_slice()));
+        assert!(paths.contains(&b".claude/worktrees".as_slice()));
+        assert!(!paths
+            .iter()
+            .any(|path| path.starts_with(b".claude/worktrees/agent-x")));
+        let carried = output(git(&private).args([
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "refs/carry-export/worktree",
+        ]))
+        .unwrap();
+        assert!(!String::from_utf8(carried).unwrap().contains("agent-x"));
+
+        // A restore of the enclosing item leaves the nested root absent for the
+        // nested item's own restore; nothing of the worktree was invented.
+        let restored = root.join("restored");
+        restore_bundle(&bundle, &restored, "neo").unwrap();
+        assert!(restored.join(".claude/worktrees").is_dir());
+        assert!(!restored.join(".claude/worktrees/agent-x").exists());
+        assert_eq!(fs::read(restored.join("tracked")).unwrap(), b"lab");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_independent_repository_still_refuses() {
+        let root = std::env::temp_dir().join(format!(
+            "bulkload-nested-independent-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("outer");
+        committed_repository(&source, b"outer");
+        committed_repository(&source.join("vendor/inner"), b"inner");
+        assert!(source.join("vendor/inner/.git").is_dir());
+        assert_eq!(
+            reusable_capture_key(&source),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        assert_eq!(
+            export_repository(&source, &root.join("capture")),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        assert_eq!(
+            nested_worktrees(&source),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pointer_to_a_worktree_of_a_different_repository_still_refuses() {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-nested-foreign-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("outer");
+        let other = root.join("other");
+        committed_repository(&source, b"outer");
+        committed_repository(&other, b"other");
+        // A real registered worktree, but of `other`, placed inside `source`.
+        let foreign = source.join(".claude/worktrees/foreign");
+        fs::create_dir_all(source.join(".claude/worktrees")).unwrap();
+        output(
+            git(&other)
+                .args(["worktree", "add", "-b", "foreign"])
+                .arg(&foreign),
+        )
+        .unwrap();
+        assert!(foreign.join(".git").is_file());
+        assert_eq!(
+            reusable_capture_key(&source),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        assert_eq!(
+            export_repository(&source, &root.join("capture-foreign")),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        // A pointer file that is not a registered worktree of anything.
+        let stray = source.join("stray");
+        fs::create_dir(&stray).unwrap();
+        fs::write(
+            stray.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                source.join(".git/worktrees/missing").display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            reusable_capture_key(&source),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
+        fs::remove_dir_all(&stray).unwrap();
+        // A symlink named .git is never custody.
+        let linked = source.join("linked");
+        fs::create_dir(&linked).unwrap();
+        std::os::unix::fs::symlink(source.join(".git"), linked.join(".git")).unwrap();
+        assert_eq!(
+            reusable_capture_key(&source),
+            Err(BulkloadRefusal::GitInventoryMalformed)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
