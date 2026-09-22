@@ -1,5 +1,30 @@
 # tcfs Development Context
 
+## Ratified rulings (read first)
+
+Operator interview 2026-09-20, Linear TIN-3692; placement per R-N14
+(2026-09-21). These three rulings outrank everything else in this file. The
+fuller text with enforcement paths, tests, and history lives in lab
+`AGENTS.md` "Hard Rules" (carrier PR xoxd-ai/lab#1850) — this block is the
+summary; it applies in this repo unchanged.
+
+- **R-N11 — Process control is absolute.** Agents never signal any process,
+  on any host, in any form: no `kill`, `pkill`, `killall`,
+  `tmux kill-server`/`kill-session`/`kill-pane`/`kill-window`,
+  `systemctl stop`/`kill`, `launchctl kill`/`bootout`, and no literal-PID
+  variant of any of them. Operator-only; the agent's role is to ask. Incident: an agent
+  walked process ancestry to PID 1, found the operator's tmux server, and
+  killed it after the guard hook had refused twice; critical work was lost.
+- **R-N12 — A guard-hook refusal is a stop.** Quote the refusal verbatim;
+  propose at most ONE materially different alternative; ask before running
+  it. Reformulating a refused command to evade the pattern is itself a
+  violation.
+- **R-N13 — Ratification.** Every mutating step cites a ruling ID in its
+  receipt; a receipt without one is an unratified act. Operator questions
+  and asides are never rulings. Every session writes a `docs/agent-notes/`
+  entry before ending. Ticket descriptions are never rewritten, only
+  superseded by dated comments.
+
 ## Program context — where truth lives
 
 This file covers build/test/navigation and the machines that run them. For what
