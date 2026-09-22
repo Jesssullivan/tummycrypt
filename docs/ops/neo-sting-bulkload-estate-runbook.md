@@ -75,6 +75,31 @@ exit therefore does not mean nothing landed: read the per-item lines and the
 this way with 10 `refs-imported`, 1 `workspace-restored`, and 2 `refused
 (IO (errno 2))` for the two items that had no capture record.
 
+### Drift under a capture pass
+
+`estate-capture` no longer refuses when the checkout moves under it in the
+two ways agent lanes and builds move it (R25): refs created, moved or deleted
+in the shared ref store, and worktree seats appearing, changing or vanishing
+between the census and their byte pass. Such an item prints
+`outcome=captured-with-drift reason=Some("drift=N")` followed by one
+`item=... drift=<Kind> "<name>"` line per drifted ref or seat, exits zero,
+and publishes its bundle. The rows are durable in the corpus `{bundle}.drift`
+sidecar (postcard, beside `{bundle}.base`) and in the bundle's
+`refs/carry-export/capture-drift-v1`; the `.capture` record and the
+`.outcome` file keep their existing layout. A drifted seat's bytes are not in
+that bundle (R-N28): re-run `estate-capture` after the lanes have settled and
+the item reports `capture-extended-from-drift`, reading only the drifted
+seats (`source_bytes_read` on the item line is the proof; a clean re-run
+reports `capture-reused-after-census` and `source_bytes_read=0`).
+`estate-apply` of a drifted bundle proceeds and repeats the drift lines in its
+receipt; a destination that already holds a seat the drift list names is
+reported as `HeldUncaptured` and is never overwritten (R-N29). Record every
+drift line in the receipt. `GIT_AUTHORITY_CHANGED` is still the outcome when
+HEAD, the index, configuration, the shallow frontier, nested-worktree custody
+or the omitted rebuildable set moved under the pass (R-N30): a lane committing
+inside the captured worktree, unlike a lane in a sibling worktree, must pause
+for the pass. `git-export` keeps the strict contract and never tolerates drift.
+
 Keep `estate-apply` separate from transfer. It accepts only a corpus whose
 native transfer receipt and digest verification are complete.
 
