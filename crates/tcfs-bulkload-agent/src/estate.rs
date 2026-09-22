@@ -49,6 +49,65 @@ pub struct Receipt {
     pub source: PathBuf,
     pub outcome: &'static str,
     pub reason: Option<String>,
+    /// One line per ref or seat that drifted under the capture this receipt
+    /// names, followed by any seat the apply destination already held that
+    /// the drift list says was never captured (R-N29). Empty is the ordinary
+    /// case. The durable statement is the `{bundle}.drift` sidecar.
+    pub drift: Vec<String>,
+    /// Bytes streamed from source file descriptors by this operation. A reuse
+    /// hit and an apply read no source bytes; an incremental pass reads
+    /// exactly the drifted seats (R25).
+    pub bytes_read: u64,
+}
+
+/// One item's completed operation and what it carried.
+struct Completion {
+    outcome: &'static str,
+    drift: Vec<String>,
+    held: Vec<String>,
+    bytes_read: u64,
+}
+
+impl Completion {
+    const fn clean(outcome: &'static str) -> Self {
+        Self {
+            outcome,
+            drift: Vec::new(),
+            held: Vec::new(),
+            bytes_read: 0,
+        }
+    }
+}
+
+// The authority digest of the key parts a capture was taken under. A later
+// pass with the same authority extends that capture: only the ref inventory
+// and the worktree census differ, and the census difference is exactly the
+// set of seats the incremental pass re-reads. Same sidecar shape as `Base`.
+#[derive(Serialize, Deserialize)]
+struct Parts {
+    authority: [u8; 32],
+}
+
+// A drifted capture deliberately omits the drifted seats' bytes, so its sidecar
+// is the record of what it does not hold. Absent means the pass raced nothing.
+fn retained_drift(corpus: &Path, bundle: &str) -> Result<git_carry::CaptureDrift> {
+    let path = corpus.join(format!("{bundle}.drift"));
+    if path.try_exists()? {
+        read(&path)
+    } else {
+        Ok(git_carry::CaptureDrift::default())
+    }
+}
+
+// Absent for captures retained from before this sidecar existed: such a
+// capture is still reused blob-for-blob, it just never reports as extended.
+fn retained_authority(corpus: &Path, bundle: &str) -> Result<Option<[u8; 32]>> {
+    let path = corpus.join(format!("{bundle}.parts"));
+    if path.try_exists()? {
+        Ok(Some(read::<Parts>(&path)?.authority))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Read the exact reviewed items without performing capture or apply.
@@ -294,36 +353,74 @@ fn prepare_base(item: &Item, group: &str, state: &Path, corpus: &Path) -> Result
     Ok(base)
 }
 
+/// What a retained capture record offers the next pass.
+enum Retained {
+    /// Same key, no drift: the retained bundle is the capture.
+    Hit,
+    /// A retained bundle of this checkout whose blobs this pass may reuse:
+    /// every seat at an unchanged `StatIdentity` costs zero source bytes (R25).
+    /// `extends` says the difference is confined to the ref inventory and
+    /// the worktree census, so this pass extends rather than starts over.
+    Extend { bundle: PathBuf, extends: bool },
+    /// Nothing retained.
+    None,
+}
+
+fn retained_capture(
+    record: &Path,
+    corpus: &Path,
+    key: [u8; 32],
+    authority: [u8; 32],
+) -> Result<Retained> {
+    if !record.try_exists()? {
+        return Ok(Retained::None);
+    }
+    let previous: Capture = read(record)?;
+    if !filename(&previous.bundle) {
+        return Err(BulkloadRefusal::PathEscapesRoot);
+    }
+    let bundle = corpus.join(&previous.bundle);
+    if !bundle.try_exists()?
+        || previous.identity
+            != crate::freshness::StatIdentity::from_metadata(&fs::symlink_metadata(&bundle)?)
+    {
+        return Ok(Retained::None);
+    }
+    let drift = retained_drift(corpus, &previous.bundle)?;
+    // A drifted bundle does not hold the drifted seats' bytes. It is never a
+    // reuse hit; it is the input the next pass extends (R-N28).
+    if previous.key == key && drift.is_empty() {
+        if git_carry::shared::requires_base(&bundle)? {
+            let bound: Base = read(&corpus.join(format!("{}.base", previous.bundle)))?;
+            if !retained_base(corpus, &bound)? {
+                return Err(BulkloadRefusal::ReceiptBindingInvalid);
+            }
+        }
+        return Ok(Retained::Hit);
+    }
+    let extends = retained_authority(corpus, &previous.bundle)? == Some(authority);
+    Ok(Retained::Extend { bundle, extends })
+}
+
 fn capture_item(
     item: &Item,
     state: &Path,
     corpus: &Path,
     base: Option<&Base>,
     policy: git_carry::CapturePolicy,
-) -> Result<&'static str> {
+) -> Result<Completion> {
     let identity = id(item)?;
     let record = corpus.join(format!("{identity}.capture"));
-    let key = git_carry::reusable_capture_key_with_policy(&item.source, policy)?;
-    if record.try_exists()? {
-        let previous: Capture = read(&record)?;
-        if !filename(&previous.bundle) {
-            return Err(BulkloadRefusal::PathEscapesRoot);
-        }
-        let bundle = corpus.join(&previous.bundle);
-        if previous.key == key
-            && bundle.try_exists()?
-            && previous.identity
-                == crate::freshness::StatIdentity::from_metadata(&fs::symlink_metadata(&bundle)?)
-        {
-            if git_carry::shared::requires_base(&bundle)? {
-                let bound: Base = read(&corpus.join(format!("{}.base", previous.bundle)))?;
-                if !retained_base(corpus, &bound)? {
-                    return Err(BulkloadRefusal::ReceiptBindingInvalid);
-                }
-            }
-            return Ok("capture-reused-after-census");
-        }
-    }
+    // The opaque key cannot say what moved. Keep its typed parts so the
+    // post-capture re-read can separate tolerable drift from Git authority.
+    let parts = git_carry::capture_key_parts_with_policy(&item.source, policy)?;
+    let key = parts.digest()?;
+    let authority = parts.authority()?;
+    let (retained, extends) = match retained_capture(&record, corpus, key, authority)? {
+        Retained::Hit => return Ok(Completion::clean("capture-reused-after-census")),
+        Retained::Extend { bundle, extends } => (Some(bundle), extends),
+        Retained::None => (None, false),
+    };
     let mut generation = 0u64;
     let attempt = loop {
         let candidate = state.join(format!(
@@ -339,16 +436,25 @@ fn capture_item(
     };
     // Failed private attempts are retained, never silently overwritten.
     let prerequisite = base.map(|base| base_path(corpus, base)).transpose()?;
-    let bundle = git_carry::export_repository_with_policy(
+    let export = git_carry::export_repository_with_drift(
         &item.source,
         &attempt,
-        prerequisite.as_deref(),
+        &git_carry::ExportOptions {
+            prerequisite: prerequisite.as_deref(),
+            policy,
+            reuse: retained.as_deref(),
+        },
+    )?;
+    // Not an opaque key comparison: the ref inventory and the worktree census
+    // moving is the drift this capture already reported. Anything else moving
+    // is Git authority changing under the capture and still refuses (R-N30).
+    if !parts.drift_only(&git_carry::capture_key_parts_with_policy(
+        &item.source,
         policy,
-    )?
-    .bundle;
-    if key != git_carry::reusable_capture_key_with_policy(&item.source, policy)? {
+    )?) {
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
+    let bundle = export.bundle;
     let digest = hash_file(&bundle)?;
     let name = format!(
         "{identity}-{}.bundle",
@@ -369,6 +475,16 @@ fn capture_item(
         // Publish dependency custody before the unchanged completion codec.
         write(&corpus.join(format!("{name}.base")), base)?;
     }
+    // Separate sidecars, exactly as the shared-base dependency is: the Capture
+    // postcard is positional and gains no field, so every retained record and
+    // every live restore journal still decodes.
+    if !export.drift.is_empty() {
+        write(&corpus.join(format!("{name}.drift")), &export.drift)?;
+    }
+    write(&corpus.join(format!("{name}.parts")), &Parts { authority })?;
+    // The pre-pass key is recorded, as it always was. When the pass drifted it
+    // no longer matches the source, so the next pass is an incremental one that
+    // re-reads exactly the drifted seats and reuses every other blob.
     write(
         &record,
         &Capture {
@@ -378,13 +494,25 @@ fn capture_item(
             identity: crate::freshness::StatIdentity::from_metadata(&metadata),
         },
     )?;
-    Ok("captured")
+    let outcome = if !export.drift.is_empty() {
+        "captured-with-drift"
+    } else if extends {
+        "capture-extended-from-drift"
+    } else {
+        "captured"
+    };
+    Ok(Completion {
+        outcome,
+        drift: export.drift.lines(),
+        held: Vec::new(),
+        bytes_read: export.bytes_read,
+    })
 }
 
 fn execute(
     plan: &Plan,
     jobs: usize,
-    operation: &(impl Fn(&Item) -> Result<&'static str> + Sync),
+    operation: &(impl Fn(&Item) -> Result<Completion> + Sync),
     receipt: &(impl Fn(&Receipt) -> Result<()> + Sync),
 ) -> Result<()> {
     if !(1..=2).contains(&jobs) {
@@ -397,11 +525,19 @@ fn execute(
     let refused = std::sync::atomic::AtomicBool::new(false);
     pool.install(|| {
         plan.items.par_iter().try_for_each(|item| {
-            let (outcome, reason) = match operation(item) {
-                Ok(outcome) => (outcome, None),
+            let (outcome, reason, drift, bytes_read) = match operation(item) {
+                Ok(done) => {
+                    // The count rides in the layout-safe reason; the rows ride
+                    // in the sidecar and the in-process receipt.
+                    let reason =
+                        (!done.drift.is_empty()).then(|| format!("drift={}", done.drift.len()));
+                    let mut lines = done.drift;
+                    lines.extend(done.held);
+                    (done.outcome, reason, lines, done.bytes_read)
+                }
                 Err(error) => {
                     refused.store(true, std::sync::atomic::Ordering::Relaxed);
-                    ("refused", Some(error.to_string()))
+                    ("refused", Some(error.to_string()), Vec::new(), 0)
                 }
             };
             receipt(&Receipt {
@@ -409,6 +545,8 @@ fn execute(
                 source: item.source.clone(),
                 outcome,
                 reason,
+                drift,
+                bytes_read,
             })
         })
     })?;
@@ -582,18 +720,45 @@ fn import_base(
     Ok(())
 }
 
+// R-N29: an apply proceeds when the destination already holds a seat the drift
+// list says was never captured, and names each such seat in its receipt. It
+// never writes over it: the captured tree does not contain that seat at all.
+fn held_uncaptured(workspace: &Path, drift: &git_carry::CaptureDrift) -> Vec<String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+    let mut held = Vec::new();
+    for row in drift.rows.iter().filter(|row| row.kind.is_seat()) {
+        let relative = Path::new(std::ffi::OsStr::from_bytes(&row.name));
+        if relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            continue;
+        }
+        if fs::symlink_metadata(workspace.join(relative)).is_ok() {
+            // Debug-escaped on purpose: receipts must not carry raw newlines.
+            #[allow(clippy::unnecessary_debug_formatting)]
+            held.push(format!("HeldUncaptured {relative:?}"));
+        }
+    }
+    held
+}
+
 fn apply_item(
     item: &Item,
     corpus: &Path,
     state: &Path,
     source: &str,
     imported: &ImportedBases,
-) -> Result<&'static str> {
+) -> Result<Completion> {
     let identity = id(item)?;
     let captured: Capture = read(&corpus.join(format!("{identity}.capture")))?;
     if !filename(&captured.bundle) {
         return Err(BulkloadRefusal::PathEscapesRoot);
     }
+    // The drift a capture recorded rides into every receipt that names its
+    // bundle, so an apply never silently presents an incomplete capture.
+    let drift = retained_drift(corpus, &captured.bundle)?;
     let journal = state.join(format!(
         "{identity}-{}-{}.done",
         blake3::hash(source.as_bytes()).to_hex(),
@@ -601,30 +766,41 @@ fn apply_item(
     ));
     if journal.try_exists()? {
         let done: String = read(&journal)?;
-        return match done.as_str() {
-            "workspace-restored" => Ok("previous-workspace-restoration-not-revalidated"),
-            "refs-imported" => Ok("previous-ref-custody-not-workspace-parity"),
-            _ => Err(BulkloadRefusal::ReceiptBindingInvalid),
+        let outcome = match done.as_str() {
+            "workspace-restored" => "previous-workspace-restoration-not-revalidated",
+            "refs-imported" => "previous-ref-custody-not-workspace-parity",
+            _ => return Err(BulkloadRefusal::ReceiptBindingInvalid),
         };
+        return Ok(Completion {
+            outcome,
+            drift: drift.lines(),
+            held: Vec::new(),
+            bytes_read: 0,
+        });
     }
     let bundle = corpus.join(&captured.bundle);
     if hash_file(&bundle)? != captured.digest {
         return Err(BulkloadRefusal::DigestMismatch);
     }
     import_base(item, &captured, corpus, source, imported)?;
-    let outcome = if let Some(workspace) = &item.workspace {
+    let (outcome, held) = if let Some(workspace) = &item.workspace {
         if item.repository == *workspace {
             git_carry::restore_bundle(&bundle, workspace, source)?;
         } else {
             git_carry::restore_linked(&bundle, &item.repository, workspace, source)?;
         }
-        "workspace-restored"
+        ("workspace-restored", held_uncaptured(workspace, &drift))
     } else {
         git_carry::import_bundle(&item.repository, &bundle, source)?;
-        "refs-imported"
+        ("refs-imported", Vec::new())
     };
     write(&journal, &outcome.to_owned())?;
-    Ok(outcome)
+    Ok(Completion {
+        outcome,
+        drift: drift.lines(),
+        held,
+        bytes_read: 0,
+    })
 }
 
 /// Apply explicit restores only; common Git administration is serialized.
