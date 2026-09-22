@@ -32,7 +32,7 @@ SUBCOMMANDS:
     pull HOST SOURCE DEST SOURCE_STATE DEST_STATE [REMOTE_EXECUTABLE [SSH_CONFIG]]
                 Native SSH pull; remote tcfs-bulkload-agent must be installed
     serve       Serve one framed request on stdin/stdout (for SSH)
-    git-export REPO NEW_CAPTURE_DIR
+    git-export REPO NEW_CAPTURE_DIR [--include-rebuildable]
                 Archive refs/stashes and staged/worktree trees in a bundle
     estate-add PLAN SOURCE_REPO DEST_REPO [ABSENT_WORKSPACE]
                 Append an explicit reviewed item; no automatic worktree proliferation
@@ -40,7 +40,7 @@ SUBCOMMANDS:
                 Print the exact selected sources, repositories and restore targets
     estate-add-batch PLAN SOURCE DEST WORKSPACE_OR_DASH [SOURCE DEST WORKSPACE_OR_DASH ...]
                 Append selected items in one linear plan update
-    estate-capture PLAN PRIVATE_STATE CORPUS JOBS
+    estate-capture PLAN PRIVATE_STATE CORPUS JOBS [--include-rebuildable]
                 Capture reviewed Git items with successful capture reuse (jobs 1 or 2)
     estate-apply PLAN CORPUS PRIVATE_STATE SOURCE JOBS
                 Import refs and restore only explicitly selected absent workspaces
@@ -77,6 +77,10 @@ BOUNDARIES:
     File manifests allow 131072 chunks and frames at most 8 MiB; oversized files refuse.
     Git-native divergent union is not supplied by copy/pull.
     compose commands write offline candidates, never install live databases.
+    Capture omits a fixed rebuildable set (target, node_modules, .venv, ...) at
+    any depth when Git tracks nothing beneath it, records each omitted root and
+    its size as custody, and carries every other untracked and ignored file.
+    --include-rebuildable carries the rebuildable set too, at full fidelity.
     handoff-verify probes; it never signals a child process (R-N11).
     Receipt evidence is exit statuses, counts and operator-known identifiers only.
 ";
@@ -144,6 +148,40 @@ fn main() -> ExitCode {
     }
 }
 
+// The only capture-policy word the agent accepts; anything else is a typo, and
+// a typo must not silently change what a 40-minute capture carries.
+fn capture_policy(
+    argument: Option<&std::ffi::OsString>,
+) -> Result<tcfs_bulkload_agent::git_carry::CapturePolicy> {
+    match argument.and_then(|value| value.to_str()) {
+        None => Ok(tcfs_bulkload_agent::git_carry::CapturePolicy::default()),
+        Some("--include-rebuildable") => {
+            Ok(tcfs_bulkload_agent::git_carry::CapturePolicy::including_rebuildable())
+        }
+        Some(_) => Err(BulkloadRefusal::FieldDomainViolation),
+    }
+}
+
+fn export_command(
+    repo: &Path,
+    capture: &Path,
+    policy: tcfs_bulkload_agent::git_carry::CapturePolicy,
+) -> Result<()> {
+    let export =
+        tcfs_bulkload_agent::git_carry::export_repository_with_policy(repo, capture, None, policy)?;
+    // Custody goes to stderr so stdout stays exactly the bundle path.
+    for omission in &export.omitted {
+        eprintln!(
+            "omitted-rebuildable path={} bytes={} entries={}",
+            String::from_utf8_lossy(&omission.rel_path),
+            omission.bytes,
+            omission.entries
+        );
+    }
+    println!("{}", export.bundle.display());
+    Ok(())
+}
+
 fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
     let path = |index: usize| {
         args.get(index)
@@ -169,10 +207,8 @@ fn native_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
             println!("{}", path(1)?.display());
             Ok(())
         }
-        "git-export" if args.len() == 2 => {
-            let bundle = tcfs_bulkload_agent::git_carry::export_repository(path(0)?, path(1)?)?;
-            println!("{}", bundle.display());
-            Ok(())
+        "git-export" if (2..=3).contains(&args.len()) => {
+            export_command(path(0)?, path(1)?, capture_policy(args.get(2))?)
         }
         "git-import" if args.len() == 3 => {
             let source = args
@@ -398,8 +434,15 @@ fn estate_command(command: &str, args: &[std::ffi::OsString]) -> Result<()> {
             }
             estate::add_batch(path(0)?, &items)
         }
-        "estate-capture" if args.len() == 4 => {
-            estate::capture(path(0)?, path(1)?, path(2)?, jobs()?, &receipt)
+        "estate-capture" if (4..=5).contains(&args.len()) => {
+            let policy = capture_policy(args.get(4))?;
+            let jobs = args
+                .get(3)
+                .and_then(|arg| arg.to_str())
+                .ok_or(BulkloadRefusal::FieldDomainViolation)?
+                .parse::<usize>()
+                .map_err(|_| BulkloadRefusal::FieldDomainViolation)?;
+            estate::capture_with_policy(path(0)?, path(1)?, path(2)?, jobs, policy, &receipt)
         }
         "estate-apply" if args.len() == 5 => {
             let source = args

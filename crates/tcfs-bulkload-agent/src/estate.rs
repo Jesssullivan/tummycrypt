@@ -299,10 +299,11 @@ fn capture_item(
     state: &Path,
     corpus: &Path,
     base: Option<&Base>,
+    policy: git_carry::CapturePolicy,
 ) -> Result<&'static str> {
     let identity = id(item)?;
     let record = corpus.join(format!("{identity}.capture"));
-    let key = git_carry::reusable_capture_key(&item.source)?;
+    let key = git_carry::reusable_capture_key_with_policy(&item.source, policy)?;
     if record.try_exists()? {
         let previous: Capture = read(&record)?;
         if !filename(&previous.bundle) {
@@ -337,16 +338,15 @@ fn capture_item(
             .ok_or(BulkloadRefusal::FieldDomainViolation)?;
     };
     // Failed private attempts are retained, never silently overwritten.
-    let bundle = if let Some(base) = base {
-        git_carry::export_repository_with_prerequisite(
-            &item.source,
-            &attempt,
-            &base_path(corpus, base)?,
-        )?
-    } else {
-        git_carry::export_repository(&item.source, &attempt)?
-    };
-    if key != git_carry::reusable_capture_key(&item.source)? {
+    let prerequisite = base.map(|base| base_path(corpus, base)).transpose()?;
+    let bundle = git_carry::export_repository_with_policy(
+        &item.source,
+        &attempt,
+        prerequisite.as_deref(),
+        policy,
+    )?
+    .bundle;
+    if key != git_carry::reusable_capture_key_with_policy(&item.source, policy)? {
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
     let digest = hash_file(&bundle)?;
@@ -497,6 +497,31 @@ pub fn capture(
     jobs: usize,
     receipt: &(impl Fn(&Receipt) -> Result<()> + Sync),
 ) -> Result<()> {
+    capture_with_policy(
+        plan,
+        state,
+        corpus,
+        jobs,
+        git_carry::CapturePolicy::default(),
+        receipt,
+    )
+}
+
+/// [`capture`] under an explicit capture policy.
+///
+/// A policy that carries the rebuildable set reproduces the pre-omission
+/// capture keys, so retained full-fidelity captures are still reused.
+///
+/// # Errors
+/// Refuses everything [`capture`] refuses.
+pub fn capture_with_policy(
+    plan: &Path,
+    state: &Path,
+    corpus: &Path,
+    jobs: usize,
+    policy: git_carry::CapturePolicy,
+    receipt: &(impl Fn(&Receipt) -> Result<()> + Sync),
+) -> Result<()> {
     private_directory(state)?;
     private_directory(corpus)?;
     let contents: Plan = read(plan)?;
@@ -507,7 +532,7 @@ pub fn capture(
         jobs,
         &|item| {
             let base = group_base(item, &groups, state, corpus)?;
-            capture_item(item, state, corpus, base.as_ref())
+            capture_item(item, state, corpus, base.as_ref(), policy)
         },
         &|row| emit(state, row, receipt),
     )

@@ -1,8 +1,10 @@
 //! Git-native archival union. Native refs, HEAD, index and checkout are never written.
 //!
 //! Bundles preserve staged state separately from the worktree (including ignored
-//! files). Submodules must be captured separately; this is not Git administration
-//! reconstruction. Capture is optimistic, not an atomic filesystem snapshot.
+//! files), minus the fixed rebuildable set in [`REBUILDABLE_DIRECTORIES`], which
+//! is recorded as custody instead of carried. Submodules must be captured
+//! separately; this is not Git administration reconstruction. Capture is
+//! optimistic, not an atomic filesystem snapshot.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -242,9 +244,22 @@ pub fn common_repository(repo: &Path) -> Result<PathBuf> {
 /// Callers must compare before/after keys and retain the successful bundle.
 /// It is not a filesystem journal, atomic snapshot, or a no-rewalk claim.
 ///
+/// Uses the default [`CapturePolicy`], which omits the fixed rebuildable set.
+///
 /// # Errors
 /// Refuses unsupported source indexes, filesystem seats or Git state.
 pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
+    reusable_capture_key_with_policy(repo, CapturePolicy::default())
+}
+
+/// [`reusable_capture_key`] under an explicit capture policy.
+///
+/// A policy that carries the rebuildable set produces exactly the key the
+/// pre-omission agent produced, so retained full-fidelity captures stay reusable.
+///
+/// # Errors
+/// Refuses unsupported source indexes, filesystem seats or Git state.
+pub fn reusable_capture_key_with_policy(repo: &Path, policy: CapturePolicy) -> Result<[u8; 32]> {
     use std::os::unix::ffi::OsStrExt;
     let repo = fs::canonicalize(repo)?;
     let common = common_repository(&repo)?;
@@ -271,7 +286,7 @@ pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
     } else {
         Vec::new()
     };
-    let census = repository_census(&repo, &common)?;
+    let census = capture_census(&repo, &common, policy)?;
     let rows = postcard::to_allocvec(&census.rows).map_err(|_| BulkloadRefusal::FrameCodec)?;
     let configuration = postcard::to_allocvec(&source_configuration(&repo)?)
         .map_err(|_| BulkloadRefusal::FrameCodec)?;
@@ -310,6 +325,21 @@ pub fn reusable_capture_key(repo: &Path) -> Result<[u8; 32]> {
                 .to_le_bytes(),
         );
         hash.update(&nested);
+    }
+    // A sidecar, hashed only when present, and only the omitted roots -- never
+    // their sizes. A repository with no omission keeps the key it already had,
+    // and a build writing inside an omitted root cannot move this key, which is
+    // the whole point: rebuildable churn must not refuse a 40-minute capture.
+    if !census.omitted.is_empty() {
+        let omitted =
+            postcard::to_allocvec(&census.omitted).map_err(|_| BulkloadRefusal::FrameCodec)?;
+        hash.update(REBUILDABLE_DOMAIN);
+        hash.update(
+            &u64::try_from(omitted.len())
+                .map_err(|_| BulkloadRefusal::BudgetExceeded)?
+                .to_le_bytes(),
+        );
+        hash.update(&omitted);
     }
     for directory in [&repo, &common] {
         let identity = crate::freshness::StatIdentity::from_metadata(&fs::metadata(directory)?);
@@ -519,12 +549,32 @@ fn admin_controls(admin: &Path) -> Result<Vec<(String, Option<Vec<u8>>)>> {
 
 /// Export one worktree and all repository refs into a new, private directory.
 ///
+/// Uses the default [`CapturePolicy`], which omits the fixed rebuildable set
+/// and records it as custody. Use [`export_repository_with_policy`] for full
+/// fidelity.
+///
 /// # Errors
 /// Refuses unsupported/unmerged indexes, changing refs/index/worktree, and
 /// populated submodules (which require their own capture). On refusal the
 /// private capture is retained for diagnosis; source state is never changed.
 pub fn export_repository(repo: &Path, capture: &Path) -> Result<PathBuf> {
-    export_repository_inner(repo, capture, None)
+    Ok(export_repository_inner(repo, capture, None, CapturePolicy::default())?.bundle)
+}
+
+/// Export one worktree under an explicit capture policy and prerequisite.
+///
+/// The returned [`Export`] names every omitted rebuildable root and its
+/// measured size, which is the same custody the bundle's metadata ref carries.
+///
+/// # Errors
+/// Refuses everything [`export_repository`] refuses, plus invalid prerequisites.
+pub fn export_repository_with_policy(
+    repo: &Path,
+    capture: &Path,
+    prerequisite: Option<&Path>,
+    policy: CapturePolicy,
+) -> Result<Export> {
+    export_repository_inner(repo, capture, prerequisite, policy)
 }
 
 /// Export workspace state without repacking a shared base's commit closure.
@@ -539,14 +589,15 @@ pub fn export_repository_with_prerequisite(
     capture: &Path,
     base: &Path,
 ) -> Result<PathBuf> {
-    export_repository_inner(repo, capture, Some(base))
+    Ok(export_repository_inner(repo, capture, Some(base), CapturePolicy::default())?.bundle)
 }
 
 fn export_repository_inner(
     repo: &Path,
     capture: &Path,
     prerequisite: Option<&Path>,
-) -> Result<PathBuf> {
+    policy: CapturePolicy,
+) -> Result<Export> {
     use std::os::unix::fs::DirBuilderExt;
     let repo = fs::canonicalize(repo)?;
     fs::DirBuilder::new().mode(0o700).create(capture)?;
@@ -558,7 +609,7 @@ fn export_repository_inner(
     let configuration = source_configuration(&repo)?;
     let boundary = shallow::frontier(&repo)?;
     let common = common_repository(&repo)?;
-    let census = repository_census(&repo, &common)?;
+    let census = capture_census(&repo, &common, policy)?;
     let seats = &census.rows;
     let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
     let (index_path, before_index) = source_index(&repo)?;
@@ -601,7 +652,7 @@ fn export_repository_inner(
         || boundary != shallow::frontier(&repo)?
         || before_index != fs::read(index_path)?
         || head != text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?
-        || census != repository_census(&repo, &common)?
+        || census != capture_census(&repo, &common, policy)?
     {
         return Err(BulkloadRefusal::GitAuthorityChanged);
     }
@@ -630,10 +681,222 @@ fn export_repository_inner(
                 .map_err(|_| BulkloadRefusal::FrameCodec)?,
         )?;
     }
+    // Omission is recorded, never silent. Sizes are measured once, here, and
+    // deliberately excluded from both the reusable key and the before/after
+    // census comparison: they are custody evidence about bytes this capture
+    // chose not to carry, not an assertion that those bytes held still.
+    let omitted = measure_omissions(&repo, &census.omitted)?;
+    if !omitted.is_empty() {
+        metadata(
+            &private,
+            REBUILDABLE_METADATA,
+            &postcard::to_allocvec(&omitted).map_err(|_| BulkloadRefusal::FrameCodec)?,
+        )?;
+    }
     let bundle = capture.join("capture.bundle");
     shared::write_bundle(&private, &bundle, prerequisite)?;
     output(git(&private).args(["bundle", "verify"]).arg(&bundle))?;
-    Ok(bundle)
+    Ok(Export { bundle, omitted })
+}
+
+/// Directory names whose contents a capture omits, at any depth below a root.
+///
+/// Every entry is a build or tool output directory whose contents a standard
+/// command regenerates from bytes the capture *does* carry, so omitting them
+/// loses no state that cannot be rebuilt offline from the same checkout:
+///
+/// - `target` -- `cargo build` / `mvn package` output.
+/// - `node_modules` -- `npm|pnpm|yarn install` output, pinned by the lockfile.
+/// - `.venv`, `venv` -- Python virtual environments, rebuilt from the lockfile.
+/// - `__pycache__` -- interpreter bytecode cache, rewritten on next import.
+/// - `.direnv` -- direnv's layout/Nix profile cache, rebuilt by `direnv reload`.
+/// - `.pytest_cache`, `.mypy_cache`, `.ruff_cache` -- tool caches, rebuilt on
+///   the next run of the tool that wrote them.
+/// - `.gradle` -- project-local Gradle build cache.
+/// - `.next`, `.turbo`, `.parcel-cache`, `.swc` -- JavaScript bundler output
+///   and build caches, rebuilt by the next build.
+/// - `.terraform` -- provider plugins and module cache, rebuilt by
+///   `terraform init`. Local *state* lives in `terraform.tfstate` beside it,
+///   which is an ordinary carried file.
+///
+/// Deliberately absent: `build` and `dist` (too many repositories track them),
+/// `.cargo/registry` (not a name, and a vendored registry may be the only
+/// offline copy), and the `bazel-*` convenience symlinks -- the walk records a
+/// symlink as one row and never descends it, so they already cost nothing and
+/// omitting them would discard real state for no saving.
+///
+/// A name matches only when the seat is a real directory (not a symlink to
+/// one) and Git tracks nothing beneath it; see [`CapturePolicy`].
+pub const REBUILDABLE_DIRECTORIES: &[&str] = &[
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".direnv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".gradle",
+    ".next",
+    ".turbo",
+    ".parcel-cache",
+    ".swc",
+    ".terraform",
+];
+
+/// Metadata ref naming the rebuildable roots a capture omitted.
+const REBUILDABLE_METADATA: &str = "rebuildable-omissions-v1";
+/// Reusable-key domain for the omission sidecar; only hashed when present.
+const REBUILDABLE_DOMAIN: &[u8] = b"tcfs-git-rebuildable-omissions-v1\0";
+
+/// What a capture carries beyond tracked content.
+///
+/// The default omits [`REBUILDABLE_DIRECTORIES`]; untracked and ignored files
+/// everywhere else are still carried, exactly as before. `include_rebuildable`
+/// restores full fidelity and reproduces the pre-omission capture key byte for
+/// byte.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CapturePolicy {
+    /// Carry the rebuildable set instead of recording it as custody.
+    pub include_rebuildable: bool,
+}
+
+impl CapturePolicy {
+    /// The full-fidelity policy: carry everything, omit nothing.
+    #[must_use]
+    pub const fn including_rebuildable() -> Self {
+        Self {
+            include_rebuildable: true,
+        }
+    }
+}
+
+/// One rebuildable root a capture omitted, with the size it did not carry.
+///
+/// Sizes are a single stat pass taken after the seats census. Entries that
+/// vanish during that pass are simply not counted: a build rewriting its own
+/// output is the expected condition, and custody evidence must not refuse.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RebuildableOmission {
+    /// Omitted root relative to the captured checkout, as raw OS bytes.
+    pub rel_path: Vec<u8>,
+    /// Apparent bytes of regular files below the root, at measurement time.
+    pub bytes: u64,
+    /// Seats below the root, at measurement time.
+    pub entries: u64,
+}
+
+/// A completed export: the bundle, and the custody for what it did not carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    /// The written and verified capture bundle.
+    pub bundle: PathBuf,
+    /// Rebuildable roots omitted from the capture, with measured sizes.
+    pub omitted: Vec<RebuildableOmission>,
+}
+
+/// One metadata census of a checkout: typed seats plus custody for what the
+/// capture does not carry (nested worktrees, omitted rebuildable roots).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Census {
+    rows: Vec<crate::RowSchema>,
+    /// Registered worktrees of the same repository nested below the root;
+    /// their HEADs are part of the census, their bytes are their own item's.
+    nested_worktrees: Vec<NestedWorktree>,
+    /// Omitted roots, relative to the census root. Sizes are not part of the
+    /// census: a rebuildable root's contents are exactly what must not be able
+    /// to invalidate a capture in flight.
+    omitted: Vec<Vec<u8>>,
+}
+
+/// Rebuildable roots a capture of `repo` would omit, with their measured sizes.
+///
+/// This is the custody the capture records instead of their bytes, available to
+/// receipt and parity-audit tooling without performing a capture.
+///
+/// # Errors
+/// Refuses any Git or filesystem state capture itself refuses.
+pub fn rebuildable_omissions(repo: &Path) -> Result<Vec<RebuildableOmission>> {
+    let repo = fs::canonicalize(repo)?;
+    let common = common_repository(&repo)?;
+    let census = capture_census(&repo, &common, CapturePolicy::default())?;
+    measure_omissions(&repo, &census.omitted)
+}
+
+// Apparent size and seat count below one omitted root. A vanished entry is
+// rebuildable churn, not a fault: skip it rather than refuse the capture.
+fn measure_omissions(root: &Path, omitted: &[Vec<u8>]) -> Result<Vec<RebuildableOmission>> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut measured = Vec::with_capacity(omitted.len());
+    for rel_path in omitted {
+        let start = safe_destination(root, Path::new(std::ffi::OsStr::from_bytes(rel_path)))?;
+        let (mut bytes, mut entries) = (0u64, 0u64);
+        let mut pending = vec![start];
+        while let Some(directory) = pending.pop() {
+            let listing = match fs::read_dir(&directory) {
+                Ok(listing) => listing,
+                Err(error) if vanished(&error) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in listing {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let path = entry.path();
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                entries = entries.saturating_add(1);
+                if meta.is_dir() {
+                    pending.push(path);
+                } else if meta.is_file() {
+                    bytes = bytes.saturating_add(meta.len());
+                }
+            }
+        }
+        measured.push(RebuildableOmission {
+            rel_path: rel_path.clone(),
+            bytes,
+            entries,
+        });
+    }
+    Ok(measured)
+}
+
+fn vanished(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    )
+}
+
+// A capture-side census: rebuildable roots below `root` become custody instead
+// of seats unless the policy asks for full fidelity. Attach and comparison
+// paths keep the strict full census; they verify payload that is already here.
+fn capture_census(root: &Path, common: &Path, policy: CapturePolicy) -> Result<Census> {
+    filesystem_census(root, Some(common), policy)
+}
+
+// A name on the fixed list is only rebuildable if Git tracks nothing beneath
+// it. A repository that really does track `target/...` keeps its bytes; the
+// omission claim stays provable per repository instead of merely asserted.
+fn rebuildable_root(root: &Path, relative: &Path, name: &std::ffi::OsStr) -> Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    if !REBUILDABLE_DIRECTORIES
+        .iter()
+        .any(|candidate| name.as_bytes() == candidate.as_bytes())
+    {
+        return Ok(false);
+    }
+    let mut pathspec = std::ffi::OsString::from(":(top,literal)");
+    pathspec.push(relative.as_os_str());
+    Ok(output(git(root).args(["ls-files", "-z", "--"]).arg(pathspec))?.is_empty())
 }
 
 /// Metadata ref naming registered worktrees nested inside a captured checkout.
@@ -658,13 +921,6 @@ pub struct NestedWorktree {
     pub head_oid: String,
 }
 
-/// One metadata census of a checkout: typed seats plus nested-worktree custody.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Census {
-    rows: Vec<crate::RowSchema>,
-    nested_worktrees: Vec<NestedWorktree>,
-}
-
 /// Registered worktrees of the same repository nested inside `repo`.
 ///
 /// This is the custody the enclosing capture records instead of their bytes.
@@ -681,13 +937,14 @@ pub fn nested_worktrees(repo: &Path) -> Result<Vec<NestedWorktree>> {
 // executable-bit-only tree modes as complete filesystem metadata. .git is
 // administration owned by Git-native capture; nested repositories refuse.
 fn filesystem_rows(root: &Path) -> Result<Vec<crate::RowSchema>> {
-    Ok(filesystem_census(root, None)?.rows)
+    Ok(filesystem_census(root, None, CapturePolicy::including_rebuildable())?.rows)
 }
 
 // A checkout census: registered worktrees of `common` nested below `root` are
 // recorded as custody and not descended; every other nested .git still refuses.
+// Full fidelity: nothing rebuildable is omitted.
 fn repository_census(root: &Path, common: &Path) -> Result<Census> {
-    filesystem_census(root, Some(common))
+    filesystem_census(root, Some(common), CapturePolicy::including_rebuildable())
 }
 
 // Classify a directory below the root that contains an entry named .git.
@@ -763,13 +1020,14 @@ fn nested_worktree(root: &Path, directory: &Path, common: &Path) -> Result<Optio
     }))
 }
 
-fn filesystem_census(root: &Path, common: Option<&Path>) -> Result<Census> {
+fn filesystem_census(root: &Path, common: Option<&Path>, policy: CapturePolicy) -> Result<Census> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     use tcfs_bulkload_proto::FileKind;
     let mut pending = vec![root.to_path_buf()];
     let mut rows = Vec::new();
     let mut nested_worktrees = Vec::new();
+    let mut omitted = Vec::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory)? {
             let entry = entry?;
@@ -791,6 +1049,9 @@ fn filesystem_census(root: &Path, common: Option<&Path>) -> Result<Census> {
             } else {
                 return Err(BulkloadRefusal::GitInventoryMalformed);
             };
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| BulkloadRefusal::PathEscapesRoot)?;
             if kind == FileKind::Directory {
                 // A registered nested worktree is custody, not seats: no row for
                 // its root, no descent, no contents. Its own item carries them.
@@ -802,11 +1063,16 @@ fn filesystem_census(root: &Path, common: Option<&Path>) -> Result<Census> {
                     nested_worktrees.push(custody);
                     continue;
                 }
+                // A rebuildable root is custody, not seats: no row for the root
+                // itself, no descent, no contents. `cargo build` rebuilds it.
+                if !policy.include_rebuildable
+                    && rebuildable_root(root, relative, &entry.file_name())?
+                {
+                    omitted.push(relative.as_os_str().as_bytes().to_vec());
+                    continue;
+                }
                 pending.push(path.clone());
             }
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| BulkloadRefusal::PathEscapesRoot)?;
             rows.push(crate::RowSchema {
                 rel_path: relative.as_os_str().as_bytes().to_vec(),
                 kind,
@@ -828,9 +1094,11 @@ fn filesystem_census(root: &Path, common: Option<&Path>) -> Result<Census> {
     }
     rows.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     nested_worktrees.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    omitted.sort();
     Ok(Census {
         rows,
         nested_worktrees,
+        omitted,
     })
 }
 
@@ -2719,6 +2987,295 @@ mod tests {
             reusable_capture_key(&source),
             Err(BulkloadRefusal::GitInventoryMalformed)
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn rebuildable_fixture(repo: &Path) {
+        fs::create_dir_all(repo).unwrap();
+        output(git(repo).args(["init", "--template="])).unwrap();
+        output(git(repo).args(["config", "user.name", "Test"])).unwrap();
+        output(git(repo).args(["config", "user.email", "test@localhost"])).unwrap();
+        fs::write(repo.join("tracked"), b"source of truth").unwrap();
+        fs::write(repo.join(".gitignore"), b"/target\n/node_modules\n").unwrap();
+        output(git(repo).args(["add", "."])).unwrap();
+        output(git(repo).args(["-c", "commit.gpgsign=false", "commit", "-m", "base"])).unwrap();
+        // An ignored file outside the rebuildable set is still carried: the
+        // ruling keeps untracked AND ignored carry, minus a fixed list.
+        fs::write(repo.join("ignored-but-carried"), b"operator state").unwrap();
+    }
+
+    fn rebuildable_repository(repo: &Path) {
+        rebuildable_fixture(repo);
+        fs::create_dir_all(repo.join("target/debug/incremental")).unwrap();
+        fs::write(
+            repo.join("target/debug/incremental/artifact"),
+            vec![7u8; 4096],
+        )
+        .unwrap();
+        fs::write(repo.join("target/.rustc_info.json"), b"{\"rustc\":0}").unwrap();
+        fs::create_dir_all(repo.join("crates/inner/node_modules/left-pad")).unwrap();
+        fs::write(
+            repo.join("crates/inner/node_modules/left-pad/index.js"),
+            vec![b'x'; 512],
+        )
+        .unwrap();
+        fs::write(repo.join("crates/inner/kept.rs"), b"carried").unwrap();
+    }
+
+    fn sidecar_present(private: &Path) -> bool {
+        git(private)
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/carry-export/{REBUILDABLE_METADATA}"),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn carried_paths(private: &Path) -> String {
+        String::from_utf8(
+            output(git(private).args([
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "refs/carry-export/worktree",
+            ]))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn manifest_paths(private: &Path) -> Vec<Vec<u8>> {
+        let seats: Vec<crate::RowSchema> = postcard::from_bytes(
+            &output(git(private).args(["show", "refs/carry-export/filesystem-v1:value"])).unwrap(),
+        )
+        .unwrap();
+        seats.into_iter().map(|row| row.rel_path).collect()
+    }
+
+    // The measured failure this change exists for: a capture of a repository
+    // holding target/ and node_modules/ carried 34 GB of rebuildable bytes and
+    // was then refused outright because cargo rewrote one of them mid-pass.
+    #[test]
+    fn rebuildable_roots_are_omitted_recorded_and_never_carried() {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-rebuildable-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        rebuildable_repository(&source);
+
+        // (b) Custody names each omitted root and its size, before any capture.
+        let custody = rebuildable_omissions(&source).unwrap();
+        assert_eq!(
+            custody
+                .iter()
+                .map(|row| row.rel_path.clone())
+                .collect::<Vec<_>>(),
+            vec![b"crates/inner/node_modules".to_vec(), b"target".to_vec()]
+        );
+        let sizes: Vec<(u64, u64)> = custody.iter().map(|row| (row.bytes, row.entries)).collect();
+        assert_eq!(sizes.first(), Some(&(512, 2)));
+        assert_eq!(sizes.get(1).map(|row| row.0), Some(4096 + 11));
+        assert!(sizes.get(1).is_some_and(|row| row.1 >= 4));
+
+        // Rebuildable churn no longer moves the key. This is exactly the write
+        // that refused tonight's capture with GIT_AUTHORITY_CHANGED.
+        let key = reusable_capture_key(&source).unwrap();
+        fs::write(
+            source.join("target/.rustc_info.json"),
+            b"{\"rustc\":1,\"x\":2}",
+        )
+        .unwrap();
+        fs::write(source.join("target/debug/incremental/fresh"), b"mid-pass").unwrap();
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_policy(&source, &capture, None, CapturePolicy::default())
+                .unwrap();
+        let private = capture.join("repository.git");
+
+        // (a) None of those bytes are carried, and no seat names them.
+        let carried = carried_paths(&private);
+        assert!(carried.contains("tracked"));
+        assert!(carried.contains("ignored-but-carried"));
+        assert!(carried.contains("crates/inner/kept.rs"));
+        assert!(!carried.contains("target"));
+        assert!(!carried.contains("node_modules"));
+        let paths = manifest_paths(&private);
+        assert!(paths.contains(&b"crates/inner".to_vec()));
+        assert!(paths.contains(&b"ignored-but-carried".to_vec()));
+        assert!(!paths
+            .iter()
+            .any(|path| path.starts_with(b"target")
+                || path.windows(12).any(|w| w == b"node_modules")));
+
+        // (b) The bundle's own sidecar carries the same custody.
+        let manifest: Vec<RebuildableOmission> = postcard::from_bytes(
+            &output(git(&private).args([
+                "show",
+                &format!("refs/carry-export/{REBUILDABLE_METADATA}:value"),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest, export.omitted);
+        assert_eq!(
+            manifest
+                .iter()
+                .map(|row| row.rel_path.clone())
+                .collect::<Vec<_>>(),
+            vec![b"crates/inner/node_modules".to_vec(), b"target".to_vec()]
+        );
+        assert!(manifest.iter().all(|row| row.bytes > 0));
+
+        // A restore leaves the rebuildable roots absent; `cargo build` remakes them.
+        let restored = root.join("restored");
+        restore_bundle(&export.bundle, &restored, "neo").unwrap();
+        assert_eq!(
+            fs::read(restored.join("tracked")).unwrap(),
+            b"source of truth"
+        );
+        assert_eq!(
+            fs::read(restored.join("ignored-but-carried")).unwrap(),
+            b"operator state"
+        );
+        assert!(!restored.join("target").exists());
+        assert!(!restored.join("crates/inner/node_modules").exists());
+        assert!(restored.join("crates/inner/kept.rs").is_file());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // (d) --include-rebuildable opts back in to full fidelity: every omitted
+    // byte is carried again and no custody sidecar is written.
+    #[test]
+    fn include_rebuildable_carries_the_whole_rebuildable_set() {
+        let root = std::env::temp_dir().join(format!("bulkload-full-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        rebuildable_repository(&source);
+        let capture = root.join("capture");
+        let export = export_repository_with_policy(
+            &source,
+            &capture,
+            None,
+            CapturePolicy::including_rebuildable(),
+        )
+        .unwrap();
+        assert!(export.omitted.is_empty());
+        let private = capture.join("repository.git");
+        let carried = carried_paths(&private);
+        assert!(carried.contains("target/.rustc_info.json"));
+        assert!(carried.contains("target/debug/incremental/artifact"));
+        assert!(carried.contains("crates/inner/node_modules/left-pad/index.js"));
+        assert!(!sidecar_present(&private));
+        let restored = root.join("restored");
+        restore_bundle(&export.bundle, &restored, "neo").unwrap();
+        assert_eq!(
+            fs::read(restored.join("crates/inner/node_modules/left-pad/index.js")).unwrap(),
+            vec![b'x'; 512]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // A name on the list is only rebuildable when Git tracks nothing beneath
+    // it. A repository that really does track `target/...` keeps every byte.
+    #[test]
+    fn a_tracked_rebuildable_name_is_still_carried_in_full() {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-tracked-target-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        fs::create_dir_all(source.join("target")).unwrap();
+        fs::create_dir_all(source.join("venv")).unwrap();
+        rebuildable_fixture(&source);
+        fs::write(
+            source.join("target/committed.txt"),
+            b"this repo tracks target",
+        )
+        .unwrap();
+        fs::write(source.join("venv/scratch"), b"nothing tracked here").unwrap();
+        output(git(&source).args(["add", "-f", "target/committed.txt"])).unwrap();
+        output(git(&source).args(["-c", "commit.gpgsign=false", "commit", "-m", "target"]))
+            .unwrap();
+
+        let custody = rebuildable_omissions(&source).unwrap();
+        assert_eq!(
+            custody
+                .iter()
+                .map(|row| row.rel_path.clone())
+                .collect::<Vec<_>>(),
+            vec![b"venv".to_vec()]
+        );
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_policy(&source, &capture, None, CapturePolicy::default())
+                .unwrap();
+        let carried = carried_paths(&capture.join("repository.git"));
+        assert!(carried.contains("target/committed.txt"));
+        assert!(!carried.contains("venv/scratch"));
+        assert_eq!(export.omitted.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // (c) A repository with nothing rebuildable in it hashes and encodes
+    // exactly as it did before omission existed: the omission sidecar is only
+    // hashed and only written when it is non-empty, and the full-fidelity
+    // policy is byte-for-byte the pre-change code path. No RowSchema field or
+    // variant was added, so every retained capture key stays valid.
+    #[test]
+    fn a_repository_without_rebuildable_roots_keeps_its_exact_capture_key() {
+        let root = std::env::temp_dir().join(format!("bulkload-unchanged-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        rebuildable_fixture(&source);
+        fs::create_dir_all(source.join("src/build")).unwrap();
+        fs::write(
+            source.join("src/build/kept"),
+            b"build and dist are not on the list",
+        )
+        .unwrap();
+        fs::create_dir_all(source.join("dist")).unwrap();
+        fs::write(source.join("dist/kept"), b"carried").unwrap();
+        // A bazel convenience symlink is one row and is never descended.
+        std::os::unix::fs::symlink("/nonexistent/output-base/out", source.join("bazel-out"))
+            .unwrap();
+
+        assert!(rebuildable_omissions(&source).unwrap().is_empty());
+        assert_eq!(
+            reusable_capture_key(&source).unwrap(),
+            reusable_capture_key_with_policy(&source, CapturePolicy::including_rebuildable())
+                .unwrap()
+        );
+        let common = common_repository(&source).unwrap();
+        let census = capture_census(&source, &common, CapturePolicy::default()).unwrap();
+        assert!(census.nested_worktrees.is_empty());
+        assert!(census.omitted.is_empty());
+        assert_eq!(census.rows, filesystem_rows(&source).unwrap());
+        assert_eq!(
+            postcard::to_allocvec(&census.rows).unwrap(),
+            postcard::to_allocvec(&filesystem_rows(&source).unwrap()).unwrap()
+        );
+
+        let export = export_repository_with_policy(
+            &source,
+            &root.join("capture"),
+            None,
+            CapturePolicy::default(),
+        )
+        .unwrap();
+        assert!(export.omitted.is_empty());
+        let private = root.join("capture/repository.git");
+        // No sidecar ref exists at all, so the bundle is the one it always was.
+        assert!(!sidecar_present(&private));
+        let carried = carried_paths(&private);
+        assert!(carried.contains("src/build/kept"));
+        assert!(carried.contains("dist/kept"));
+        assert!(carried.contains("bazel-out"));
         fs::remove_dir_all(root).unwrap();
     }
 }
