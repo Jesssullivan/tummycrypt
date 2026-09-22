@@ -3895,4 +3895,482 @@ mod tests {
         assert!(carried.contains("bazel-out"));
         fs::remove_dir_all(root).unwrap();
     }
+
+    // ---- drift tolerance (R25, bulkload #34; rulings R-N28/R-N29/R-N30) ----
+
+    fn drift_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("bulkload-drift-{name}-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        committed_repository(&source, b"tracked bytes at census");
+        fs::write(source.join(".gitignore"), b"ignored\n").unwrap();
+        fs::write(source.join("ignored"), b"ignored but carried").unwrap();
+        fs::create_dir(source.join("dir")).unwrap();
+        fs::write(source.join("dir/untracked"), b"untracked payload").unwrap();
+        (root, source)
+    }
+
+    fn drift_ref_present(private: &Path) -> bool {
+        git(private)
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/carry-export/{CAPTURE_DRIFT_METADATA}"),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn drift_sidecar(private: &Path) -> CaptureDrift {
+        postcard::from_bytes(
+            &output(git(private).args([
+                "show",
+                &format!("refs/carry-export/{CAPTURE_DRIFT_METADATA}:value"),
+            ]))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn row(kind: DriftKind, name: &[u8]) -> DriftRow {
+        DriftRow {
+            kind,
+            name: name.to_vec(),
+        }
+    }
+
+    // Refusal #2 of 9/21-22: four sibling-worktree lanes created branches in
+    // the shared ref store while a capture was in flight.
+    #[test]
+    fn refs_created_elsewhere_during_capture_are_drift_not_refusal() {
+        let (root, source) = drift_fixture("refs-elsewhere");
+        let head = text(git(&source).args(["rev-parse", "--verify", "HEAD"])).unwrap();
+        let index_before = fs::read(source.join(".git/index")).unwrap();
+        let (lane, tip) = (source.clone(), head.clone());
+        mid_pass::arm(&source, move || {
+            for number in 0..4 {
+                output(git(&lane).args(["update-ref", &format!("refs/heads/lane-{number}"), &tip]))
+                    .unwrap();
+            }
+        });
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_drift(&source, &capture, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            export.drift.rows,
+            (0..4)
+                .map(|number| row(
+                    DriftKind::RefAdded,
+                    format!("refs/heads/lane-{number}").as_bytes()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            head,
+            text(git(&source).args(["rev-parse", "--verify", "HEAD"])).unwrap()
+        );
+        assert_eq!(index_before, fs::read(source.join(".git/index")).unwrap());
+        output(git(&source).args(["bundle", "verify"]).arg(&export.bundle)).unwrap();
+        let private = capture.join("repository.git");
+        assert_eq!(drift_sidecar(&private), export.drift);
+        // The lanes' refs were not in the captured inventory and are not in the bundle.
+        let heads = text(
+            git(&source)
+                .args(["bundle", "list-heads"])
+                .arg(&export.bundle),
+        )
+        .unwrap();
+        assert!(!heads.contains("lane-"));
+        // The pre-drift contract is untouched for callers that never asked for tolerance.
+        let again = source.clone();
+        mid_pass::arm(&source, move || {
+            output(git(&again).args(["update-ref", "refs/heads/lane-4", "HEAD"])).unwrap();
+        });
+        assert!(matches!(
+            export_repository(&source, &root.join("strict")),
+            Err(BulkloadRefusal::GitAuthorityChanged)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // Refusal #1 of 9/21-22: cargo rewrote .rustc_info.json between the census
+    // and that seat's byte pass.
+    #[test]
+    fn a_file_rewritten_during_the_raw_pass_is_drift_not_refusal() {
+        let (root, source) = drift_fixture("file-rewritten");
+        let rewritten = source.join("tracked");
+        mid_pass::arm(&source, move || {
+            fs::write(&rewritten, b"{\"rustc\":1,\"rewritten\":true}").unwrap();
+        });
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_drift(&source, &capture, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            export.drift.rows,
+            vec![row(DriftKind::SeatChanged, b"tracked")]
+        );
+        let private = capture.join("repository.git");
+        // Absent from the tree and from filesystem-v1: the drift list is the
+        // statement that the seat's bytes are not here (R-N28).
+        assert!(!carried_paths(&private)
+            .lines()
+            .any(|path| path == "tracked"));
+        assert!(!manifest_paths(&private).contains(&b"tracked".to_vec()));
+        assert!(carried_paths(&private).contains("dir/untracked"));
+        assert!(manifest_paths(&private).contains(&b"ignored".to_vec()));
+        output(git(&private).args(["fsck", "--strict", "--no-dangling"])).unwrap();
+        output(git(&source).args(["bundle", "verify"]).arg(&export.bundle)).unwrap();
+        assert_eq!(drift_sidecar(&private), export.drift);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // The operator-requested test: a build truncating a tracked file, an agent
+    // creating a new file, and a lane creating a branch, all under one pass.
+    #[test]
+    fn concurrent_ref_creation_and_file_mutation_during_one_capture_succeed_with_drift() {
+        let (root, source) = drift_fixture("concurrent");
+        let inside = source.clone();
+        mid_pass::arm(&source, move || {
+            fs::write(inside.join("tracked"), b"").unwrap();
+            fs::write(inside.join("dir/appeared"), b"created mid-pass").unwrap();
+            output(git(&inside).args(["update-ref", "refs/heads/concurrent-lane", "HEAD"]))
+                .unwrap();
+        });
+        let capture = root.join("capture");
+        let export =
+            export_repository_with_drift(&source, &capture, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            export.drift.rows,
+            vec![
+                row(DriftKind::RefAdded, b"refs/heads/concurrent-lane"),
+                row(DriftKind::SeatAdded, b"dir/appeared"),
+                row(DriftKind::SeatChanged, b"tracked"),
+            ]
+        );
+        assert_eq!(export.drift.len(), 3);
+        output(git(&source).args(["bundle", "verify"]).arg(&export.bundle)).unwrap();
+        // Capture never writes the source: it is exactly its post-mutation state.
+        assert_eq!(fs::read(source.join("tracked")).unwrap(), b"");
+        assert_eq!(
+            fs::read(source.join("dir/appeared")).unwrap(),
+            b"created mid-pass"
+        );
+        assert_eq!(
+            text(git(&source).args(["rev-parse", "--verify", "refs/heads/concurrent-lane"]))
+                .unwrap(),
+            text(git(&source).args(["rev-parse", "--verify", "HEAD"])).unwrap()
+        );
+        let private = capture.join("repository.git");
+        let carried = carried_paths(&private);
+        assert!(!carried.lines().any(|path| path == "tracked"));
+        assert!(!carried.contains("appeared"));
+        assert!(carried.contains("dir/untracked"));
+        // A restore of this bundle materializes exactly what was captured and
+        // nothing the pass could not vouch for.
+        let restored = root.join("restored");
+        restore_bundle(&export.bundle, &restored, "neo").unwrap();
+        assert!(!restored.join("tracked").exists());
+        assert!(!restored.join("dir/appeared").exists());
+        assert_eq!(
+            fs::read(restored.join("dir/untracked")).unwrap(),
+            b"untracked payload"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // (a)/(b) tolerance must not leak into HEAD (R-N30).
+    #[test]
+    fn head_moving_during_capture_still_refuses() {
+        let (root, source) = drift_fixture("head-moves");
+        let inside = source.clone();
+        mid_pass::arm(&source, move || {
+            output(git(&inside).args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "committed mid-pass",
+            ]))
+            .unwrap();
+        });
+        assert!(matches!(
+            export_repository_with_drift(&source, &root.join("capture"), &ExportOptions::default()),
+            Err(BulkloadRefusal::GitAuthorityChanged)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // Separability from the index (R-N30): HEAD pinned, index rewritten.
+    #[test]
+    fn index_rewritten_during_capture_still_refuses() {
+        let (root, source) = drift_fixture("index-rewritten");
+        let head = text(git(&source).args(["rev-parse", "--verify", "HEAD"])).unwrap();
+        let inside = source.clone();
+        mid_pass::arm(&source, move || {
+            fs::write(inside.join("staged-mid-pass"), b"added to the index").unwrap();
+            output(git(&inside).args(["add", "staged-mid-pass"])).unwrap();
+        });
+        assert!(matches!(
+            export_repository_with_drift(&source, &root.join("capture"), &ExportOptions::default()),
+            Err(BulkloadRefusal::GitAuthorityChanged)
+        ));
+        assert_eq!(
+            head,
+            text(git(&source).args(["rev-parse", "--verify", "HEAD"])).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // The Census split holds: a nested worktree's HEAD is custody, not seats,
+    // and it moving under the pass is still a refusal.
+    #[test]
+    fn nested_worktree_head_moving_during_capture_still_refuses() {
+        let (root, source) = drift_fixture("nested-head");
+        let nested = source.join(".claude/worktrees/agent-x");
+        fs::create_dir_all(source.join(".claude/worktrees")).unwrap();
+        output(
+            git(&source)
+                .args(["worktree", "add", "-b", "agent-x"])
+                .arg(&nested),
+        )
+        .unwrap();
+        assert_eq!(nested_worktrees(&source).unwrap().len(), 1);
+        let inside = nested;
+        mid_pass::arm(&source, move || {
+            output(git(&inside).args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "agent committed mid-pass",
+            ]))
+            .unwrap();
+        });
+        assert!(matches!(
+            export_repository_with_drift(&source, &root.join("capture"), &ExportOptions::default()),
+            Err(BulkloadRefusal::GitAuthorityChanged)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // The no-invalidation proof for every retained bundle: a clean capture has
+    // exactly the ref set it had before drift tolerance existed, no drift ref,
+    // and a deterministic shape across passes.
+    #[test]
+    fn a_clean_capture_emits_no_drift_ref_and_keeps_the_pre_change_bundle_shape() {
+        let (root, source) = drift_fixture("clean");
+        let symbolic = text(git(&source).args(["symbolic-ref", "HEAD"])).unwrap();
+        let mut expected: Vec<String> = [
+            "configuration-v1",
+            "exclude",
+            "filesystem-v1",
+            "head",
+            "head-symbolic",
+            "staged",
+            "worktree",
+        ]
+        .iter()
+        .map(|name| format!("refs/carry-export/{name}"))
+        .chain(std::iter::once(format!("refs/carry-export/{symbolic}")))
+        .collect();
+        expected.sort();
+        let key = reusable_capture_key(&source).unwrap();
+        let mut shapes = Vec::new();
+        for pass in ["first", "second"] {
+            let capture = root.join(pass);
+            let export =
+                export_repository_with_drift(&source, &capture, &ExportOptions::default()).unwrap();
+            assert!(export.drift.is_empty());
+            let private = capture.join("repository.git");
+            assert!(!drift_ref_present(&private));
+            let names: Vec<String> = refs(&private)
+                .unwrap()
+                .lines()
+                .map(|line| line.split_once(' ').unwrap().1.to_owned())
+                .collect();
+            assert_eq!(names, expected);
+            let heads: Vec<String> = text(
+                git(&source)
+                    .args(["bundle", "list-heads"])
+                    .arg(&export.bundle),
+            )
+            .unwrap()
+            .lines()
+            .map(|line| line.split_once(' ').unwrap().1.to_owned())
+            .collect();
+            assert_eq!(heads, expected);
+            shapes.push((
+                text(git(&private).args(["rev-parse", "refs/carry-export/worktree^{tree}"]))
+                    .unwrap(),
+                output(git(&private).args(["show", "refs/carry-export/filesystem-v1:value"]))
+                    .unwrap(),
+                export.bytes_read,
+            ));
+        }
+        assert_eq!(shapes.first(), shapes.last());
+        assert_eq!(key, reusable_capture_key(&source).unwrap());
+        assert_eq!(
+            key,
+            legacy::reusable_capture_key_with_policy(&source, CapturePolicy::default()).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // Unbounded drift is a rebuild, never a silently truncated drift list.
+    #[test]
+    fn drift_beyond_the_row_budget_refuses() {
+        let (root, source) = drift_fixture("budget");
+        fs::create_dir(source.join("burst")).unwrap();
+        let burst = source.join("burst");
+        mid_pass::arm(&source, move || {
+            for number in 0..=DRIFT_ROW_LIMIT {
+                fs::File::create(burst.join(format!("{number}"))).unwrap();
+            }
+        });
+        assert!(matches!(
+            export_repository_with_drift(&source, &root.join("capture"), &ExportOptions::default()),
+            Err(BulkloadRefusal::BudgetExceeded)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // ENOENT is drift; EACCES is a real IO fault that tolerance must not swallow.
+    #[test]
+    fn a_seat_deleted_mid_pass_is_drift_but_an_unreadable_seat_still_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, source) = drift_fixture("deleted-vs-unreadable");
+        fs::write(source.join("doomed"), b"gone before its byte pass").unwrap();
+        fs::write(source.join("locked"), b"unreadable before its byte pass").unwrap();
+        let doomed = source.join("doomed");
+        mid_pass::arm(&source, move || fs::remove_file(&doomed).unwrap());
+        let export =
+            export_repository_with_drift(&source, &root.join("deleted"), &ExportOptions::default())
+                .unwrap();
+        assert_eq!(
+            export.drift.rows,
+            vec![row(DriftKind::SeatRemoved, b"doomed")]
+        );
+        assert!(!manifest_paths(&root.join("deleted/repository.git")).contains(&b"doomed".to_vec()));
+        let locked = source.join("locked");
+        let lock = locked.clone();
+        mid_pass::arm(&source, move || {
+            fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        });
+        let refused = export_repository_with_drift(
+            &source,
+            &root.join("unreadable"),
+            &ExportOptions::default(),
+        );
+        assert!(matches!(refused, Err(BulkloadRefusal::Io(Some(_)))));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) mod legacy {
+    //! The reusable-key derivation exactly as it was before drift tolerance
+    //! (PR #597 head, 7b017af), kept verbatim so tests can prove that
+    //! `KeyParts::digest` is bit-identical and retained captures stay reused.
+    use super::{
+        capture_census, common_repository, git, output, refs, shallow, source_configuration,
+        source_index, text, CapturePolicy, NESTED_WORKTREES_DOMAIN, REBUILDABLE_DOMAIN,
+    };
+    use crate::{BulkloadRefusal, Result};
+    use std::fs;
+    use std::path::Path;
+
+    pub fn reusable_capture_key_with_policy(
+        repo: &Path,
+        policy: CapturePolicy,
+    ) -> Result<[u8; 32]> {
+        use std::os::unix::ffi::OsStrExt;
+        let repo = fs::canonicalize(repo)?;
+        let common = common_repository(&repo)?;
+        let inventory = refs(&repo)?;
+        let head = text(git(&repo).args(["rev-parse", "--verify", "HEAD"]))?;
+        let symbolic = git(&repo).args(["symbolic-ref", "-q", "HEAD"]).output()?;
+        if !symbolic.status.success() && symbolic.status.code() != Some(1) {
+            return Err(BulkloadRefusal::GitInventoryMalformed);
+        }
+        let (_, index) = source_index(&repo)?;
+        let exclude_path = text(git(&repo).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ]))?;
+        let exclude = match fs::read(exclude_path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let stash = if inventory.lines().any(|line| line.ends_with(" refs/stash")) {
+            output(git(&repo).args(["reflog", "show", "--format=%H", "refs/stash"]))?
+        } else {
+            Vec::new()
+        };
+        let census = capture_census(&repo, &common, policy)?;
+        let rows = postcard::to_allocvec(&census.rows).map_err(|_| BulkloadRefusal::FrameCodec)?;
+        let configuration = postcard::to_allocvec(&source_configuration(&repo)?)
+            .map_err(|_| BulkloadRefusal::FrameCodec)?;
+        let boundary = shallow::frontier(&repo)?;
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"tcfs-git-reusable-capture-v1\0");
+        for bytes in [
+            repo.as_os_str().as_bytes(),
+            common.as_os_str().as_bytes(),
+            inventory.as_bytes(),
+            head.as_bytes(),
+            &symbolic.stdout,
+            &index,
+            &exclude,
+            &stash,
+            &rows,
+            &configuration,
+            &boundary,
+        ] {
+            hash.update(
+                &u64::try_from(bytes.len())
+                    .map_err(|_| BulkloadRefusal::BudgetExceeded)?
+                    .to_le_bytes(),
+            );
+            hash.update(bytes);
+        }
+        if !census.nested_worktrees.is_empty() {
+            let nested = postcard::to_allocvec(&census.nested_worktrees)
+                .map_err(|_| BulkloadRefusal::FrameCodec)?;
+            hash.update(NESTED_WORKTREES_DOMAIN);
+            hash.update(
+                &u64::try_from(nested.len())
+                    .map_err(|_| BulkloadRefusal::BudgetExceeded)?
+                    .to_le_bytes(),
+            );
+            hash.update(&nested);
+        }
+        if !census.omitted.is_empty() {
+            let omitted =
+                postcard::to_allocvec(&census.omitted).map_err(|_| BulkloadRefusal::FrameCodec)?;
+            hash.update(REBUILDABLE_DOMAIN);
+            hash.update(
+                &u64::try_from(omitted.len())
+                    .map_err(|_| BulkloadRefusal::BudgetExceeded)?
+                    .to_le_bytes(),
+            );
+            hash.update(&omitted);
+        }
+        for directory in [&repo, &common] {
+            let identity = crate::freshness::StatIdentity::from_metadata(&fs::metadata(directory)?);
+            for value in [i128::from(identity.dev), i128::from(identity.ino)] {
+                hash.update(&value.to_le_bytes());
+            }
+        }
+        Ok(*hash.finalize().as_bytes())
+    }
 }

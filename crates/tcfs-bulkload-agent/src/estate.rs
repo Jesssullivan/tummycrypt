@@ -1036,4 +1036,204 @@ mod tests {
         assert!(!filename("../escape"));
         fs::remove_dir_all(&root).expect("remove owned fixture");
     }
+
+    // ---- drift tolerance (R25, bulkload #34; rulings R-N28/R-N29/R-N30) ----
+
+    fn drifting_plan(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("tcfs-estate-drift-{name}-{}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "--template="]);
+        fs::write(source.join("tracked"), b"tracked bytes at census").unwrap();
+        git(&source, &["add", "tracked"]);
+        git(&source, &["commit", "-m", "base"]);
+        fs::write(source.join("big"), vec![b'b'; 65_536]).unwrap();
+        fs::write(source.join("small"), b"small untracked").unwrap();
+        let target = root.join("destination");
+        let plan = root.join("plan");
+        add(&plan, &source, &target, Some(&target)).unwrap();
+        let corpus = root.join("corpus");
+        (root, source, target, plan, corpus)
+    }
+
+    type Row = (&'static str, Option<String>, Vec<String>, u64);
+
+    fn receipts(plan: &Path, state: &Path, corpus: &Path) -> Result<Vec<Row>> {
+        let rows = Mutex::new(Vec::new());
+        capture(plan, state, corpus, 2, &|row| {
+            rows.lock().unwrap().push((
+                row.outcome,
+                row.reason.clone(),
+                row.drift.clone(),
+                row.bytes_read,
+            ));
+            Ok(())
+        })?;
+        Ok(rows.into_inner().unwrap())
+    }
+
+    // Arm the export-level hook so one estate capture races a rewrite of a
+    // tracked seat, a new seat, and a branch created in the shared ref store.
+    fn arm_drift(source: &Path) {
+        let inside = fs::canonicalize(source).unwrap();
+        git_carry::mid_pass::arm(source, move || {
+            fs::write(inside.join("tracked"), b"rewritten mid-pass").unwrap();
+            fs::write(inside.join("appeared"), b"new seat").unwrap();
+            git(&inside, &["update-ref", "refs/heads/lane-a", "HEAD"]);
+        });
+    }
+
+    #[test]
+    fn a_drifted_capture_reports_captured_with_drift_and_exits_zero() {
+        let (root, source, _, plan, corpus) = drifting_plan("exit-zero");
+        let state = root.join("state");
+        arm_drift(&source);
+        let rows = receipts(&plan, &state, &corpus).expect("Ok(()): drift is not a refusal");
+        assert_eq!(rows.len(), 1);
+        let (outcome, reason, drift, bytes_read) = rows.first().unwrap();
+        assert_eq!(*outcome, "captured-with-drift");
+        assert_eq!(reason.as_deref(), Some("drift=3"));
+        assert_eq!(
+            *drift,
+            vec![
+                "RefAdded \"refs/heads/lane-a\"".to_owned(),
+                "SeatAdded \"appeared\"".to_owned(),
+                "SeatChanged \"tracked\"".to_owned(),
+            ]
+        );
+        // The skipped seat cost nothing; everything else was read once.
+        assert_eq!(*bytes_read, 65_536 + b"small untracked".len() as u64);
+        // The durable outcome still decodes as the existing tuple, unchanged.
+        let item = id(inspect(&plan).unwrap().first().unwrap()).unwrap();
+        let durable: (PathBuf, String, Option<String>) =
+            read(&state.join(format!("{item}.outcome"))).unwrap();
+        assert_eq!(durable.0, fs::canonicalize(&source).unwrap());
+        assert_eq!(durable.1, "captured-with-drift");
+        assert_eq!(durable.2.as_deref(), Some("drift=3"));
+        // The Capture record is the unchanged codec; the rows ride beside it.
+        let record: Capture = read(&corpus.join(format!("{item}.capture"))).unwrap();
+        let sidecar: git_carry::CaptureDrift =
+            read(&corpus.join(format!("{}.drift", record.bundle))).unwrap();
+        assert_eq!(sidecar.len(), 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_drifted_capture_still_applies_and_its_drift_rides_into_the_receipt() {
+        let (root, source, target, plan, corpus) = drifting_plan("applies");
+        let state = root.join("state");
+        arm_drift(&source);
+        let rows = receipts(&plan, &state, &corpus).unwrap();
+        assert_eq!(rows.first().unwrap().0, "captured-with-drift");
+        let item = id(inspect(&plan).unwrap().first().unwrap()).unwrap();
+        let record: Capture = read(&corpus.join(format!("{item}.capture"))).unwrap();
+        assert!(corpus.join(format!("{}.drift", record.bundle)).is_file());
+        let applied = root.join("applied");
+        let receipts = Mutex::new(Vec::new());
+        apply(&plan, &corpus, &applied, "neo", 2, &|row| {
+            receipts
+                .lock()
+                .unwrap()
+                .push((row.outcome, row.reason.clone(), row.drift.clone()));
+            Ok(())
+        })
+        .unwrap();
+        let (outcome, reason, drift) = receipts.lock().unwrap().first().unwrap().clone();
+        assert_eq!(outcome, "workspace-restored");
+        assert_eq!(reason.as_deref(), Some("drift=3"));
+        assert!(drift.contains(&"SeatChanged \"tracked\"".to_owned()));
+        // No seat named in drift was restored with uncaptured bytes: the
+        // drifted seats are absent, and the destination held nothing (R-N29).
+        assert!(!target.join("tracked").exists());
+        assert!(!target.join("appeared").exists());
+        assert!(!drift.iter().any(|line| line.starts_with("HeldUncaptured")));
+        assert_eq!(fs::read(target.join("small")).unwrap(), b"small untracked");
+        assert_eq!(fs::read(target.join("big")).unwrap(), vec![b'b'; 65_536]);
+        // R-N29: a destination that already holds an uncaptured seat is named,
+        // never clobbered. The apply journal is done; the check is the receipt's.
+        fs::write(target.join("appeared"), b"operator wrote this").unwrap();
+        let held = held_uncaptured(
+            &target,
+            &read(&corpus.join(format!("{}.drift", record.bundle))).unwrap(),
+        );
+        assert_eq!(held, vec!["HeldUncaptured \"appeared\"".to_owned()]);
+        assert_eq!(
+            fs::read(target.join("appeared")).unwrap(),
+            b"operator wrote this"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // The guard for the journals under /srv/fast-local/jess/state/git-carry/neo/
+    // and every retained bundle in the corpus: a record whose key was computed
+    // by the pre-change hashing, with no sidecars, is still a reuse hit.
+    #[test]
+    fn retained_captures_from_before_this_change_are_still_reused() {
+        let (root, source, _, plan, corpus) = drifting_plan("retained");
+        let state = root.join("state");
+        let rows = receipts(&plan, &state, &corpus).unwrap();
+        assert_eq!(rows.first().unwrap().0, "captured");
+        let item = id(inspect(&plan).unwrap().first().unwrap()).unwrap();
+        let record_path = corpus.join(format!("{item}.capture"));
+        let record: Capture = read(&record_path).unwrap();
+        let legacy = git_carry::legacy::reusable_capture_key_with_policy(
+            &source,
+            git_carry::CapturePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(record.key, legacy, "KeyParts::digest must be bit-identical");
+        // Rewrite the record exactly as the pre-change agent would have written
+        // it, and remove the sidecars it never wrote.
+        fs::remove_file(corpus.join(format!("{}.parts", record.bundle))).unwrap();
+        fs::remove_file(&record_path).unwrap();
+        write(
+            &record_path,
+            &Capture {
+                key: legacy,
+                bundle: record.bundle.clone(),
+                digest: record.digest,
+                identity: record.identity,
+            },
+        )
+        .unwrap();
+        let rows = receipts(&plan, &state, &corpus).unwrap();
+        assert_eq!(rows.first().unwrap().0, "capture-reused-after-census");
+        assert_eq!(rows.first().unwrap().3, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // The R25 proof: pass 2 reads exactly the drifted seats, not the corpus.
+    #[test]
+    fn a_second_pass_after_drift_rereads_only_the_drifted_seats() {
+        let (root, source, target, plan, corpus) = drifting_plan("rereads");
+        let state = root.join("state");
+        arm_drift(&source);
+        let first = receipts(&plan, &state, &corpus).unwrap();
+        assert_eq!(first.first().unwrap().0, "captured-with-drift");
+        let second = receipts(&plan, &state, &corpus).unwrap();
+        let (outcome, reason, drift, bytes_read) = second.first().unwrap();
+        assert_eq!(*outcome, "capture-extended-from-drift");
+        assert_eq!(*reason, None);
+        assert!(drift.is_empty());
+        assert_eq!(
+            *bytes_read,
+            (b"rewritten mid-pass".len() + b"new seat".len()) as u64,
+            "pass 2 must read the drifted seats and nothing else"
+        );
+        let third = receipts(&plan, &state, &corpus).unwrap();
+        assert_eq!(third.first().unwrap().0, "capture-reused-after-census");
+        assert_eq!(third.first().unwrap().3, 0);
+        // The extended bundle is complete: reused blobs and re-read seats alike.
+        apply(&plan, &corpus, &root.join("applied"), "neo", 2, &|_| Ok(())).unwrap();
+        assert_eq!(
+            fs::read(target.join("tracked")).unwrap(),
+            b"rewritten mid-pass"
+        );
+        assert_eq!(fs::read(target.join("appeared")).unwrap(), b"new seat");
+        assert_eq!(fs::read(target.join("big")).unwrap(), vec![b'b'; 65_536]);
+        assert_eq!(fs::read(target.join("small")).unwrap(), b"small untracked");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
