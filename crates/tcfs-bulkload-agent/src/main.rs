@@ -178,6 +178,15 @@ fn export_command(
             omission.entries
         );
     }
+    for nested in &export.nested_repositories {
+        eprintln!(
+            "nested-repository path={} kind={:?} gitdir={:?} head={}",
+            String::from_utf8_lossy(&nested.rel_path),
+            nested.kind,
+            nested.gitdir_kind,
+            nested.head_oid.as_deref().unwrap_or("unborn")
+        );
+    }
     println!("{}", export.bundle.display());
     Ok(())
 }
