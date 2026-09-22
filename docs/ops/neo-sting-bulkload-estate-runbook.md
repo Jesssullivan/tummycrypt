@@ -18,20 +18,62 @@ a fresh, Bulkload-owned Sting destination after revalidating the Neo capture.
 
 ## Required Native Pull
 
-Build the same committed agent revision on both hosts. On Sting, create an
-empty destination directory and distinct durable state directories for both
-ends, then invoke:
+Build the same committed agent revision on both hosts. The five positional
+paths split across the two hosts; getting the split wrong is how the first
+pilot attempt failed (TIN-3692 receipt 2026-09-21T11:56Z).
 
 ```text
-tcfs-bulkload-agent pull neo SOURCE DEST SOURCE_STATE DEST_STATE \
+tcfs-bulkload-agent pull SOURCE_HOST SOURCE DEST SOURCE_STATE DEST_STATE \
   /absolute/path/to/tcfs-bulkload-agent /absolute/path/to/ssh_config
 ```
 
-`SOURCE` is the verified Neo capture/corpus; `DEST` is a new Bulkload-owned
-Sting store. `SOURCE_STATE` and `DEST_STATE` must survive interruption so a
-rerun can prove reuse. The remote executable and SSH configuration are
-optional only when the defaults are the intended committed build and SSH
-configuration.
+| Argument | Lives on | Requirement |
+|---|---|---|
+| `SOURCE` | the source host (Neo) | the verified capture/corpus root |
+| `SOURCE_STATE` | **the source host (Neo)** | an existing directory, mode `0700`, owned by the invoking user |
+| `DEST` | the puller (Sting) | a new, empty, Bulkload-owned store |
+| `DEST_STATE` | the puller (Sting) | an existing directory, mode `0700`, owned by the invoking user |
+
+`SOURCE_STATE` is **not** a path on the puller. `receive()` in
+`crates/tcfs-bulkload-agent/src/transfer.rs` sends the `TransferOpen { root,
+state }` request frame to the remote `serve`, which opens its content store at
+that path on the source host. Both state stores refuse an existing directory
+with any group/other permission bit set (`Store::open` → `private_dir` in
+`transfer_store.rs`; surfaces as an `IO`/`PathEscapesRoot` refusal), so
+pre-create each one as `0700` on its own host before the first pull. Both
+must survive interruption so a rerun can prove reuse. The remote executable
+and SSH configuration are optional only when the defaults are the intended
+committed build and SSH configuration; the remote executable path must be
+absolute.
+
+The pilot command that worked, run on Sting at revision `c3be9d75` on both
+ends (TIN-3692, 2026-09-21T11:56Z; `completed=38 reused=0
+bytes_received=181,480,309 source_bytes_read=553,892,133 refusals=0` in
+13.6 s, warm re-run `completed=0 reused=38 bytes_received=0
+source_bytes_read=0`):
+
+```text
+~/.local/bin/tcfs-bulkload-agent-c3be9d7 pull neo \
+  /Users/jess/state/bulkload-run-20260921 \
+  /srv/fast-local/jess/bulkload/run-20260921 \
+  /Users/jess/state/bulkload-run-20260921-srcstate \
+  /srv/fast-local/jess/bulkload/state-20260921/dst \
+  /Users/jess/.local/bin/tcfs-bulkload-agent-c3be9d7
+```
+
+The two `/Users/jess/...` paths are Neo paths; the two `/srv/fast-local/...`
+paths are Sting paths.
+
+### Exit contract with partial refusals
+
+`pull` and `estate-apply` print every per-item outcome, then exit non-zero
+with `CONTRACT_SELF_INCONSISTENT` when **any** item was refused, even though
+the other items completed and their receipts are durable
+(`report_transfer` in `main.rs`; the apply loop in `estate.rs`). A non-zero
+exit therefore does not mean nothing landed: read the per-item lines and the
+`refusals=` count, and record both in the receipt. The pilot apply exited
+this way with 10 `refs-imported`, 1 `workspace-restored`, and 2 `refused
+(IO (errno 2))` for the two items that had no capture record.
 
 Keep `estate-apply` separate from transfer. It accepts only a corpus whose
 native transfer receipt and digest verification are complete.
