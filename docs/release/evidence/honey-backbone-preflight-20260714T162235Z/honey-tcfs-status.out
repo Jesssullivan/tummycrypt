@@ -1,0 +1,10 @@
+$ ssh honey tcfs status
+tcfsd v0.12.17
+  uptime:        7h 38m
+  socket:        /home/jess/.local/state/tcfsd/tcfsd.sock
+  device:        honey (d1176e5d)
+  conflict mode: auto
+  storage:       http://10.245.93.143:8333 [ok]
+  nats:          connected
+  active mounts: 0
+  credentials:   loaded (source: file:TCFS_S3_ACCESS_KEY_FILE)

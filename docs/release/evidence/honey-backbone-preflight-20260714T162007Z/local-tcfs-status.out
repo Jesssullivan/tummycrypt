@@ -1,0 +1,78 @@
+$ tcfs status
+Error: connecting to tcfsd at /Users/jess/.local/state/tcfsd/tcfsd.sock
+
+Caused by:
+    0: transport error
+    1: Connection refused (os error 61)
+    2: Connection refused (os error 61)
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/../../backtrace/src/backtrace/libunwind.rs:117:9
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/../../backtrace/src/backtrace/mod.rs:66:14
+   2: std::backtrace::Backtrace::create
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/backtrace.rs:331:13
+   3: <E as anyhow::context::ext::StdError>::ext_context
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.103/src/backtrace.rs:10:14
+   4: anyhow::context::<impl anyhow::Context<T,E> for core::result::Result<T,E>>::with_context
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.103/src/context.rs:65:37
+   5: tcfs::connect_daemon_with_token::{{closure}}
+             at /Users/jess/git/tummycrypt-mcp-redaction-20260714/crates/tcfs-cli/src/main.rs:2827:10
+   6: tcfs::connect_daemon_without_session::{{closure}}
+             at /Users/jess/git/tummycrypt-mcp-redaction-20260714/crates/tcfs-cli/src/main.rs:2794:50
+   7: tcfs::cmd_status::{{closure}}
+             at /Users/jess/git/tummycrypt-mcp-redaction-20260714/crates/tcfs-cli/src/main.rs:2548:61
+   8: tcfs::main::{{closure}}
+             at /Users/jess/git/tummycrypt-mcp-redaction-20260714/crates/tcfs-cli/src/main.rs:713:49
+   9: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /nix/store/0n50x1h7s97hdv9jyxw8ngp1an7446az-rust-default-1.93.0/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  10: tokio::runtime::park::CachedParkThread::block_on::{{closure}}
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/park.rs:284:71
+  11: tokio::task::coop::with_budget
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/task/coop/mod.rs:167:5
+  12: tokio::task::coop::budget
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/task/coop/mod.rs:133:5
+  13: tokio::runtime::park::CachedParkThread::block_on
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/park.rs:284:31
+  14: tokio::runtime::context::blocking::BlockingRegionGuard::block_on
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/context/blocking.rs:66:14
+  15: tokio::runtime::scheduler::multi_thread::MultiThread::block_on::{{closure}}
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/scheduler/multi_thread/mod.rs:92:22
+  16: tokio::runtime::context::runtime::enter_runtime
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/context/runtime.rs:65:16
+  17: tokio::runtime::scheduler::multi_thread::MultiThread::block_on
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/scheduler/multi_thread/mod.rs:91:9
+  18: tokio::runtime::runtime::Runtime::block_on_inner
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/runtime.rs:373:50
+  19: tokio::runtime::runtime::Runtime::block_on
+             at /Users/jess/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.1/src/runtime/runtime.rs:343:18
+  20: tcfs::main
+             at /Users/jess/git/tummycrypt-mcp-redaction-20260714/crates/tcfs-cli/src/main.rs:711:23
+  21: core::ops::function::FnOnce::call_once
+             at /nix/store/0n50x1h7s97hdv9jyxw8ngp1an7446az-rust-default-1.93.0/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  22: std::sys::backtrace::__rust_begin_short_backtrace
+             at /nix/store/0n50x1h7s97hdv9jyxw8ngp1an7446az-rust-default-1.93.0/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  23: std::rt::lang_start::{{closure}}
+             at /nix/store/0n50x1h7s97hdv9jyxw8ngp1an7446az-rust-default-1.93.0/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  24: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/ops/function.rs:287:21
+  25: std::panicking::catch_unwind::do_call
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/panicking.rs:581:40
+  26: std::panicking::catch_unwind
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/panicking.rs:544:19
+  27: std::panic::catch_unwind
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/panic.rs:359:14
+  28: std::rt::lang_start_internal::{{closure}}
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/rt.rs:175:24
+  29: std::panicking::catch_unwind::do_call
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/panicking.rs:581:40
+  30: std::panicking::catch_unwind
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/panicking.rs:544:19
+  31: std::panic::catch_unwind
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/panic.rs:359:14
+  32: std::rt::lang_start_internal
+             at /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/std/src/rt.rs:171:5
+  33: std::rt::lang_start
+             at /nix/store/0n50x1h7s97hdv9jyxw8ngp1an7446az-rust-default-1.93.0/lib/rustlib/src/rust/library/std/src/rt.rs:205:5
+  34: _main
