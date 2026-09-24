@@ -1,9 +1,14 @@
 # ADR: Stable root lifecycle and broad-directory ownership (TIN-1556, B phase)
 
-- **Date:** 2026-07-28
-- **Status:** Proposed design (design spike only — no implementation, no live
-  claim; TIN-2856/TIN-2801 freeze on live resolver/enrollment/deploy/crypto
-  ceremonies remains in force)
+- **Date:** 2026-07-28 (amended 2026-08-28)
+- **Status:** D4 **accepted** — its open question Q1 was ruled by the operator
+  on 2026-08-26. D1–D3 and D5 remain proposed design. The freeze this ADR was
+  originally written under no longer applies: TIN-2856 has been **Done since
+  2026-07-22** and must not be cited as an open fence, and on 2026-08-28 the
+  operator lifted the TIN-2801 deploy freeze **in full** (live TCFS work —
+  enrollment, per-root configs, resolver actions — and attended fleet
+  nix-switches may resume). D4 implementation is therefore **live work, not
+  source-only**.
 - **Scope:** the B-phase root lifecycle — adopt, remove, daemon-owned
   reconcile, profile behavior, uniform roam-root — built on the landed
   B0a contract
@@ -152,22 +157,47 @@ Claude-style agent state keys sessions by absolute-path slug *and* by a
 literal-path registry (`~/.claude.json` `projects{}`), and 32–57% of
 in-transcript path references are embedded absolute paths no shim reaches.
 The recorded escalation — **a uniform absolute prefix, identical on every
-host** — is adopted here as the binding convention for agent-session and
-roam-first roots:
+host** — is the adopted binding convention for agent-session and roam-first
+roots. The presentation prefix was ruled by the operator on 2026-08-26:
+**`/tcfs/<root_id>`**, the ADR's primary design.
 
-- A reserved conventional prefix (proposal: `/tcfs/<root_id>`, with
-  `~/tcfs/<root_id>` as the non-root-privilege fallback — **operator
-  question Q1**) at which the `RootBindingV1.local_root` is *identical on
-  every host*, so slug, registry key, and embedded cwd all match with zero
-  rewriting. In-place transcript rewriting stays rejected — it would break
-  the byte-exact convergence invariant roam enrollment depends on.
-- Uniform-prefix bindings are a *convention on top of* the binding contract,
-  not a change to it: hosts that cannot honor the prefix stay `UNBOUND` and
-  fail closed.
-- This is the designed unlock for the R7 fence ("sting = sole writer, no
-  roam until TIN-2301/1556"): agent-session roam resumes only via roots
-  adopted under this convention, after TIN-2301's resume proof passes
-  against a uniform-prefix root.
+- The canonical identity remains `root_id`; no local path is part of the
+  fleet-stable root identity, remote namespace, authorization identity, or
+  mutation selector (reaffirming TIN-2853). Host paths remain host-local
+  protocol/read-surface data recorded in `RootBindingV1` and its
+  `binding_fingerprint`; existing `~/tcfs` bindings remain valid.
+- **`/tcfs/<root_id>` is the ruled projection.** It is provisioned as one
+  root-owned directory per host, created once at enrollment (a single sudo);
+  TCFS itself never needs privilege afterwards. Hosts that cannot honor the
+  prefix stay `UNBOUND` and fail closed rather than binding a divergent path.
+- Both alternatives were **rejected** in the same ruling: `~/tcfs/<root_id>`
+  because `~` differs across OSes, so only the suffix is uniform and
+  full-path-slug healing breaks for exactly the macOS↔Linux pairs that
+  matter; and a per-OS synthetic mount point unified by the daemon because it
+  defers the guarantee to mount tooling.
+- The layout is currently the single-principal form. A multiuser rootful
+  deployment still needs a stable principal namespace (for example
+  `/tcfs/u/<principal>/<root_id>`); that extension is a later decision and
+  does not reopen Q1.
+- FileProvider and CFAPI continue to use their platform-managed or
+  explicitly registered roots. In-place transcript rewriting stays
+  rejected because it would break the byte-exact convergence invariant
+  roam enrollment depends on.
+- A `~/tcfs → /tcfs` symlink does not by itself prove path identity:
+  canonicalization and process `getcwd` behavior can still expose the
+  backing path. A projection is path-identity-capable only after the
+  literal cwd observed by session registries, pickers, resumed dialogs, and
+  embedded records is proven.
+- The uniform prefix is a *convention on top of* the binding contract, not a
+  change to it. `root_id` stays the identity; `/tcfs/<root_id>` is only the
+  host-local presentation the binding records.
+- R7 ("sting = sole writer, no roam until TIN-2301/1556") is a design gate
+  that **self-releases when D4 lands**, not a standing operating fence.
+  Landing D4 still requires TIN-2301's resume proof against the
+  `/tcfs/<root_id>` projection, and the proof obligations named above
+  (root-relative state/cache identity and migration, multiuser ownership and
+  collision resistance, reboot recovery, rootless refusal/fallback, and the
+  literal cwd observed by session registries and resumed dialogs).
 
 ## Decision D5 — scale posture for 100+ roots
 
@@ -208,42 +238,66 @@ defers the rest:
    any `git-raw-v1` root on a fresh host** — adopt/reconcile on the origin
    host does not depend on it.
 3. Delivery order: **B0b** (plan-only driver + adopt dry-run inventory) →
-   **B0c** (execute + fleet-rendered registry rows) → uniform-prefix
-   agent-static adoption + TIN-2301 resume proof → repo adoption after the
-   TIN-2306 two-repo stop rule passes. Broad `~/git`/home claims stay out
-   until the C phase, per the standing claim boundary.
-4. Everything above is source/tests/docs until the TIN-2856/TIN-2801 freeze
-   clears; no step in this ADR authorizes a live ceremony.
+   **B0c** (execute + fleet-rendered registry rows) → `/tcfs/<root_id>`
+   agent-static adoption + TIN-2301's resume proof against that projection →
+   repo adoption after the TIN-2306 two-repo stop rule passes. Broad
+   `~/git`/home claims stay out until the C phase, per the standing claim
+   boundary.
+4. **`~/.claude/projects` enrollment must not widen before D4 lands.**
+   Widening first produces documented silent non-convergence — disjoint slug
+   trees per OS. Companion ruling on that lane: Option M now (per-root `-c`
+   against canonical state) plus the D2 daemon-owned root driver from this
+   ADR.
+5. The TIN-2856/TIN-2801 freeze that gated the original draft is cleared
+   (see Status). D4 proceeds as live work; the remaining gates above (1, 2,
+   4, TIN-2306) are the real preconditions, not a blanket source-only fence.
 
 ## Acceptance mapping (TIN-1556)
 
 | Acceptance criterion | Where satisfied |
 |---|---|
-| Stable root IDs independent of host path | landed (B0a fingerprints); D4 adds the uniform-prefix convention on top |
+| Stable root IDs independent of host path | landed (B0a fingerprints); D4 adds the ruled `/tcfs/<root_id>` uniform-prefix convention on top |
 | Manifests/index rooted by `(root_id, relative_path)` | remote keys already live under `remote_prefix`; D5's NATS-subject schema design extends identity to events; ordinary-file resolution returns only once manifest identity is root-bound (B0b/B0c) |
 | `tcfs root adopt/list/status` CLI | D1 (adopt/remove) + landed `roots list/status` |
 | Adopt requires dry-run inventory, refuses dirty/ambiguous | D1 phase structure |
 | Ignore presets: project-tree, git-repo, macOS home, Linux home | D3 profile table |
-| Cross-machine convergence, different local paths, no collisions | UNBOUND/binding model + D2 driver; proven by the B0c two-host test (and the uniform-prefix variant for agent roots) |
+| Cross-machine convergence, different local paths, no collisions | UNBOUND/binding model + D2 driver; proven by the B0c two-host test (and the `/tcfs/<root_id>` variant for agent roots) |
 | Rollback/removal documented and tested | D1 remove semantics |
 
-## Operator questions (blocking decisions, batched for one interview)
+## Operator rulings (2026-07-29 interview; Q1 ruled 2026-08-26)
 
-- **Q1 — uniform roam-root prefix:** `/tcfs/<root_id>` (needs a root-owned
-  directory created once per host) vs `~/tcfs/<root_id>` (no privilege, but
-  `~` differs across OSes so only the *suffix* is uniform — breaks the
-  full-path-slug healing for cross-OS pairs). A third option is a per-OS
-  synthetic mount point unified by the daemon. D4 recommends `/tcfs`.
-- **Q2 — remove retention window:** how long removed-root state caches are
-  retained before `--purge-state` is allowed (proposal: 30 days).
-- **Q3 — driver default posture:** should migrated roots default
-  `lifecycle_policy = "reconcile"` (units retired eagerly) or
-  `"inspect-only"` (operator flips each root after observing plan output)?
-  D2 recommends inspect-only defaults with explicit per-root promotion.
-- **Q4 — home profiles in B:** confirm inventory-and-shadow-only scope for
-  `home-*-v1`, with live home subtrees deferred to C.
+Q2–Q4 were ruled in the 2026-07-29 batched interview. Q1 was not: the
+operator immediately reopened the initial `~/tcfs/<root_id>` selection,
+called the rootful alternative a complex architectural question worth
+careful consideration, and deferred it. It was ruled separately on
+2026-08-26.
+
+- **Q1 — uniform roam-root prefix: RULED (2026-08-26) — `/tcfs/<root_id>`,**
+  the ADR's primary design. One root-owned directory per host, created once
+  at enrollment (a single sudo); hosts that cannot honor the prefix stay
+  `UNBOUND` and fail closed. `~/tcfs/<root_id>` was rejected (breaks
+  full-path-slug healing for the macOS↔Linux pairs that matter) and a per-OS
+  synthetic mount point was rejected (defers the guarantee to mount tooling).
+  The proof obligations carried forward into D4 are unchanged: root-relative
+  state/cache identity and migration, multiuser ownership and collision
+  resistance, reboot recovery, rootless refusal/fallback, and the literal cwd
+  seen by Claude/Codex session registries and resumed dialogs. Existing
+  bindings and historical session paths stay available during any
+  dual-projection canary.
+- **Q2 — remove retention window: RULED — 7 days** of removed-root state
+  cache retention before `--purge-state` is allowed (tighter than the
+  30-day proposal).
+- **Q3 — driver default posture: RULED — `inspect-only` defaults** with
+  explicit per-root promotion after the operator observes each root's
+  plan output (D2 as recommended).
+- **Q4 — home profiles in B: RULED — inventory-and-shadow only** for
+  `home-*-v1`; live home subtrees stay deferred to C.
 
 ## Explicit non-goals of this ADR
+
+These are scope boundaries of the *design*, not a freeze — the 2026-08-28
+ruling lifted that (see Status). Each item below still needs its own
+authorization before it happens; this ADR just does not grant one.
 
 Live rollout of anything; TOTP/enrollment/crypto ceremonies; MCP or TUI
 root surfaces; per-root storage endpoints; subscription selective sync
