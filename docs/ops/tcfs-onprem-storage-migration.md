@@ -31,6 +31,18 @@ Current live state:
 - `service/nats`: canonical Tailscale annotations, no ProxyClass
 - `service/seaweedfs`: canonical Tailscale annotations, no ProxyClass
 
+Image pin (TIN-5136 Phase 0.6, 2026-09-28): the live `seaweedfs-0` runs
+`docker.io/chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882`.
+That is the 4.47 index; `:latest` resolved to the same index at readback, and
+the filer reports version `4.47 c50733600`. `seaweedfs_image` in
+`infra/tofu/environments/onprem` is now pinned to that digest, with a
+validation that refuses floating tags.
+
+The kubectl-applied `statefulset/seaweedfs` and the
+`tcfs-s3-posture-gateway` Deployment still name `:latest`. Pinning them live
+is the same image bytes, but it rolls the pod: a tcfs outage for the length of
+one restart. That is a separate attended act and is not part of this pin.
+
 Durable targets now exist:
 
 - NATS target: `openebs-bumble-messaging-retain`
