@@ -6,6 +6,12 @@ and `enable_stateful_migration_candidate_workloads=false` create no resources.
 
 ## Current Live Boundary
 
+As of 2026-09-29T16:45Z the `tcfs` cluster workloads (`seaweedfs`, `nats`,
+the backend worker, `tcfs-s3-posture-gateway`, `tcfs-s3-smoke-tunnel`) are
+paused at 0 replicas (TIN-5136). See
+`docs/ops/tcfs-honey-cluster-pause-2026-09-29.md` for what was paused, what
+was kept, and the restore order. The 2026-04-29 readback below predates it.
+
 Live readback on 2026-04-29 shows:
 
 - `nats-0`, `seaweedfs-0`, and `tcfs-backend-tcfs-backend-worker` are healthy.

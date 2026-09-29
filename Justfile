@@ -71,6 +71,10 @@ onprem-tofu-validate:
 onprem-tofu-candidate-test:
     bash scripts/test-tcfs-onprem-tofu-candidate-workloads.sh
 
+# Regression test the TIN-5136 honey pause: chart replicas 0 plus restore render
+tcfs-backend-paused-test:
+    bash scripts/test-tcfs-backend-paused-replicas.sh
+
 # Tail logs from a workload
 k8s-logs app="tcfsd" ns="tcfs":
     kubectl logs -l app.kubernetes.io/name={{app}} -n {{ns}} --tail=50

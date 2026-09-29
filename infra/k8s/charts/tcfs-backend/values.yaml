@@ -11,7 +11,15 @@ image:
 imagePullSecrets:
   - name: ghcr-pull-secret
 
-replicaCount: 1
+# Paused on honey (operator ruling 2026-09-29 "Close the tcfs source drift",
+# TIN-5136). The live worker was scaled to 0 at 2026-09-29T16:45Z under the
+# ruling "Cluster scale-to-0 only"; this default keeps a reconcile through
+# scripts/tcfs-backend-deploy.sh from silently restarting it. Restore order
+# (seaweedfs, then nats, then the Deployments) lives in
+# docs/ops/tcfs-honey-cluster-pause-2026-09-29.md. Restore with
+# --set replicaCount=1 --set autoscaling.minReplicas=1 only after seaweedfs-0
+# and nats-0 are Ready.
+replicaCount: 0
 
 nameOverride: ""
 fullnameOverride: ""
@@ -40,7 +48,9 @@ resources:
 # KEDA ScaledObject configuration
 autoscaling:
   enabled: true
-  minReplicas: 1
+  # Paused with replicaCount (TIN-5136): a KEDA floor above 0 would scale the
+  # worker back up and reopen the drift.
+  minReplicas: 0
   maxReplicas: 100
   lagThreshold: 100
   cooldownPeriod: 300

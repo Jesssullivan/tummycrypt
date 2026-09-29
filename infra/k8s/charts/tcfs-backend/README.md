@@ -25,6 +25,14 @@ The chart defaults to the mutable `latest` container tag for operator
 convenience. Use an explicit release tag, such as `v0.12.12`, for production
 reconcile or evidence runs.
 
+## Paused on honey (TIN-5136)
+
+`values.yaml` declares `replicaCount: 0` and `autoscaling.minReplicas: 0`.
+That matches the 2026-09-29 honey pause (operator ruling "Close the tcfs
+source drift"). A reconcile with the defaults keeps the worker at 0. For the
+restore order and values, see
+`docs/ops/tcfs-honey-cluster-pause-2026-09-29.md`.
+
 ## Expected Objects
 
 With the default release name `tcfs-backend`, this chart creates:
