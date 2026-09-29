@@ -1,0 +1,96 @@
+# Captured read-only from honey (tcfs) on 2026-09-29 at the TIN-5136 pause.
+# Ruling: "Follow-up PR: capture at 0 replicas" (TIN-5136). Server-set fields
+# stripped; everything else is the live spec. Do not apply without a restore
+# ruling; see docs/ops/tcfs-honey-cluster-pause-2026-09-29.md.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app: seaweedfs
+  name: seaweedfs
+  namespace: tcfs
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  podManagementPolicy: OrderedReady
+  replicas: 0
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: seaweedfs
+  serviceName: seaweedfs
+  template:
+    metadata:
+      labels:
+        app: seaweedfs
+    spec:
+      containers:
+        - args:
+            - server
+            - -master.port=9333
+            - -volume.port=8080
+            - -filer
+            - -s3
+            - -s3.port=8333
+            - -dir=/data
+          image: chrislusf/seaweedfs:latest
+          imagePullPolicy: Always
+          name: seaweedfs
+          ports:
+            - containerPort: 9333
+              name: master
+              protocol: TCP
+            - containerPort: 8080
+              name: volume
+              protocol: TCP
+            - containerPort: 8888
+              name: filer
+              protocol: TCP
+            - containerPort: 8333
+              name: s3
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /cluster/status
+              port: 9333
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /data
+              name: data
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: local-path
+        volumeMode: Filesystem

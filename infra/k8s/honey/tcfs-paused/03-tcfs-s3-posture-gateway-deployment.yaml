@@ -1,0 +1,67 @@
+# Captured read-only from honey (tcfs) on 2026-09-29 at the TIN-5136 pause.
+# Ruling: "Follow-up PR: capture at 0 replicas" (TIN-5136). Server-set fields
+# stripped; everything else is the live spec. Do not apply without a restore
+# ruling; see docs/ops/tcfs-honey-cluster-pause-2026-09-29.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: storage-posture-s3-gateway
+    app.kubernetes.io/name: tcfs-s3-posture-gateway
+    app.kubernetes.io/part-of: tcfs
+  name: tcfs-s3-posture-gateway
+  namespace: tcfs
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 0
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tcfs-s3-posture-gateway
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: storage-posture-s3-gateway
+        app.kubernetes.io/name: tcfs-s3-posture-gateway
+        app.kubernetes.io/part-of: tcfs
+    spec:
+      containers:
+        - args:
+            - s3
+            - -filer=seaweedfs-filer.tcfs.svc.cluster.local:8888
+            - -port=8333
+            - -iam.readOnly=false
+          image: chrislusf/seaweedfs:latest
+          imagePullPolicy: Always
+          name: seaweedfs-s3
+          ports:
+            - containerPort: 8333
+              name: s3
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            successThreshold: 1
+            tcpSocket:
+              port: 8333
+            timeoutSeconds: 1
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30

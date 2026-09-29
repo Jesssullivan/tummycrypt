@@ -55,4 +55,36 @@ wk="$(grep -n -E '^[0-9]+\. .*tcfs-backend-worker' "${PAUSE_DOC}" | head -1 | cu
 [[ -n "${sw}" && -n "${nt}" && -n "${wk}" ]] || fail "pause record must list restore steps (found lines: ${order})"
 (( sw < nt && nt < wk )) || fail "restore order must be seaweedfs, then nats, then the Deployments"
 
+# Captured manifests for the workloads that had no source declaration.
+MANIFEST_DIR="${ROOT}/infra/k8s/honey/tcfs-paused"
+expected=(
+    "01-seaweedfs-statefulset.yaml:StatefulSet:seaweedfs"
+    "02-nats-statefulset.yaml:StatefulSet:nats"
+    "03-tcfs-s3-posture-gateway-deployment.yaml:Deployment:tcfs-s3-posture-gateway"
+    "04-tcfs-s3-smoke-tunnel-deployment.yaml:Deployment:tcfs-s3-smoke-tunnel"
+)
+[[ "$(find "${MANIFEST_DIR}" -name '*.yaml' | wc -l | tr -d ' ')" == "${#expected[@]}" ]] \
+    || fail "${MANIFEST_DIR} must hold exactly the ${#expected[@]} captured manifests"
+for entry in "${expected[@]}"; do
+    IFS=: read -r file kind name <<<"${entry}"
+    path="${MANIFEST_DIR}/${file}"
+    [[ -f "${path}" ]] || fail "missing captured manifest ${path}"
+    grep -Eq "^kind: ${kind}$" "${path}" || fail "${file} must be kind ${kind}"
+    grep -Eq "^  name: ${name}$" "${path}" || fail "${file} must name ${name}"
+    grep -Eq '^  namespace: tcfs$' "${path}" || fail "${file} must target namespace tcfs"
+    [[ "$(field_values replicas <"${path}")" == "0" ]] || fail "${file} must declare replicas: 0"
+    for server_set in '^status:' '^[[:space:]]+status:' 'uid:' 'resourceVersion:' \
+        'creationTimestamp:' 'managedFields:' 'generation:' 'last-applied-configuration' \
+        'deployment.kubernetes.io/revision' 'clusterIP'; do
+        if grep -Eq "${server_set}" "${path}"; then
+            fail "${file} still carries server-set field matching ${server_set}"
+        fi
+    done
+    if grep -Eq '^kind: Secret$|^[[:space:]]+(data|stringData):' "${path}"; then
+        fail "${file} must not carry Secret material"
+    fi
+    grep -Fq "${file}" "${PAUSE_DOC}" || fail "pause record must reference ${file}"
+done
+
 printf '[OK] tcfs-backend chart declares the TIN-5136 pause and a renderable restore\n'
+printf '[OK] captured tcfs manifests declare replicas 0 without server-set fields\n'
