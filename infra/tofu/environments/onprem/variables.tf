@@ -101,9 +101,14 @@ variable "seaweedfs_candidate_app_label" {
 }
 
 variable "seaweedfs_image" {
-  description = "SeaweedFS image for the on-prem candidate workload. Mirrors current live readback until a pinned production tag is selected; pin before accepting cutover evidence."
+  description = "SeaweedFS image for the on-prem candidate workload, pinned by digest. The default is the exact image the live `tcfs/seaweedfs-0` ran at the 2026-09-28 readback (4.47; `:latest` resolved to the same index then). Move it only as a reviewed pin bump, never back to a floating tag (TIN-5136 Phase 0.6)."
   type        = string
-  default     = "chrislusf/seaweedfs:latest"
+  default     = "chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882"
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.seaweedfs_image))
+    error_message = "seaweedfs_image must be pinned by digest; a floating tag lets a restart silently change the storage server version."
+  }
 }
 
 variable "tailscale_proxy_class" {
