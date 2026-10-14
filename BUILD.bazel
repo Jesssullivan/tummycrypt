@@ -1,0 +1,13 @@
+"""Root Bazel package for TCFS."""
+
+package(default_visibility = ["//visibility:public"])
+
+alias(
+    name = "darwin_package_fixture_contract",
+    actual = "//build/macos:darwin_package_fixture_contract",
+)
+
+alias(
+    name = "darwin_package_release_artifacts_unsigned",
+    actual = "//build/macos:darwin_package_release_artifacts_unsigned",
+)

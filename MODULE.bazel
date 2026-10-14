@@ -1,0 +1,24 @@
+"""Bzlmod module for TCFS package-contract targets."""
+
+module(
+    name = "tummycrypt",
+    version = "0.12.14",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "tcfs_v0_12_14_macos_aarch64_cli_tar",
+    downloaded_file_path = "tcfs-0.12.14-macos-aarch64.tar.gz",
+    sha256 = "55719e35b624df25386baf63d74247c39a25e857b7c3855cfd4edd6cfae69175",
+    urls = ["https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.14/tcfs-0.12.14-macos-aarch64.tar.gz"],
+)
+
+http_file(
+    name = "tcfs_v0_12_14_macos_aarch64_fileprovider_zip",
+    downloaded_file_path = "TCFSProvider-0.12.14-macos-aarch64.zip",
+    sha256 = "b5dd29c46073252ba31d4aaa1d07a88a757e33c9a08bef68ea6d3748753c51f4",
+    urls = ["https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.14/TCFSProvider-0.12.14-macos-aarch64.zip"],
+)

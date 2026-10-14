@@ -1,0 +1,11 @@
+"""Script exports used by Bazel package-contract targets."""
+
+exports_files(
+    [
+        "macos-build-pkg.sh",
+        "macos-pkg-postinstall.sh",
+        "macos-pkg-structure-smoke.sh",
+        "test-bazel-macos-package-contract.sh",
+    ],
+    visibility = ["//visibility:public"],
+)

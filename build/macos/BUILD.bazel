@@ -1,0 +1,97 @@
+"""macOS package targets for TCFS."""
+
+load(":darwin_pkg.bzl", "tcfs_macos_pkg")
+
+# The root package re-exports both package targets as aliases.
+package(default_visibility = ["//:__pkg__"])
+
+genrule(
+    name = "fixture_cli_tar",
+    outs = ["tcfs-0.12.14-macos-aarch64.tar.gz"],
+    cmd = """
+set -euo pipefail
+tmp="$(@D)/fixture-cli"
+rm -rf "$$tmp"
+mkdir -p "$$tmp/tcfs-0.12.14-macos-aarch64"
+printf '#!/bin/sh\\necho tcfs fixture\\n' >"$$tmp/tcfs-0.12.14-macos-aarch64/tcfs"
+printf '#!/bin/sh\\necho tcfsd fixture\\n' >"$$tmp/tcfs-0.12.14-macos-aarch64/tcfsd"
+chmod +x "$$tmp/tcfs-0.12.14-macos-aarch64/tcfs" "$$tmp/tcfs-0.12.14-macos-aarch64/tcfsd"
+tar czf "$@" -C "$$tmp" tcfs-0.12.14-macos-aarch64
+""",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "fixture_fileprovider_zip",
+    outs = ["TCFSProvider-0.12.14-macos-aarch64.zip"],
+    cmd = """
+set -euo pipefail
+tmp="$(@D)/fixture-fileprovider"
+rm -rf "$$tmp"
+appex="$$tmp/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents"
+mkdir -p "$$appex"
+cat >"$$appex/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.fileprovider-nonui</string>
+    <key>NSExtensionFileProviderSupportsEnumeration</key>
+    <true/>
+    <key>NSExtensionFileProviderSupportsDatalessFolders</key>
+    <true/>
+    <key>NSFileProviderDecorations</key>
+    <array>
+      <dict><key>Identifier</key><string>io.tinyland.tcfs.fileprovider.decoration.conflict</string></dict>
+      <dict><key>Identifier</key><string>io.tinyland.tcfs.fileprovider.decoration.locked</string></dict>
+      <dict><key>Identifier</key><string>io.tinyland.tcfs.fileprovider.decoration.pinned</string></dict>
+      <dict><key>Identifier</key><string>io.tinyland.tcfs.fileprovider.decoration.excluded</string></dict>
+    </array>
+    <key>NSExtensionFileProviderActions</key>
+    <array>
+      <dict><key>NSExtensionFileProviderActionIdentifier</key><string>io.tinyland.tcfs.action.unsync</string></dict>
+      <dict><key>NSExtensionFileProviderActionIdentifier</key><string>io.tinyland.tcfs.action.pin</string></dict>
+    </array>
+  </dict>
+</dict>
+</plist>
+PLIST
+out="$$(pwd -P)/$@"
+(cd "$$tmp" && python3 -m zipfile -c "$$out" TCFSProvider.app)
+""",
+    tags = ["manual"],
+)
+
+tcfs_macos_pkg(
+    name = "darwin_package_fixture_contract",
+    cli_tar = ":fixture_cli_tar",
+    fileprovider_zip = ":fixture_fileprovider_zip",
+    output_name = "tcfs-0.12.14-macos-aarch64-fixture.pkg",
+    tags = [
+        "fixture-only",
+        "gloriousflywheel-rbe-contract",
+        "manual",
+        "requires-darwin-packaging-tools",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+    version = "0.12.14",
+)
+
+tcfs_macos_pkg(
+    name = "darwin_package_release_artifacts_unsigned",
+    cli_tar = "@tcfs_v0_12_14_macos_aarch64_cli_tar//file",
+    fileprovider_zip = "@tcfs_v0_12_14_macos_aarch64_fileprovider_zip//file",
+    output_name = "tcfs-0.12.14-macos-aarch64-release-artifacts-unsigned.pkg",
+    tags = [
+        "gloriousflywheel-rbe-contract",
+        "manual",
+        "release-artifact-inputs",
+        "requires-darwin-packaging-tools",
+        "unsigned-package",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+    version = "0.12.14",
+)
