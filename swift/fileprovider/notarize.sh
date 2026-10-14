@@ -1,74 +1,76 @@
 #!/usr/bin/env bash
-# Notarize and staple the TCFS FileProvider app bundle.
-#
-# Submits the signed .app to Apple's notary service, waits for approval,
-# and staples the notarization ticket to the app bundle.
-#
-# Usage:
-#   ./notarize.sh <app_path>
-#   ./notarize.sh <app_path> --keychain-profile <profile>
-#
-# Environment variables (if not using --keychain-profile):
-#   APPLE_ID                  - Apple ID email
-#   APPLE_TEAM_ID             - Developer Team ID
-#   APPLE_NOTARIZE_PASSWORD   - App-specific password (or @keychain: reference)
-#
-# Prerequisites:
-#   - App must be signed with Developer ID (not ad-hoc)
-#   - Xcode CLT installed (xcrun notarytool, xcrun stapler)
-
+# Finalize an already signed macOS app. This does not build, sign, or install it.
+# Usage: notarize.sh <app_path> [--keychain-profile <profile>] [--result-file <path>]
+# The final raw Apple JSON is published only after Accepted, stapling and assessment.
 set -euo pipefail
 
-APP_PATH="${1:?Usage: notarize.sh <app_path> [--keychain-profile <profile>]}"
+APP_PATH="${1:?Usage: notarize.sh <app_path> [--keychain-profile <profile>] [--result-file <path>]}"
 shift
-
-if [ ! -d "$APP_PATH" ]; then
-    echo "ERROR: App not found at $APP_PATH" >&2
-    exit 1
-fi
-
+[[ -d "$APP_PATH" && ! -L "$APP_PATH" ]] || { echo 'Expected a signed app directory.' >&2; exit 2; }
 APP_NAME="$(basename "$APP_PATH" .app)"
-ZIP_PATH="${APP_PATH%/*}/${APP_NAME}.zip"
-
-# --- Verify signature before submission ---
-echo "==> Verifying code signature..."
-if ! /usr/bin/codesign -vvv --deep "$APP_PATH" 2>&1; then
-    echo "ERROR: Code signature verification failed. Sign with Developer ID first." >&2
-    exit 1
-fi
-
-# --- Create submission archive ---
-echo "==> Creating submission archive: $ZIP_PATH"
-/usr/bin/ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
-
-# --- Submit for notarization ---
-echo "==> Submitting for notarization..."
-if [ "${1:-}" = "--keychain-profile" ]; then
-    KEYCHAIN_PROFILE="${2:?--keychain-profile requires a profile name}"
-    xcrun notarytool submit "$ZIP_PATH" \
-        --keychain-profile "$KEYCHAIN_PROFILE" \
-        --wait
-elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_NOTARIZE_PASSWORD:-}" ]; then
-    xcrun notarytool submit "$ZIP_PATH" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$APPLE_TEAM_ID" \
-        --password "$APPLE_NOTARIZE_PASSWORD" \
-        --wait
+RESULT_FILE="$(dirname "$APP_PATH")/${APP_NAME}.notarization.json"
+KEYCHAIN_PROFILE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --keychain-profile) KEYCHAIN_PROFILE="${2:?Missing keychain profile}"; shift 2 ;;
+        --result-file) RESULT_FILE="${2:?Missing result path}"; shift 2 ;;
+        *) echo 'Unknown notarization argument.' >&2; exit 2 ;;
+    esac
+done
+AUTH=()
+if [[ -n "$KEYCHAIN_PROFILE" ]]; then
+    AUTH=(--keychain-profile "$KEYCHAIN_PROFILE")
 else
-    echo "ERROR: Provide --keychain-profile or set APPLE_ID, APPLE_TEAM_ID, APPLE_NOTARIZE_PASSWORD" >&2
-    rm -f "$ZIP_PATH"
-    exit 1
+    for required in APPLE_ID APPLE_TEAM_ID APPLE_NOTARIZE_PASSWORD; do
+        [[ -n "${!required:-}" ]] || { echo "${required} is required for app notarization." >&2; exit 2; }
+    done
+    AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_NOTARIZE_PASSWORD")
 fi
-
-# --- Staple the ticket ---
-echo "==> Stapling notarization ticket..."
+CODESIGN="${TCFS_RELEASE_CODESIGN:-/usr/bin/codesign}"
+DITTO="${TCFS_RELEASE_DITTO:-/usr/bin/ditto}"
+SPCTL="${TCFS_RELEASE_SPCTL:-/usr/sbin/spctl}"
+ZIP_PATH="${RESULT_FILE%.json}.submission.zip"
+PENDING_RESULT="${RESULT_FILE}.pending"
+for output in "$RESULT_FILE" "$PENDING_RESULT" "$ZIP_PATH"; do
+    [[ ! -e "$output" && ! -L "$output" ]] || { echo 'Refusing to overwrite notarization output.' >&2; exit 2; }
+done
+"$CODESIGN" --verify --deep --strict "$APP_PATH"
+"$DITTO" -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+( set -o noclobber
+  xcrun notarytool submit "$ZIP_PATH" "${AUTH[@]}" \
+      --wait --timeout 15m --output-format json > "$PENDING_RESULT"
+)
+python3 - "$PENDING_RESULT" <<'PY'
+import json, sys, uuid
+with open(sys.argv[1], 'rb') as source:
+    raw = source.read(65537)
+if len(raw) > 65536:
+    raise SystemExit('App notarization response exceeds bound')
+result = json.loads(raw)
+if not isinstance(result, dict) or result.get('status') != 'Accepted':
+    raise SystemExit('App notarization was not Accepted')
+identifier = result.get('id')
+if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier.lower():
+    raise SystemExit('App notarization submission ID is invalid')
+PY
 xcrun stapler staple "$APP_PATH"
-
-# --- Verify Gatekeeper acceptance ---
-echo "==> Verifying Gatekeeper acceptance..."
-spctl --assess --type exec --verbose=2 "$APP_PATH"
-
-# --- Cleanup ---
-rm -f "$ZIP_PATH"
-
-echo "==> Notarization complete: $APP_PATH"
+xcrun stapler validate -v "$APP_PATH"
+"$SPCTL" --assess --type exec --verbose=2 "$APP_PATH"
+# Preserve Apple's exact bytes, bounded and revalidated before exclusive publication.
+python3 - "$PENDING_RESULT" "$RESULT_FILE" <<'PY'
+import json, sys, uuid
+with open(sys.argv[1], 'rb') as source:
+    raw = source.read(65537)
+if len(raw) > 65536:
+    raise SystemExit('App notarization response exceeds bound')
+result = json.loads(raw)
+if not isinstance(result, dict) or result.get('status') != 'Accepted':
+    raise SystemExit('App notarization was not Accepted')
+identifier = result.get('id')
+if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier.lower():
+    raise SystemExit('App notarization submission ID is invalid')
+with open(sys.argv[2], 'xb') as output:
+    output.write(raw)
+PY
+rm -f "$ZIP_PATH" "$PENDING_RESULT"
+printf 'Finalized signed app; retained Apple evidence: %s\n' "$RESULT_FILE"
