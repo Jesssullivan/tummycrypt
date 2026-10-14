@@ -48,7 +48,10 @@ tfplan
 # Build outputs
 bin/
 out/
-/build/
+/bazel-*
+/build/*
+!/build/macos/
+!/build/macos/**
 
 # Xcode (generated from project.yml via xcodegen)
 *.xcodeproj/
