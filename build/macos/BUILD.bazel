@@ -2,6 +2,9 @@
 
 load(":darwin_pkg.bzl", "tcfs_macos_pkg")
 
+# The root package re-exports both package targets as aliases.
+package(default_visibility = ["//:__pkg__"])
+
 genrule(
     name = "fixture_cli_tar",
     outs = ["tcfs-0.12.14-macos-aarch64.tar.gz"],
