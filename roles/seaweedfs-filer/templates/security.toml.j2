@@ -1,8 +1,9 @@
+# JWT keys come from inventory/vault vars; never commit a literal key here.
 [jwt.signing]
-key = "appubears"
+key = "{{ seaweedfs_jwt_signing_key | mandatory }}"
 
 [jwt.filer_signing]
-key = "appubears"
+key = "{{ seaweedfs_jwt_filer_signing_key | mandatory }}"
 
 [grpc]
 ca = "/etc/seaweedfs/SeaweedFS_CA.crt"
