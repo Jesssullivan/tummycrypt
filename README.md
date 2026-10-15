@@ -6,8 +6,19 @@ once, then SSH to another enrolled machine and continue with the same bytes,
 including in-progress Git and agent state. Hydration and local unsync should be
 ordinary verbs, not a migration project.
 
-> Active development. The current release is `v0.12.17`; do not treat TCFS as
-> a whole-home or linked-worktree solution yet.
+> **Status (2026-10-15): the backend is paused.** The lab's SeaweedFS/NATS
+> backend has been scaled to zero since 2026-09-29 (TIN-5136). Installed
+> clients have nothing to sync with. It will come back on a new SeaweedFS
+> deployment once the hardening steps in
+> [docs/ops/current.md](docs/ops/current.md#status-2026-10-15) are done.
+> `main` builds and its tests pass; cargo-deny (pending #609) and Nix CI are
+> red.
+> Encrypted chunked upload and download, Linux FUSE hydration, and
+> single-repository roam have been demonstrated (see below). The latest
+> release is still `v0.12.17` (2026-07-09). Do not use TCFS yet for a whole
+> home directory, Git linked worktrees, or live SQLite databases: the sync
+> blacklist deliberately refuses the last two.
+> Content is not compressed before encryption today.
 
 ## Start here
 
