@@ -1,5 +1,53 @@
 # Current TCFS workstream
 
+## Status 2026-10-15
+
+**The tcfs backend is paused.** Every workload in namespace `tcfs` on the
+honey cluster (SeaweedFS, NATS, the backend worker, the S3 posture gateway and
+the smoke tunnel) has been at 0/0 replicas since 2026-09-29 (TIN-5136, ruling
+R-C672). PVCs and PVs are retained; nothing was deleted. The pause is declared
+in source: see [tcfs-honey-cluster-pause-2026-09-29.md](tcfs-honey-cluster-pause-2026-09-29.md).
+
+What still runs:
+
+- The pause record says `tcfsd` on honey, bumble and neo, and the honey FUSE
+  mount, were deliberately left running. The 2026-10-15 estate check (not
+  re-verified here) found `tcfsd` clients on neo, yoga, mbp-13 and honey;
+  bumble may also still be running. All of them run against no backend and
+  cannot push, pull or hydrate anything new.
+- The estate check (not re-verified here) found the yoga FUSE mount returning
+  EIO, because there is no backend to read from.
+- No release since `v0.12.17` (2026-07-09); `main` carries 161 unreleased
+  commits. A rotate-key-only `v0.12.18` release is ratified and deferred: see
+  [v0.12.18-release-exception-ruling-2026-07-28.md](v0.12.18-release-exception-ruling-2026-07-28.md).
+  The fleet versions in the 2026-08-22 table below were not re-verified
+  during the pause.
+
+Path back (operator ruling Q153, TIN-4543). tcfs moves to the SeaweedFS 4.48
+deployment on blahaj, not back to the honey pod.
+
+Preconditions (all required, in no set order): the P9 identity questions are
+answered; `filer_backup` is on; the blahaj deployment is verified to sign with
+a fresh, non-published JWT key, never the literal that sat in the public
+Ansible templates from 2026-02-21 until PR #608 (#608 made those templates
+fail closed: `seaweedfs_jwt_signing_key` and `seaweedfs_jwt_filer_signing_key`
+are now mandatory); and NATS `sync_always` is on. Then flip `s3_hold`.
+
+The old honey pod is not revived. The Restore section of the pause document
+describes reviving it on honey; Q153 rules that path out, so do not follow it
+to bring tcfs back.
+
+Positioning (rulings Q155 and Q156, TIN-4543): tcfs is the long-run product.
+Bulkload is the migration tool. Their boundary is in
+[tcfs-bulkload-boundary.md](tcfs-bulkload-boundary.md). The Mac-only cohort on
+neo will be tcfs's first real use case: it will be mounted, not copied.
+
+Everything below this block is the **2026-08-22 snapshot and is historical**.
+It predates the pause. Its "proven now" rows describe what was true while the
+backend ran. They do not mean anything is live today.
+
+---
+
 Source boundary last verified: **2026-08-22** against tummycrypt `origin/main`
 `dfe8282a4d93af0ca1c495065ec82002352d4d86`. The live host rows retain their
 older evidence boundaries; this source refresh claims no deployment or

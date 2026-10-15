@@ -2,7 +2,11 @@
 //!
 //! Architecture: Chunk-then-Encrypt with XChaCha20-Poly1305
 //!
-//! Pipeline: plaintext → FastCDC chunk → zstd compress → encrypt → BLAKE3 hash ciphertext → upload
+//! Pipeline: plaintext → FastCDC chunk → encrypt → BLAKE3 hash ciphertext → upload
+//!
+//! Compression is not in the data path today. `tcfs_chunks::seekable_zstd`
+//! exists, but nothing in the sync, VFS, FUSE, FileProvider or daemon code
+//! calls it.
 //!
 //! Key hierarchy:
 //! ```text
