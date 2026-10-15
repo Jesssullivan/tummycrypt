@@ -1759,8 +1759,10 @@ pub async fn reconcile(
         .as_secs();
 
     // 1. Collect local files
-    let local_files =
-        collect_local_set(local_root, blacklist, config.authoritative_paths.is_some())?;
+    let LocalSet {
+        files: local_files,
+        refused: refused_fences,
+    } = collect_local_set(local_root, blacklist, config.authoritative_paths.is_some())?;
     if let Some(authoritative) = &config.authoritative_paths {
         anyhow::ensure!(
             config.git_sync_mode != "bundle" || local_files.contains_key(".git-tcfs-bundle"),
@@ -1851,6 +1853,16 @@ pub async fn reconcile(
 
     for rel_path in &all_paths {
         let local = local_files.get(rel_path);
+        // The walk refused this path's subtree (unreadable, or an entry whose
+        // type could not be read): its absence proves nothing. Never infer a
+        // delete, and never pull into a directory this walk could not read.
+        if local.is_none() && is_under_refused(rel_path, &refused_fences) {
+            warn!(
+                rel_path = %rel_path,
+                "reconcile: skipping path under a refused local subtree"
+            );
+            continue;
+        }
         let remote = remote_index.get(rel_path);
         // A live local path always resolves through its canonical absolute key.
         // Relative/suffix lookup is reserved for state-only paths, where there is
@@ -1913,6 +1925,9 @@ pub async fn reconcile(
     remote_empty_dirs.sort();
     for rel_path in &remote_empty_dirs {
         if local_root.join(rel_path).is_dir() {
+            continue;
+        }
+        if is_under_refused(rel_path, &refused_fences) {
             continue;
         }
         summary.directories += 1;
@@ -6184,11 +6199,30 @@ async fn execute_new_remote_pulls_concurrent(
 /// stays `false` so we never walk *through* a link. The fail-closed deny-set
 /// guard in the collector still screens link targets before they reach here,
 /// and the push/restore paths below are symlink-aware.
+/// Local files keyed by remote rel path, plus the rel paths of subtrees the
+/// walk refused (see [`crate::ingest::CollectRefusal`]).
+struct LocalSet {
+    files: HashMap<String, PathBuf>,
+    /// Rel paths the walk refused; `""` refuses the whole root.
+    refused: Vec<String>,
+}
+
+/// Whether `rel_path` is a refused path or lies under one.
+fn is_under_refused(rel_path: &str, refused: &[String]) -> bool {
+    refused.iter().any(|fence| {
+        fence.is_empty()
+            || rel_path == fence
+            || rel_path
+                .strip_prefix(fence.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
 fn collect_local_set(
     local_root: &Path,
     blacklist: &Blacklist,
     authoritative_git_workspace: bool,
-) -> Result<HashMap<String, PathBuf>> {
+) -> Result<LocalSet> {
     let config = crate::engine::CollectConfig {
         sync_git_dirs: blacklist.allows_git_dirs(),
         git_sync_mode: blacklist.git_sync_mode().to_string(),
@@ -6203,6 +6237,22 @@ fn collect_local_set(
     } else {
         crate::engine::collect_files(local_root, &config)?
     };
+    if authoritative_git_workspace {
+        // An authoritative capture must be complete; a refused entry means it
+        // is not, so fail closed instead of planning against a partial tree.
+        if let Some(refusal) = result.refusals.first() {
+            anyhow::bail!(
+                "authoritative workspace walk refused {} ({}); refusing a partial capture",
+                refusal.path.display(),
+                refusal.reason
+            );
+        }
+    }
+    let refused: Vec<String> = result
+        .refusals
+        .iter()
+        .filter_map(|refusal| refusal.rel_path_text(local_root))
+        .collect();
 
     let mut map = HashMap::new();
     for entry in result.files.into_iter().chain(result.symlinks) {
@@ -6252,7 +6302,10 @@ fn collect_local_set(
             }
         }
     }
-    Ok(map)
+    Ok(LocalSet {
+        files: map,
+        refused,
+    })
 }
 
 /// Extract a relative path from a state cache key (canonicalized absolute path).
@@ -7746,6 +7799,108 @@ mod tests {
             plan.actions.iter().any(|a| matches!(a, ReconcileAction::Push { rel_path, .. } if rel_path == "new_file.txt")),
             "push action should target new_file.txt"
         );
+    }
+
+    #[test]
+    fn refused_fence_matches_path_components_only() {
+        let refused = vec!["locked".to_string(), "a/b".to_string()];
+        assert!(is_under_refused("locked", &refused));
+        assert!(is_under_refused("locked/inner.txt", &refused));
+        assert!(is_under_refused("a/b/c/d.txt", &refused));
+        assert!(!is_under_refused("lockedness.txt", &refused));
+        assert!(!is_under_refused("a/bc.txt", &refused));
+        assert!(!is_under_refused("ok.txt", &refused));
+        assert!(is_under_refused("anything", &["".to_string()]));
+    }
+
+    // ── reconcile plan: unreadable subtree is fenced, never deleted ──────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconcile_never_infers_deletes_under_unreadable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path().join("root");
+        std::fs::create_dir_all(local_root.join("locked")).unwrap();
+        let ok = local_root.join("ok.txt");
+        let hidden = local_root.join("locked/inner.txt");
+        std::fs::write(&ok, b"visible").unwrap();
+        std::fs::write(&hidden, b"behind EACCES").unwrap();
+
+        let mut state = crate::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        for (path, rel) in [(&ok, "ok.txt"), (&hidden, "locked/inner.txt")] {
+            crate::engine::upload_file_with_device(
+                &op,
+                path,
+                "data",
+                &mut state,
+                None,
+                "neo",
+                Some(rel),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        // A remote-only sibling inside the locked directory must not be
+        // pulled into a directory this walk could not read either.
+        let elsewhere = dir.path().join("remote-only.txt");
+        std::fs::write(&elsewhere, b"published by another device").unwrap();
+        let mut other_state =
+            crate::state::StateCache::open(&dir.path().join("other-state.json")).unwrap();
+        crate::engine::upload_file_with_device(
+            &op,
+            &elsewhere,
+            "data",
+            &mut other_state,
+            None,
+            "honey",
+            Some("locked/remote-only.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let locked = local_root.join("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!(
+                "SKIPPED reconcile_never_infers_deletes_under_unreadable_directory: \
+                 running with CAP_DAC_OVERRIDE (root); EACCES cannot be produced. \
+                 Run as an unprivileged user to exercise it."
+            );
+            return;
+        }
+
+        let plan = reconcile(
+            &op,
+            &local_root,
+            "data",
+            &state,
+            "neo",
+            &Blacklist::default(),
+            &ReconcileConfig::default(),
+            None,
+        )
+        .await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plan = plan.expect("an unreadable subdirectory must not abort the root");
+
+        for action in &plan.actions {
+            let rel = action_rel_path(action);
+            assert!(
+                !rel.starts_with("locked/") && rel != "locked",
+                "no action may touch the refused subtree, got {action:?}"
+            );
+        }
+        assert_eq!(plan.summary.remote_deletes, 0);
+        assert_eq!(plan.summary.local_deletes, 0);
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| matches!(a, ReconcileAction::UpToDate { rel_path } if rel_path == "ok.txt")));
     }
 
     // ── reconcile plan: remote-only → pull ───────────────────────────────

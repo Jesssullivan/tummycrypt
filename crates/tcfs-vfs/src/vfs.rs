@@ -56,6 +56,18 @@ pub trait VirtualFilesystem: Send + Sync {
     /// The returned `u64` is a file handle ID for use with `read` and `release`.
     async fn open(&self, path: &str) -> Result<(u64, Vec<u8>)>;
 
+    /// Open a file for range reads without returning its content.
+    ///
+    /// Returns a file handle and the file's length. Backends that can serve
+    /// `read` from verified on-disk content (TIN-1419) override this so an
+    /// open costs bounded memory whatever the file size; protocol adapters
+    /// that only need `read` should call this instead of `open`. The default
+    /// falls back to `open` and discards the returned bytes.
+    async fn open_streaming(&self, path: &str) -> Result<(u64, u64)> {
+        let (fh, data) = self.open(path).await?;
+        Ok((fh, data.len() as u64))
+    }
+
     /// Read bytes from an open file handle.
     ///
     /// `fh` is the handle returned by `open`. Returns the requested slice.

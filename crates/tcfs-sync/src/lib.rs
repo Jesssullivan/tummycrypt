@@ -9,6 +9,7 @@ pub mod freshness;
 pub mod git_safety;
 pub mod git_workspace;
 pub mod index_entry;
+pub mod ingest;
 pub mod manifest;
 pub mod nats;
 pub mod path_acl;

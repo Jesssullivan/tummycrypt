@@ -159,8 +159,11 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
         let path = self.inodes.get_path(id).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        // Open + read pattern: open the file, read the requested range, release
-        let (fh, data) = tokio::time::timeout(VFS_TIMEOUT, self.vfs.open(&path))
+        // Open + read pattern: open the file for range reads, read only the
+        // requested range, release. The backend serves the range from
+        // verified cached content, so an NFS READ never copies the whole
+        // file into memory (TIN-1419).
+        let (fh, len) = tokio::time::timeout(VFS_TIMEOUT, self.vfs.open_streaming(&path))
             .await
             .map_err(|_| {
                 warn!(path = %path, "NFS READ open timed out");
@@ -171,19 +174,29 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
                 nfsstat3::NFS3ERR_IO
             })?;
 
-        let start = offset as usize;
-        let result = if start >= data.len() {
-            (Vec::new(), true)
+        let read = if offset >= len {
+            Ok(Vec::new())
         } else {
-            let end = (start + count as usize).min(data.len());
-            let eof = end >= data.len();
-            (data[start..end].to_vec(), eof)
+            tokio::time::timeout(VFS_TIMEOUT, self.vfs.read(fh, offset, count))
+                .await
+                .map_err(|_| {
+                    warn!(path = %path, "NFS READ timed out");
+                    nfsstat3::NFS3ERR_IO
+                })
+                .and_then(|result| {
+                    result.map_err(|e| {
+                        warn!(path = %path, error = %e, "NFS READ failed");
+                        nfsstat3::NFS3ERR_IO
+                    })
+                })
         };
 
-        // Release the file handle
+        // Release the file handle whatever the read did
         let _ = self.vfs.release(fh).await;
 
-        Ok(result)
+        let data = read?;
+        let eof = offset.saturating_add(data.len() as u64) >= len;
+        Ok((data, eof))
     }
 
     async fn write(&self, _id: fileid3, _offset: u64, _data: &[u8]) -> Result<fattr3, nfsstat3> {

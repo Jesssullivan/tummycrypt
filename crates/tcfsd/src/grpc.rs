@@ -3082,11 +3082,15 @@ impl TcfsDaemon for TcfsDaemonImpl {
             .map_err(tonic::Status::invalid_argument)?;
         }
 
-        let op = self.operator.lock().await;
-        let op = op
-            .as_ref()
-            .ok_or_else(|| tonic::Status::unavailable("no storage operator — check credentials"))?;
-        let op = op.clone();
+        // Clone the operator and release the mutex at once: `status` (and so
+        // `tcfs health`) takes the same mutex, and must not wait out a long
+        // or stalled transfer and read as DAEMON_DOWN.
+        let op = {
+            let operator = self.operator.lock().await;
+            operator.as_ref().cloned().ok_or_else(|| {
+                tonic::Status::unavailable("no storage operator — check credentials")
+            })?
+        };
 
         let lock_path = self.lock_path_for_request(Path::new(&path));
         let _lock_guard = self.path_locks.lock(&lock_path).await;
@@ -3512,11 +3516,15 @@ impl TcfsDaemon for TcfsDaemonImpl {
         validate_pull_destination(&self.config, &local_path, &local_rel_path)
             .map_err(tonic::Status::invalid_argument)?;
 
-        let op = self.operator.lock().await;
-        let op = op
-            .as_ref()
-            .ok_or_else(|| tonic::Status::unavailable("no storage operator — check credentials"))?;
-        let op = op.clone();
+        // Clone the operator and release the mutex at once: `status` (and so
+        // `tcfs health`) takes the same mutex, and must not wait out a long
+        // or stalled transfer and read as DAEMON_DOWN.
+        let op = {
+            let operator = self.operator.lock().await;
+            operator.as_ref().cloned().ok_or_else(|| {
+                tonic::Status::unavailable("no storage operator — check credentials")
+            })?
+        };
 
         let prefix = self.config.storage.resolved_prefix().to_string();
         let state_cache = self.state_cache.clone();
@@ -10350,6 +10358,53 @@ mod tests {
 
         assert!(!resp.success);
         assert!(resp.error.contains("mountpoint is required"));
+    }
+
+    #[tokio::test]
+    async fn status_answers_while_a_pull_is_in_flight() {
+        let primary = tempfile::tempdir().unwrap();
+        let sync_root = primary.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let op = memory_operator();
+        seed_remote_file(&op, "docs/held.txt").await;
+        let daemon = primary_io_test_daemon(&primary, &sync_root, Some(op), None, false);
+
+        // Hold the destination's path lock so the pull stalls mid-RPC, the
+        // way a long transfer or a blackholed backend holds it.
+        let output_path = sync_root.join("held.txt");
+        let (local_path, _) =
+            primary_sync_root_target(&daemon.config, &output_path, "pull").unwrap();
+        let locks = daemon.path_locks.clone();
+        let held = locks.lock(&local_path).await;
+
+        let (socket_dir, server_handle, shutdown) = spawn_test_server(daemon).await;
+        let socket_path = socket_dir.path().join("tcfsd.sock");
+        let mut puller = connect_test_client(&socket_path).await;
+        let pull = tokio::spawn(async move {
+            puller
+                .pull(tonic::Request::new(PullRequest {
+                    remote_path: "docs/held.txt".into(),
+                    local_path: output_path.display().to_string(),
+                }))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!pull.is_finished(), "fixture must stall the pull");
+
+        let mut prober = connect_test_client(&socket_path).await;
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            prober.status(tonic::Request::new(StatusRequest {})),
+        )
+        .await
+        .expect("status must not wait for an in-flight pull")
+        .expect("status RPC");
+        assert!(status.into_inner().storage_ok);
+
+        drop(held);
+        let _ = pull.await;
+        shutdown.notify_one();
+        let _ = server_handle.await;
     }
 
     #[tokio::test]

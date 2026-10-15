@@ -72,6 +72,12 @@ The missing part is single-read ingest, not the type.
 Large-file hydration is a separate gap. It assembles the whole file in RAM,
 one chunk after another (TIN-1419, streaming large-file IO).
 
+Update: the single-read port (`crates/tcfs-sync/src/ingest.rs`), the typed
+walker refusals and bounded-memory, range-served hydration
+(`crates/tcfs-vfs/src/hydrate.rs`) are implemented alongside
+[first-user-mac-cohort.md](first-user-mac-cohort.md). That page lists the
+read counts before and after, and the gaps that remain.
+
 ## No cross-product chunk dedup
 
 When encryption is enabled (the `crypto` feature on and a file key present),

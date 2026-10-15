@@ -1667,6 +1667,11 @@ pub struct CollectResult {
     pub symlinks: Vec<PathBuf>,
     /// Empty directories (no files after exclusions) to create markers for.
     pub empty_dirs: Vec<PathBuf>,
+    /// Entries the walk refused (non-UTF-8 names, unreadable directories or
+    /// entries). The walk continued past each one. Nothing under a refused
+    /// directory was collected, so a caller must never infer that a tracked
+    /// path under one was deleted.
+    pub refusals: Vec<crate::ingest::CollectRefusal>,
 }
 
 /// Result of uploading a single file
@@ -1696,34 +1701,232 @@ struct UploadSnapshot {
     file_hash_hex: String,
     file_size: u64,
     source: UploadSourceSnapshot,
+    /// Stat identity of the descriptor the capture read, taken before the
+    /// read and confirmed unchanged after it. `None` on platforms without
+    /// POSIX inode metadata.
+    identity: Option<crate::freshness::StatIdentity>,
+    /// The identity cannot vouch for the bytes (see `crate::ingest`), so
+    /// later checks must re-verify the content.
+    racy: bool,
+    /// Permission bits from the capture `fstat`: the manifest records the
+    /// mode of the bytes it publishes, not of a later version of the file.
+    mode: Option<u32>,
+    /// Modification time from the capture `fstat`, for the same reason.
+    mtime: Option<SystemTime>,
 }
 
-fn prepare_upload_snapshot(local_path: &Path, use_streaming: bool) -> Result<UploadSnapshot> {
-    if use_streaming {
-        let (chunks, file_hash) = tcfs_chunks::chunk_file_streaming_metadata(local_path)
-            .with_context(|| {
-                format!(
-                    "streaming chunk metadata for upload snapshot: {}",
-                    local_path.display()
-                )
-            })?;
-        let file_size = chunks.iter().map(|chunk| chunk.length as u64).sum();
-        let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
-        Ok(UploadSnapshot {
-            file_hash_hex,
-            file_size,
-            source: UploadSourceSnapshot::Streaming(chunks),
-        })
-    } else {
-        let data = std::fs::read(local_path)
-            .with_context(|| format!("reading upload snapshot: {}", local_path.display()))?;
-        let file_hash_hex = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data));
-        Ok(UploadSnapshot {
-            file_hash_hex,
-            file_size: data.len() as u64,
-            source: UploadSourceSnapshot::InMemory(data),
-        })
+/// Capture `local_path` for upload under the single-read discipline in
+/// [`crate::ingest`]: one read between two stat checks of the same
+/// descriptor, retried while the source is torn, refused with
+/// [`crate::ingest::SourceChanged`] if it keeps changing.
+///
+/// Each attempt chooses the in-memory or streaming capture from its own
+/// descriptor's `fstat`, so a file that grew past the streaming threshold is
+/// never buffered whole on a retry.
+fn prepare_upload_snapshot(local_path: &Path) -> Result<UploadSnapshot> {
+    let mut last_change = None;
+    for attempt in 0..crate::ingest::CAPTURE_ATTEMPTS {
+        match capture_upload_snapshot(local_path, attempt)? {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(change) => {
+                debug!(
+                    path = %local_path.display(),
+                    attempt,
+                    detail = %change.detail,
+                    "upload capture torn; retrying"
+                );
+                last_change = Some(change);
+            }
+        }
     }
+    let change = last_change.unwrap_or_else(|| {
+        crate::ingest::SourceChanged::new(local_path, "upload capture", "no capture attempted")
+    });
+    Err(anyhow::Error::new(change))
+}
+
+/// One capture attempt. The outer `Result` is an I/O failure; the inner one
+/// says whether the capture was torn by a concurrent change.
+fn capture_upload_snapshot(
+    local_path: &Path,
+    attempt: u32,
+) -> Result<std::result::Result<UploadSnapshot, crate::ingest::SourceChanged>> {
+    use crate::ingest::SourceChanged;
+    const STAGE: &str = "upload capture";
+
+    let started_ns = crate::ingest::now_ns();
+    let mut file = std::fs::File::open(local_path)
+        .with_context(|| format!("opening upload source: {}", local_path.display()))?;
+    let before_meta = file
+        .metadata()
+        .with_context(|| format!("stat for upload capture: {}", local_path.display()))?;
+    anyhow::ensure!(
+        before_meta.is_file(),
+        "upload source is not a regular file: {}",
+        local_path.display()
+    );
+    let before = crate::freshness::stat_identity(&before_meta);
+    let expected_len = before_meta.len();
+    let use_streaming = expected_len >= crate::ingest::streaming_threshold();
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(before_meta.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let mode: Option<u32> = None;
+    let mtime = before_meta.modified().ok();
+    crate::ingest::before_capture_read(local_path, attempt);
+
+    let (file_hash_hex, bytes_read, source) = if use_streaming {
+        let metadata = tcfs_chunks::chunk_reader_streaming_metadata(
+            &mut file,
+            tcfs_chunks::ChunkSizes::for_path(local_path),
+        )
+        .with_context(|| {
+            format!(
+                "streaming chunk metadata for upload snapshot: {}",
+                local_path.display()
+            )
+        })?;
+        crate::ingest::note_source_read(local_path, metadata.bytes_read);
+        (
+            tcfs_chunks::hash_to_hex(&metadata.file_hash),
+            metadata.bytes_read,
+            UploadSourceSnapshot::Streaming(metadata.chunks),
+        )
+    } else {
+        // Read at most one byte past the fstat size: a file that grew after
+        // the stat is torn, and must never be buffered whole in memory.
+        let mut data = Vec::with_capacity(usize::try_from(expected_len).unwrap_or(0));
+        (&mut file)
+            .take(expected_len.saturating_add(1))
+            .read_to_end(&mut data)
+            .with_context(|| format!("reading upload snapshot: {}", local_path.display()))?;
+        crate::ingest::note_source_read(local_path, data.len() as u64);
+        (
+            tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data)),
+            data.len() as u64,
+            UploadSourceSnapshot::InMemory(data),
+        )
+    };
+    crate::ingest::after_capture_read(local_path, attempt);
+
+    let after = crate::ingest::fd_identity(&file)
+        .with_context(|| format!("stat after upload capture: {}", local_path.display()))?;
+    let at_path = match crate::ingest::path_identity(local_path) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Err(SourceChanged::new(
+                local_path,
+                STAGE,
+                "source disappeared during read",
+            )));
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "stat after upload capture: {}",
+                local_path.display()
+            )));
+        }
+    };
+    let ended_ns = crate::ingest::now_ns();
+
+    if bytes_read != expected_len {
+        return Ok(Err(SourceChanged::new(
+            local_path,
+            STAGE,
+            format!("read {bytes_read} bytes but stat said {expected_len}"),
+        )));
+    }
+    if after != before {
+        return Ok(Err(SourceChanged::new(
+            local_path,
+            STAGE,
+            "stat identity moved during read",
+        )));
+    }
+    if at_path != before {
+        return Ok(Err(SourceChanged::new(
+            local_path,
+            STAGE,
+            "path names a different file after read",
+        )));
+    }
+
+    Ok(Ok(UploadSnapshot {
+        file_hash_hex,
+        file_size: bytes_read,
+        source,
+        identity: before,
+        racy: crate::ingest::is_racy(before.as_ref(), started_ns, ended_ns),
+        mode,
+        mtime,
+    }))
+}
+
+/// Build the state entry for an upload (or skip) of `snapshot` from the
+/// capture's own `fstat`, not from a stat taken after the network work.
+///
+/// A fresh stat would describe whatever the file is *now*: a same-size edit
+/// that landed during the manifest publish would be recorded as synced, and
+/// `needs_sync` would never upload it. The captured size and mtime describe
+/// the bytes that were actually published. If the path's stat identity has
+/// moved since the capture, the recorded mtime is one no file has (0), so the
+/// next `needs_sync` re-hashes the file instead of trusting its stat.
+///
+/// Platforms without POSIX stat identity keep the previous behaviour.
+fn make_sync_state_from_snapshot(
+    local_path: &Path,
+    snapshot: &UploadSnapshot,
+    chunk_count: usize,
+    remote_path: String,
+    vclock: VectorClock,
+    device_id: String,
+) -> Result<SyncState> {
+    let Some(captured) = snapshot.identity else {
+        return make_sync_state_full(
+            local_path,
+            snapshot.file_hash_hex.clone(),
+            chunk_count,
+            remote_path,
+            vclock,
+            device_id,
+        );
+    };
+    let moved = match crate::ingest::path_identity(local_path) {
+        Ok(Some(current)) => current != captured,
+        Ok(None) | Err(_) => true,
+    };
+    let mtime = if moved {
+        debug!(
+            path = %local_path.display(),
+            "source moved after capture; recording it for re-verification"
+        );
+        0
+    } else {
+        snapshot
+            .mtime
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(SyncState {
+        blake3: snapshot.file_hash_hex.clone(),
+        size: snapshot.file_size,
+        mtime,
+        chunk_count,
+        remote_path,
+        last_synced: now,
+        vclock,
+        device_id,
+        conflict: None,
+        status: FileSyncStatus::Synced,
+    })
 }
 
 fn read_verified_snapshot_chunk_from(
@@ -1738,55 +1941,91 @@ fn read_verified_snapshot_chunk_from(
     let mut data = vec![0u8; chunk.length];
     file.read_exact(&mut data)
         .with_context(|| format!("reading chunk {chunk_idx}: {}", local_path.display()))?;
+    crate::ingest::note_source_read(local_path, data.len() as u64);
 
     let actual_hash = tcfs_chunks::hash_bytes(&data);
     if actual_hash != chunk.hash {
-        anyhow::bail!(
-            "file changed during streaming upload: chunk {chunk_idx} hash mismatch for {}",
-            local_path.display()
-        );
+        return Err(anyhow::Error::new(crate::ingest::SourceChanged::new(
+            local_path,
+            "streaming upload",
+            format!("chunk {chunk_idx} hash mismatch"),
+        )));
     }
 
     Ok(data)
 }
 
+/// Confirm the source still is the captured file before acting on the
+/// capture. A settled capture is confirmed by stat identity alone (no read);
+/// a racy one is also re-hashed, as tcfs always did.
 fn ensure_source_matches_snapshot(
     local_path: &Path,
     snapshot: &UploadSnapshot,
     stage: &str,
 ) -> Result<()> {
-    let current_meta = std::fs::metadata(local_path)
-        .with_context(|| format!("stat during {stage}: {}", local_path.display()))?;
+    use crate::ingest::SourceChanged;
+
+    let current_meta = match std::fs::metadata(local_path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow::Error::new(SourceChanged::new(
+                local_path,
+                stage,
+                "source disappeared",
+            )));
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("stat during {stage}: {}", local_path.display())));
+        }
+    };
     if current_meta.len() != snapshot.file_size {
-        anyhow::bail!(
-            "file changed during {stage}: size mismatch for {} (snapshot={} current={})",
-            local_path.display(),
-            snapshot.file_size,
-            current_meta.len()
-        );
+        return Err(anyhow::Error::new(SourceChanged::new(
+            local_path,
+            stage,
+            format!(
+                "size mismatch (snapshot={} current={})",
+                snapshot.file_size,
+                current_meta.len()
+            ),
+        )));
+    }
+    if crate::freshness::stat_identity(&current_meta) != snapshot.identity {
+        return Err(anyhow::Error::new(SourceChanged::new(
+            local_path,
+            stage,
+            "stat identity moved",
+        )));
+    }
+    if !snapshot.racy {
+        return Ok(());
     }
 
     let current_hash_hex = match snapshot.source {
         UploadSourceSnapshot::InMemory(_) => {
             let data = std::fs::read(local_path)
                 .with_context(|| format!("reading during {stage}: {}", local_path.display()))?;
+            crate::ingest::note_source_read(local_path, data.len() as u64);
             tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
         }
         UploadSourceSnapshot::Streaming(_) => {
             let hash = tcfs_chunks::hash_file_streaming(local_path).with_context(|| {
                 format!("streaming hash during {stage}: {}", local_path.display())
             })?;
+            crate::ingest::note_source_read(local_path, snapshot.file_size);
             tcfs_chunks::hash_to_hex(&hash)
         }
     };
 
     if current_hash_hex != snapshot.file_hash_hex {
-        anyhow::bail!(
-            "file changed during {stage}: hash mismatch for {} (snapshot={} current={})",
-            local_path.display(),
-            snapshot.file_hash_hex,
-            current_hash_hex
-        );
+        return Err(anyhow::Error::new(SourceChanged::new(
+            local_path,
+            stage,
+            format!(
+                "hash mismatch (snapshot={} current={})",
+                snapshot.file_hash_hex, current_hash_hex
+            ),
+        )));
     }
 
     Ok(())
@@ -2138,19 +2377,13 @@ where
     ensure_publish_storage_semantics(op, remote_prefix).await?;
 
     // Tiered chunking: files below STREAMING_THRESHOLD are read into memory,
-    // larger files use streaming chunking. In both cases we derive the file
-    // hash from the same snapshot bytes that will be uploaded.
-    let file_meta = std::fs::metadata(local_path)
-        .with_context(|| format!("stat for chunking: {}", local_path.display()))?;
-    let use_streaming = file_meta.len() >= tcfs_chunks::STREAMING_THRESHOLD;
+    // larger files use streaming chunking. In both cases the file hash comes
+    // from the same single capture read as the uploaded bytes, and later
+    // "did it change?" checks are stat-identity checks (crate::ingest).
     let prepare_started = std::time::Instant::now();
-    debug!(
-        path = %local_path.display(),
-        bytes = file_meta.len(),
-        streaming = use_streaming,
-        "preparing upload snapshot"
-    );
-    let snapshot = prepare_upload_snapshot(local_path, use_streaming)?;
+    debug!(path = %local_path.display(), "preparing upload snapshot");
+    let snapshot = prepare_upload_snapshot(local_path)?;
+    let use_streaming = matches!(snapshot.source, UploadSourceSnapshot::Streaming(_));
     let snapshot_chunks = match &snapshot.source {
         UploadSourceSnapshot::InMemory(_) => 0,
         UploadSourceSnapshot::Streaming(chunks) => chunks.len(),
@@ -2386,9 +2619,9 @@ where
                     let mut conflict_info = conflict_info.clone();
                     conflict_info.remote_manifest_key = Some(remote_manifest_path.clone());
                     // Record local state with conflict info so `tcfs resolve` can find it
-                    let mut sync_state = make_sync_state_full(
+                    let mut sync_state = make_sync_state_from_snapshot(
                         local_path,
-                        file_hash_hex.clone(),
+                        &snapshot,
                         0,
                         remote_manifest_path.clone(),
                         local_vclock,
@@ -2416,9 +2649,9 @@ where
                         .clone()
                         .unwrap_or_else(|| remote_manifest.clone());
                     // Content dedup — already up to date
-                    let sync_state = make_sync_state_full(
+                    let sync_state = make_sync_state_from_snapshot(
                         local_path,
-                        file_hash_hex.clone(),
+                        &snapshot,
                         0,
                         remote_manifest_path.clone(),
                         local_vclock,
@@ -2474,9 +2707,9 @@ where
         let chunk_count = existing_manifest.chunk_hashes().len();
 
         let remote_path = remote_manifest.clone();
-        let sync_state = make_sync_state_full(
+        let sync_state = make_sync_state_from_snapshot(
             local_path,
-            file_hash_hex.clone(),
+            &snapshot,
             chunk_count,
             remote_path.clone(),
             local_vclock,
@@ -2553,6 +2786,21 @@ where
                 local_path.display()
             )
         })?;
+        // The second pass must read the captured file, not whatever was
+        // renamed over its path since; every chunk is re-verified below.
+        let reopened = crate::ingest::fd_identity(&snapshot_file).with_context(|| {
+            format!(
+                "stat of streaming upload source after snapshot: {}",
+                local_path.display()
+            )
+        })?;
+        if reopened != snapshot.identity {
+            return Err(anyhow::Error::new(crate::ingest::SourceChanged::new(
+                local_path,
+                "streaming upload",
+                "stat identity moved before upload read",
+            )));
+        }
 
         for (i, chunk) in streaming_chunks.iter().enumerate() {
             let chunk_data =
@@ -2859,23 +3107,13 @@ where
     #[cfg(not(feature = "crypto"))]
     let manifest_version: u32 = 2;
 
-    // Capture Unix file permissions and the source mtime for cross-device
-    // preservation, both from the SAME metadata read so they describe one stat
-    // of the file (no TOCTOU drift between the two). The mtime keeps a restored
-    // tree's timestamps intact so `git status` does not report spurious dirty
-    // (TIN-1620 T13-Z).
-    let source_metadata = std::fs::metadata(local_path).ok();
-    #[cfg(unix)]
-    let file_mode = {
-        use std::os::unix::fs::PermissionsExt;
-        source_metadata.as_ref().map(|m| m.permissions().mode())
-    };
-    #[cfg(not(unix))]
-    let file_mode: Option<u32> = None;
-    let file_mtime: Option<(i64, u32)> = source_metadata
-        .as_ref()
-        .and_then(|m| m.modified().ok())
-        .map(systemtime_to_unix_parts);
+    // Unix file permissions and the source mtime for cross-device
+    // preservation, both from the capture's own `fstat`, so they describe the
+    // bytes being published rather than a later version of the file. The
+    // mtime keeps a restored tree's timestamps intact so `git status` does not
+    // report spurious dirty (TIN-1620 T13-Z).
+    let file_mode = snapshot.mode;
+    let file_mtime: Option<(i64, u32)> = snapshot.mtime.map(systemtime_to_unix_parts);
 
     // Build and upload the manifest. Version is 2 for Master/Dual and 3 for
     // PerDevice (see the wrap-mode branch above) so pre-per-device binaries fail
@@ -2958,10 +3196,11 @@ where
         "uploaded"
     );
 
-    // Update state cache
-    let sync_state = make_sync_state_full(
+    // Update state cache from the capture, then check the source did not
+    // move while the manifest was published (see the builder).
+    let sync_state = make_sync_state_from_snapshot(
         local_path,
-        file_hash_hex.clone(),
+        &snapshot,
         num_chunks,
         remote_manifest.clone(),
         local_vclock,
@@ -4510,6 +4749,15 @@ async fn push_tree_with_device_with_runtime(
 
     let cfg = collect_cfg.cloned().unwrap_or_default();
     let result = collect_files(local_root, &cfg)?;
+    if !result.refusals.is_empty() {
+        // Each refusal was already logged with its reason; one summary line
+        // keeps a partial push visible in the push log.
+        warn!(
+            root = %local_root.display(),
+            refused = result.refusals.len(),
+            "push: some entries were refused by the walk and not uploaded"
+        );
+    }
     let total = result.files.len() + result.symlinks.len();
     let remote_prefix = remote_path_prefix(remote_prefix);
 
@@ -4803,6 +5051,7 @@ fn collect_files_with_bundle_scope(
             files,
             symlinks,
             empty_dirs,
+            refusals: Vec::new(),
         });
     }
     // Track visited canonical paths for symlink cycle detection
@@ -4810,14 +5059,19 @@ fn collect_files_with_bundle_scope(
     if let Ok(canon) = std::fs::canonicalize(root) {
         visited.insert(canon);
     }
+    let mut refusals = Vec::new();
     collect_files_inner(
         root,
-        &mut files,
-        &mut symlinks,
-        &mut empty_dirs,
+        &mut CollectSink {
+            out: &mut files,
+            symlinks: &mut symlinks,
+            empty_dirs: &mut empty_dirs,
+            refusals: &mut refusals,
+        },
         config,
         &blacklist,
         &mut visited,
+        true,
     )?;
 
     // Bundle mode: for every enrolled git repo, capture `.git` as a single
@@ -4841,188 +5095,252 @@ fn collect_files_with_bundle_scope(
     symlinks.sort();
     symlinks.dedup();
     empty_dirs.sort();
+    refusals.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(CollectResult {
         files,
         symlinks,
         empty_dirs,
+        refusals,
     })
+}
+
+/// Mutable outputs of one collection walk.
+struct CollectSink<'a> {
+    out: &'a mut Vec<PathBuf>,
+    symlinks: &'a mut Vec<PathBuf>,
+    empty_dirs: &'a mut Vec<PathBuf>,
+    refusals: &'a mut Vec<crate::ingest::CollectRefusal>,
 }
 
 fn collect_files_inner(
     dir: &Path,
-    out: &mut Vec<PathBuf>,
-    symlinks: &mut Vec<PathBuf>,
-    empty_dirs: &mut Vec<PathBuf>,
+    sink: &mut CollectSink<'_>,
     config: &CollectConfig,
     blacklist: &Blacklist,
     visited: &mut std::collections::HashSet<PathBuf>,
+    is_root: bool,
 ) -> Result<()> {
-    let before = out.len();
-    let before_symlinks = symlinks.len();
+    use crate::ingest::{CollectRefusal, CollectRefusalReason};
 
-    for entry in
-        std::fs::read_dir(dir).with_context(|| format!("reading dir: {}", dir.display()))?
-    {
-        let entry = entry.context("reading dir entry")?;
+    let before = sink.out.len();
+    let before_symlinks = sink.symlinks.len();
+    let before_refusals = sink.refusals.len();
+
+    // The root itself must be listable: an unreadable root is an error, not
+    // an empty tree. Below the root, an unreadable directory is a typed
+    // refusal of its subtree and the walk continues (bulkload walk.rs).
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if !is_root => {
+            warn!(
+                path = %dir.display(),
+                error = %error,
+                "refusing unreadable directory subtree"
+            );
+            sink.refusals.push(CollectRefusal::io(dir, &error, true));
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error))
+                .with_context(|| format!("reading dir: {}", dir.display()));
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                // A listing that fails part way is incomplete: refuse the
+                // whole directory so nothing absent from it reads as deleted.
+                warn!(
+                    path = %dir.display(),
+                    error = %error,
+                    "directory listing failed part way; refusing subtree"
+                );
+                sink.refusals.push(CollectRefusal::io(dir, &error, true));
+                break;
+            }
+        };
         let path = entry.path();
 
         // Use file_type() (doesn't follow symlinks) for initial dispatch
-        let ft = entry.file_type().context("file_type dir entry")?;
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(error) => {
+                warn!(path = %path.display(), error = %error, "refusing entry: type unreadable");
+                sink.refusals.push(CollectRefusal::io(&path, &error, false));
+                continue;
+            }
+        };
 
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            // This path is a generated transport artifact, never ordinary
-            // workspace content. Bundle mode adds it back only after a fresh,
-            // successful Git safety check and snapshot.
-            if name == crate::git_safety::GIT_BUNDLE_REL_PATH {
-                debug!(path = %path.display(), "skipping stale generated Git bundle");
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            // A remote index key is UTF-8 text, so this entry (and, for a
+            // directory, its subtree) cannot be carried. Report it with its
+            // exact bytes rather than dropping it silently.
+            warn!(
+                path = %path.display(),
+                directory = ft.is_dir(),
+                "refusing entry: name is not valid UTF-8"
+            );
+            sink.refusals.push(CollectRefusal {
+                path,
+                reason: CollectRefusalReason::NonUtf8Name,
+            });
+            continue;
+        };
+        // This path is a generated transport artifact, never ordinary
+        // workspace content. Bundle mode adds it back only after a fresh,
+        // successful Git safety check and snapshot.
+        if name == crate::git_safety::GIT_BUNDLE_REL_PATH {
+            debug!(path = %path.display(), "skipping stale generated Git bundle");
+            continue;
+        }
+
+        // Full-path check (not just the name): the fail-closed
+        // `.git/worktrees/` fence needs path context so the per-worktree
+        // admin area is never collected even in raw mode (G5 / TIN-1620).
+        if let Some(reason) = blacklist.check(&path, ft.is_dir()) {
+            match &reason {
+                BlacklistReason::Security(_) => warn!(
+                    path = %path.display(),
+                    reason = %reason,
+                    "skipping path: security deny-set"
+                ),
+                _ => debug!(
+                    path = %path.display(),
+                    reason = %reason,
+                    "skipping path: blacklist"
+                ),
+            }
+            continue;
+        }
+
+        // Handle symlinks explicitly
+        if ft.is_symlink() {
+            let target = std::fs::read_link(&path).unwrap_or_default();
+            if let Some(reason) = blacklist.check_security_path_components(&target) {
+                warn!(
+                    path = %path.display(),
+                    target = %target.display(),
+                    reason = %reason,
+                    "skipping symlink: target matches security deny-set"
+                );
                 continue;
             }
 
-            // Full-path check (not just the name): the fail-closed
-            // `.git/worktrees/` fence needs path context so the per-worktree
-            // admin area is never collected even in raw mode (G5 / TIN-1620).
-            if let Some(reason) = blacklist.check(&path, ft.is_dir()) {
-                match &reason {
-                    BlacklistReason::Security(_) => warn!(
-                        path = %path.display(),
-                        reason = %reason,
-                        "skipping path: security deny-set"
-                    ),
-                    _ => debug!(
-                        path = %path.display(),
-                        reason = %reason,
-                        "skipping path: blacklist"
-                    ),
-                }
+            if config.preserve_symlinks {
+                sink.symlinks.push(path);
                 continue;
             }
 
-            // Handle symlinks explicitly
-            if ft.is_symlink() {
-                let target = std::fs::read_link(&path).unwrap_or_default();
-                if let Some(reason) = blacklist.check_security_path_components(&target) {
-                    warn!(
-                        path = %path.display(),
-                        target = %target.display(),
-                        reason = %reason,
-                        "skipping symlink: target matches security deny-set"
-                    );
-                    continue;
-                }
+            if !config.follow_symlinks {
+                warn!(
+                    path = %path.display(),
+                    target = %target.display(),
+                    "skipping symlink (follow_symlinks=false)"
+                );
+                continue;
+            }
 
-                if config.preserve_symlinks {
-                    symlinks.push(path);
-                    continue;
-                }
-
-                if !config.follow_symlinks {
-                    warn!(
-                        path = %path.display(),
-                        target = %target.display(),
-                        "skipping symlink (follow_symlinks=false)"
-                    );
-                    continue;
-                }
-
-                // Follow the symlink — resolve target and check for cycles
-                match std::fs::canonicalize(&path) {
-                    Ok(real) => {
-                        if let Some(reason) = blacklist.check_security_path_components(&real) {
-                            warn!(
-                                path = %path.display(),
-                                target = %real.display(),
-                                reason = %reason,
-                                "skipping symlink: resolved target matches security deny-set"
-                            );
-                            continue;
-                        }
-                        if !visited.insert(real.clone()) {
-                            warn!(
-                                path = %path.display(),
-                                target = %real.display(),
-                                "skipping symlink: cycle detected"
-                            );
-                            continue;
-                        }
-                        // Check what the resolved target actually is
-                        match std::fs::metadata(&real) {
-                            Ok(meta) if meta.is_dir() => {
-                                collect_files_inner(
-                                    &path, out, symlinks, empty_dirs, config, blacklist, visited,
-                                )?;
-                            }
-                            Ok(meta) if meta.is_file() => {
-                                out.push(path);
-                            }
-                            Ok(_) => {} // special file, skip
-                            Err(e) => {
-                                warn!(
-                                    path = %path.display(),
-                                    target = %real.display(),
-                                    "skipping symlink: stat target failed: {e}"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Broken symlink — canonicalize fails
+            // Follow the symlink — resolve target and check for cycles
+            match std::fs::canonicalize(&path) {
+                Ok(real) => {
+                    if let Some(reason) = blacklist.check_security_path_components(&real) {
                         warn!(
                             path = %path.display(),
-                            "skipping broken symlink: {e}"
+                            target = %real.display(),
+                            reason = %reason,
+                            "skipping symlink: resolved target matches security deny-set"
                         );
+                        continue;
                     }
+                    if !visited.insert(real.clone()) {
+                        warn!(
+                            path = %path.display(),
+                            target = %real.display(),
+                            "skipping symlink: cycle detected"
+                        );
+                        continue;
+                    }
+                    // Check what the resolved target actually is
+                    match std::fs::metadata(&real) {
+                        Ok(meta) if meta.is_dir() => {
+                            collect_files_inner(&path, sink, config, blacklist, visited, false)?;
+                        }
+                        Ok(meta) if meta.is_file() => {
+                            sink.out.push(path);
+                        }
+                        Ok(_) => {} // special file, skip
+                        Err(e) => {
+                            warn!(
+                                path = %path.display(),
+                                target = %real.display(),
+                                "skipping symlink: stat target failed: {e}"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Broken symlink — canonicalize fails
+                    warn!(
+                        path = %path.display(),
+                        "skipping broken symlink: {e}"
+                    );
+                }
+            }
+            continue;
+        }
+
+        if ft.is_dir() {
+            // Track visited directories — skip if already traversed
+            // (prevents re-traversal when a symlink was followed first)
+            if let Ok(canon) = std::fs::canonicalize(&path) {
+                if !visited.insert(canon) {
+                    continue;
+                }
+            }
+
+            // Handle .git directories
+            if name == ".git" {
+                if config.sync_git_dirs {
+                    // Validate safety before including
+                    let safety = crate::git_safety::git_is_safe(&path);
+                    if !safety.blocking.is_empty() {
+                        warn!(
+                            path = %path.display(),
+                            blocking = ?safety.blocking,
+                            "skipping .git dir: active operations detected"
+                        );
+                        continue;
+                    }
+                    for w in &safety.warnings {
+                        warn!(path = %path.display(), warning = %w, "git safety warning");
+                    }
+                    // In bundle mode, skip raw .git and handle at a higher level
+                    if config.git_sync_mode == "bundle" {
+                        continue;
+                    }
+                    // In raw mode, recurse into .git
+                    collect_files_inner(&path, sink, config, blacklist, visited, false)?;
                 }
                 continue;
             }
 
-            if ft.is_dir() {
-                // Track visited directories — skip if already traversed
-                // (prevents re-traversal when a symlink was followed first)
-                if let Ok(canon) = std::fs::canonicalize(&path) {
-                    if !visited.insert(canon) {
-                        continue;
-                    }
-                }
-
-                // Handle .git directories
-                if name == ".git" {
-                    if config.sync_git_dirs {
-                        // Validate safety before including
-                        let safety = crate::git_safety::git_is_safe(&path);
-                        if !safety.blocking.is_empty() {
-                            warn!(
-                                path = %path.display(),
-                                blocking = ?safety.blocking,
-                                "skipping .git dir: active operations detected"
-                            );
-                            continue;
-                        }
-                        for w in &safety.warnings {
-                            warn!(path = %path.display(), warning = %w, "git safety warning");
-                        }
-                        // In bundle mode, skip raw .git and handle at a higher level
-                        if config.git_sync_mode == "bundle" {
-                            continue;
-                        }
-                        // In raw mode, recurse into .git
-                        collect_files_inner(
-                            &path, out, symlinks, empty_dirs, config, blacklist, visited,
-                        )?;
-                    }
-                    continue;
-                }
-
-                collect_files_inner(&path, out, symlinks, empty_dirs, config, blacklist, visited)?;
-            } else if ft.is_file() {
-                out.push(path);
-            }
+            collect_files_inner(&path, sink, config, blacklist, visited, false)?;
+        } else if ft.is_file() {
+            sink.out.push(path);
         }
     }
 
     // If no files were collected from this directory (directly or via
-    // subdirectories) and we're tracking empty dirs, record it as empty.
-    if config.sync_empty_dirs && out.len() == before && symlinks.len() == before_symlinks {
-        empty_dirs.push(dir.to_path_buf());
+    // subdirectories) and we're tracking empty dirs, record it as empty. A
+    // directory with any refusal under it is not known to be empty.
+    if config.sync_empty_dirs
+        && sink.out.len() == before
+        && sink.symlinks.len() == before_symlinks
+        && sink.refusals.len() == before_refusals
+    {
+        sink.empty_dirs.push(dir.to_path_buf());
     }
 
     Ok(())
@@ -5093,10 +5411,15 @@ fn find_git_repos(dir: &Path, out: &mut Vec<PathBuf>) {
         if !ft.is_dir() {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        let Some(name) = path.file_name() else {
             continue;
         };
-        if name == ".git" {
+        if name == std::ffi::OsStr::new(".git") {
+            continue;
+        }
+        if name.to_str().is_none() {
+            // Refused (and reported) by `collect_files_inner`: a bundle under
+            // a non-UTF-8 directory would have no remote key either.
             continue;
         }
         find_git_repos(&path, out);
@@ -5141,16 +5464,17 @@ fn find_git_bundles(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name == crate::git_safety::GIT_BUNDLE_REL_PATH {
-                out.push(path.clone());
-            }
+        let name = path.file_name();
+        if name == Some(std::ffi::OsStr::new(crate::git_safety::GIT_BUNDLE_REL_PATH)) {
+            out.push(path.clone());
         }
         if ft.is_dir() {
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            if name == Some(std::ffi::OsStr::new(".git")) {
                 continue;
-            };
-            if name == ".git" {
+            }
+            // tcfs never manages a subtree under a non-UTF-8 name (the
+            // collector refuses it), so it never restores Git into one.
+            if name.and_then(std::ffi::OsStr::to_str).is_none() {
                 continue;
             }
             find_git_bundles(&path, out);
@@ -6016,7 +6340,8 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &data).unwrap();
 
-        let snapshot = prepare_upload_snapshot(tmp.path(), true).unwrap();
+        let _streaming = crate::ingest::test_support::StreamingThreshold::set(1);
+        let snapshot = prepare_upload_snapshot(tmp.path()).unwrap();
 
         assert_eq!(snapshot.file_size, data.len() as u64);
         assert_eq!(
@@ -6040,7 +6365,8 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &data).unwrap();
 
-        let snapshot = prepare_upload_snapshot(tmp.path(), true).unwrap();
+        let _streaming = crate::ingest::test_support::StreamingThreshold::set(1);
+        let snapshot = prepare_upload_snapshot(tmp.path()).unwrap();
         let UploadSourceSnapshot::Streaming(chunks) = snapshot.source else {
             panic!("streaming snapshot should keep chunk metadata");
         };
@@ -10219,6 +10545,448 @@ mod tests {
             state.get(&local).is_none(),
             "state cache must not be updated after a detected write race"
         );
+    }
+
+    // ── single-read ingest (bulkload discipline) ─────────────────────────
+
+    fn patterned_bytes(len: usize, salt: u64) -> Vec<u8> {
+        (0..len as u64)
+            .map(|i| (i.wrapping_mul(31).wrapping_add(salt) ^ (i >> 7)) as u8)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn settled_in_memory_upload_reads_source_exactly_once() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("once.bin");
+        let data = patterned_bytes(96 * 1024, 1);
+        std::fs::write(&local, &data).unwrap();
+
+        let result = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+
+        assert!(!result.skipped);
+        assert_eq!(result.bytes, data.len() as u64);
+        assert_eq!(
+            crate::ingest::test_support::source_bytes_read(&local),
+            data.len() as u64,
+            "a settled in-memory upload must read its source exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_streaming_upload_reads_source_exactly_twice() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let _streaming = crate::ingest::test_support::StreamingThreshold::set(1);
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("stream.bin");
+        let data = patterned_bytes(160 * 1024, 2);
+        std::fs::write(&local, &data).unwrap();
+
+        let result = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+
+        assert!(!result.skipped);
+        assert!(result.chunks > 1, "fixture must span several chunks");
+        assert_eq!(
+            crate::ingest::test_support::source_bytes_read(&local),
+            2 * data.len() as u64,
+            "a settled streaming upload reads once to hash/chunk and once to upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn racy_upload_keeps_content_verification() {
+        // No SettledCaptures: a file written a moment ago is racy, so its
+        // stat identity cannot vouch for it and content checks stay on.
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("racy.bin");
+        let data = patterned_bytes(32 * 1024, 3);
+        std::fs::write(&local, &data).unwrap();
+
+        upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+
+        assert!(
+            crate::ingest::test_support::source_bytes_read(&local) > data.len() as u64,
+            "a racy capture must be re-verified by content"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_retries_when_source_changes_mid_read() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("moving.bin");
+        let original = patterned_bytes(8 * 1024, 4);
+        std::fs::write(&local, &original).unwrap();
+        let grown_len = original.len() as u64 + 5;
+
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let hook_calls = calls.clone();
+        let _hook = crate::ingest::test_support::AfterCaptureRead::install(move |path, attempt| {
+            hook_calls.set(hook_calls.get() + 1);
+            if attempt == 0 {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                file.write_all(b"grown").unwrap();
+            }
+        });
+
+        let result = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.get(), 2, "a torn first capture must be retried once");
+        assert_eq!(
+            result.bytes, grown_len,
+            "the retried capture must upload the file as it is now"
+        );
+        assert_eq!(state.get(&local).unwrap().size, grown_len);
+    }
+
+    #[tokio::test]
+    async fn capture_refuses_source_that_keeps_changing() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("hot.bin");
+        std::fs::write(&local, patterned_bytes(4 * 1024, 5)).unwrap();
+
+        let _hook = crate::ingest::test_support::AfterCaptureRead::install(|path, _attempt| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(b"+").unwrap();
+        });
+
+        let error = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap_err();
+
+        let changed = error
+            .downcast_ref::<crate::ingest::SourceChanged>()
+            .unwrap_or_else(|| panic!("expected a typed SourceChanged refusal, got {error:#}"));
+        assert_eq!(changed.stage, "upload capture");
+        assert!(state.get(&local).is_none());
+        assert!(op.list("data/manifests/").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn settled_upload_refuses_publish_after_source_moves() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("moved.bin");
+        std::fs::write(&local, patterned_bytes(16 * 1024, 6)).unwrap();
+
+        let local_for_progress = local.clone();
+        let moved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let moved_for_progress = moved.clone();
+        let progress: ProgressFn = Box::new(move |_current, _total, _message| {
+            if !moved_for_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&local_for_progress)
+                    .unwrap();
+                file.write_all(b"late write").unwrap();
+            }
+        });
+
+        let error = upload_file(&op, &local, "data", &mut state, Some(&progress))
+            .await
+            .unwrap_err();
+
+        let changed = error
+            .downcast_ref::<crate::ingest::SourceChanged>()
+            .unwrap_or_else(|| panic!("expected a typed SourceChanged refusal, got {error:#}"));
+        assert_eq!(changed.stage, "manifest publish");
+        assert!(state.get(&local).is_none());
+    }
+
+    /// Overwrite `path` in place with `bytes` (same length), then put its
+    /// mtime back, so only the ctime records the rewrite.
+    fn rewrite_in_place_keeping_mtime(path: &Path, bytes: &[u8]) {
+        use std::io::{Seek, Write};
+        let before = std::fs::metadata(path).unwrap();
+        assert_eq!(
+            before.len(),
+            bytes.len() as u64,
+            "fixture must keep the size"
+        );
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(bytes).unwrap();
+        file.set_modified(before.modified().unwrap()).unwrap();
+        file.sync_all().unwrap();
+        let after = std::fs::metadata(path).unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_retries_same_size_in_place_rewrite_with_restored_mtime() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("rewritten.bin");
+        let original = patterned_bytes(8 * 1024, 7);
+        let rewritten = patterned_bytes(8 * 1024, 8);
+        std::fs::write(&local, &original).unwrap();
+
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let hook_calls = calls.clone();
+        let replacement = rewritten.clone();
+        let _hook = crate::ingest::test_support::AfterCaptureRead::install(move |path, attempt| {
+            hook_calls.set(hook_calls.get() + 1);
+            if attempt == 0 {
+                // Size and mtime are unchanged: only ctime can tell.
+                rewrite_in_place_keeping_mtime(path, &replacement);
+            }
+        });
+
+        let result = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.get(), 2, "a ctime-only change must tear the capture");
+        assert_eq!(
+            result.hash,
+            tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&rewritten)),
+            "the retried capture must upload the rewritten bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn settled_upload_refuses_publish_after_same_size_rewrite() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let local = dir.path().join("rewritten-late.bin");
+        std::fs::write(&local, patterned_bytes(16 * 1024, 9)).unwrap();
+        let replacement = patterned_bytes(16 * 1024, 10);
+
+        let local_for_progress = local.clone();
+        let moved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let moved_for_progress = moved.clone();
+        let progress: ProgressFn = Box::new(move |_current, _total, _message| {
+            if !moved_for_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                rewrite_in_place_keeping_mtime(&local_for_progress, &replacement);
+            }
+        });
+
+        let error = upload_file(&op, &local, "data", &mut state, Some(&progress))
+            .await
+            .unwrap_err();
+
+        let changed = error
+            .downcast_ref::<crate::ingest::SourceChanged>()
+            .unwrap_or_else(|| panic!("expected a typed SourceChanged refusal, got {error:#}"));
+        assert_eq!(changed.stage, "manifest publish");
+        assert!(state.get(&local).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_during_manifest_publish_is_not_recorded_as_synced() {
+        use std::os::unix::fs::PermissionsExt;
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("edited-in-flight.txt");
+        let published = b"version one, published";
+        let edited = b"version two, unsent!!!";
+        assert_eq!(published.len(), edited.len());
+        std::fs::write(&local, published).unwrap();
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let local_for_hook = local.clone();
+        let (result, sync_state) = upload_file_with_device_with_state_and_publish_hook(
+            &op,
+            &local,
+            "data",
+            None,
+            "",
+            None,
+            None,
+            None,
+            Some("new file".into()),
+            UploadRuntimeOptions {
+                assume_fresh_prefix: false,
+                file_upload_concurrency: 1,
+            },
+            None,
+            move || async move {
+                // A same-size edit (and a chmod) lands after the last
+                // pre-publish check, while the manifest is in flight.
+                std::fs::write(&local_for_hook, edited).unwrap();
+                std::fs::set_permissions(&local_for_hook, std::fs::Permissions::from_mode(0o644))
+                    .unwrap();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        // The manifest describes the published bytes, not the later file.
+        let stored = op.read(&result.remote_path).await.unwrap().to_vec();
+        let manifest = SyncManifest::from_bytes(&stored).unwrap();
+        assert_eq!(manifest.mode.map(|mode| mode & 0o777), Some(0o600));
+        assert_eq!(
+            manifest.file_hash,
+            tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(published))
+        );
+
+        // The edit must still be uploaded on the next cycle.
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        state.set(&local, sync_state.expect("upload records state"));
+        assert!(
+            state.needs_sync(&local).unwrap().is_some(),
+            "an edit made during the publish must not be recorded as synced"
+        );
+    }
+
+    #[test]
+    fn capture_of_a_growing_file_never_buffers_past_its_stat_size() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let _streaming = crate::ingest::test_support::StreamingThreshold::set(64 * 1024);
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("growing.log");
+        let original = patterned_bytes(1000, 11);
+        std::fs::write(&local, &original).unwrap();
+        let growth = patterned_bytes(1024 * 1024, 12);
+
+        let reads = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = reads.clone();
+        let appended = growth.clone();
+        let _before =
+            crate::ingest::test_support::BeforeCaptureRead::install(move |path, attempt| {
+                observed
+                    .borrow_mut()
+                    .push(crate::ingest::test_support::source_bytes_read(path));
+                if attempt == 0 {
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                    file.write_all(&appended).unwrap();
+                }
+            });
+
+        let snapshot = prepare_upload_snapshot(&local).unwrap();
+
+        let reads = reads.borrow();
+        assert_eq!(reads.len(), 2, "the torn first capture is retried once");
+        assert!(
+            reads[1] - reads[0] <= original.len() as u64 + 1,
+            "the in-memory capture read {} bytes of a file stat'd at {}",
+            reads[1] - reads[0],
+            original.len()
+        );
+        assert!(
+            matches!(snapshot.source, UploadSourceSnapshot::Streaming(_)),
+            "the retry must re-decide streaming from its own fstat"
+        );
+        assert_eq!(snapshot.file_size, (original.len() + growth.len()) as u64);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_reports_non_utf8_names_as_typed_refusals() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("ok.txt"), b"ok").unwrap();
+        let bad_file = root.join(std::ffi::OsStr::from_bytes(b"bad-\xff.txt"));
+        std::fs::write(&bad_file, b"bad").unwrap();
+        let bad_dir = root.join(std::ffi::OsStr::from_bytes(b"dir-\xfe"));
+        std::fs::create_dir(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join("inner.txt"), b"inner").unwrap();
+
+        let result = collect_files(root, &default_config()).unwrap();
+
+        assert_eq!(rel_names(&result.files, root), vec!["ok.txt".to_string()]);
+        assert!(
+            result.empty_dirs.iter().all(|d| d != &bad_dir),
+            "a refused directory is not an empty directory"
+        );
+        let mut refused: Vec<(PathBuf, crate::ingest::CollectRefusalReason)> = result
+            .refusals
+            .iter()
+            .map(|r| (r.path.clone(), r.reason.clone()))
+            .collect();
+        refused.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            refused,
+            vec![
+                (bad_file, crate::ingest::CollectRefusalReason::NonUtf8Name),
+                (bad_dir, crate::ingest::CollectRefusalReason::NonUtf8Name),
+            ],
+            "non-UTF-8 names must be reported with their exact bytes, never dropped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_refuses_unreadable_directory_and_keeps_walking() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("secret.txt"), b"s").unwrap();
+        std::fs::create_dir(root.join("z")).unwrap();
+        std::fs::write(root.join("z/after.txt"), b"z").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running with CAP_DAC_OVERRIDE (root): EACCES cannot be produced.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!(
+                "SKIPPED collect_refuses_unreadable_directory_and_keeps_walking: \
+                 running with CAP_DAC_OVERRIDE (root); EACCES cannot be produced. \
+                 Run as an unprivileged user to exercise it."
+            );
+            return;
+        }
+
+        let result = collect_files(root, &default_config());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = result.expect("one unreadable directory must not abort the root");
+
+        assert_eq!(
+            rel_names(&result.files, root),
+            vec!["a.txt".to_string(), "z/after.txt".to_string()]
+        );
+        assert!(
+            !result.empty_dirs.contains(&locked),
+            "an unreadable directory must never be published as empty"
+        );
+        assert_eq!(result.refusals.len(), 1);
+        assert_eq!(result.refusals[0].path, locked);
+        assert!(matches!(
+            result.refusals[0].reason,
+            crate::ingest::CollectRefusalReason::UnreadableDirectory {
+                kind: std::io::ErrorKind::PermissionDenied,
+                ..
+            }
+        ));
     }
 
     // ── remote_path_prefix ───────────────────────────────────────────────

@@ -1,16 +1,61 @@
 //! On-demand hydration: fetch a manifest's content from SeaweedFS chunks.
 //!
-//! Unlike `tcfs_sync::engine::download_file` (which writes to disk), this
-//! returns the assembled bytes in memory so the FUSE driver can cache and
-//! serve them without touching the local filesystem.
+//! Three shapes, all verifying every stored chunk against its content
+//! address before decrypting it (TIN-1419, streaming large-file IO):
+//!
+//! - [`hydrate_cached_file_from_manifest_bytes`] streams chunks straight into
+//!   a private disk-cache file and returns a descriptor to it. Memory is
+//!   bounded by the fetch window ([`DEFAULT_HYDRATION_WINDOW`] chunks), not by
+//!   the file size, and the whole-file size and BLAKE3 identity are verified
+//!   incrementally as the bytes go to disk. The VFS serves reads from that
+//!   descriptor by range.
+//! - [`fetch_range_from_manifest_bytes`] fetches only the chunks that cover a
+//!   byte range, for callers that want a slice without hydrating the file.
+//! - [`fetch_content`] / [`fetch_cached`] keep the older whole-file-in-memory
+//!   API, now built on the same bounded, parallel chunk window.
+
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use opendal::Operator;
 use tcfs_sync::manifest::SyncManifest;
+use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 use crate::cache::{cache_key_for_path, DiskCache};
+
+/// Chunks fetched ahead of the writer during streaming hydration. Peak
+/// memory is about this many stored chunks, whatever the file size.
+pub const DEFAULT_HYDRATION_WINDOW: usize = 8;
+
+/// Bytes an encrypted chunk adds to its plaintext (XChaCha20 nonce + tag).
+const ENCRYPTED_CHUNK_OVERHEAD: u64 = (tcfs_crypto::NONCE_SIZE + tcfs_crypto::TAG_SIZE) as u64;
+
+/// What one streaming hydration did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HydrationStats {
+    /// Plaintext bytes produced.
+    pub bytes: u64,
+    /// Chunks fetched and verified.
+    pub chunks: usize,
+    /// Most fetched-but-not-yet-written stored chunk bytes held at once.
+    /// Bounded by the window times the largest chunk, never the file size.
+    pub peak_buffered_bytes: u64,
+}
+
+/// Hydrated content held in the disk cache and read by range.
+#[derive(Debug)]
+pub struct CachedContent {
+    /// Read descriptor on the verified content. It stays valid if the cache
+    /// entry is evicted or replaced after this returns.
+    pub file: std::fs::File,
+    /// Verified plaintext length.
+    pub len: u64,
+    /// `Some` when this call fetched from storage, `None` on a cache hit.
+    pub stats: Option<HydrationStats>,
+}
 
 struct HydrationCrypto {
     file_key: tcfs_crypto::FileKey,
@@ -165,66 +210,443 @@ async fn fetch_prepared_content(
     manifest: &SyncManifest,
     crypto: Option<&HydrationCrypto>,
 ) -> Result<Vec<u8>> {
-    debug!(manifest = %manifest_path, "hydrating");
+    let mut assembled = Vec::with_capacity(if manifest.is_legacy() {
+        0
+    } else {
+        usize::try_from(manifest.file_size).unwrap_or(0)
+    });
+    stream_prepared_content(
+        op,
+        manifest_path,
+        remote_prefix,
+        manifest,
+        crypto,
+        DEFAULT_HYDRATION_WINDOW,
+        |plaintext| {
+            assembled.extend_from_slice(plaintext);
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(assembled)
+}
 
-    let prefix = remote_prefix.trim_end_matches('/');
-    let mut assembled = Vec::new();
+/// Fetch one stored chunk and verify it against its content address.
+async fn fetch_verified_chunk(
+    op: Operator,
+    chunk_key: String,
+    expected_hash: String,
+    index: usize,
+    total: usize,
+    manifest_path: String,
+) -> Result<Vec<u8>> {
+    let chunk = op
+        .read(&chunk_key)
+        .await
+        .with_context(|| format!("downloading chunk {}/{total}: {chunk_key}", index + 1))?;
+    let chunk_bytes = chunk.to_vec();
+    let actual_chunk_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
+    anyhow::ensure!(
+        actual_chunk_hash == expected_hash,
+        "chunk integrity failure at index {index} for {manifest_path}: expected {expected_hash}, got {actual_chunk_hash}"
+    );
+    Ok(chunk_bytes)
+}
 
-    for (index, hash) in manifest.chunk_hashes().iter().enumerate() {
-        let chunk_key = format!("{prefix}/chunks/{hash}");
-        let chunk = op.read(&chunk_key).await.with_context(|| {
-            format!(
-                "downloading chunk {}/{}: {chunk_key}",
-                index + 1,
-                manifest.chunk_hashes().len()
-            )
-        })?;
-        let chunk_bytes = chunk.to_bytes();
-        let actual_chunk_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
-        anyhow::ensure!(
-            actual_chunk_hash == hash.as_str(),
-            "chunk integrity failure at index {index} for {manifest_path}: expected {hash}, got {actual_chunk_hash}"
-        );
-
-        let plaintext = match crypto {
-            Some(crypto) => tcfs_crypto::decrypt_chunk(
-                &crypto.file_key,
-                index as u64,
-                &crypto.file_id,
-                &chunk_bytes,
-            )
-            .with_context(|| {
-                format!(
-                    "decrypting chunk {}/{} for {manifest_path}",
-                    index + 1,
-                    manifest.chunk_hashes().len()
-                )
-            })?,
-            None => chunk_bytes.to_vec(),
-        };
-
-        assembled.extend_from_slice(&plaintext);
-        if !manifest.is_legacy() {
-            anyhow::ensure!(
-                assembled.len() as u64 <= manifest.file_size,
-                "hydrated data exceeds declared file size for {manifest_path}: expected {}, got at least {}",
-                manifest.file_size,
-                assembled.len()
-            );
+fn chunk_plaintext(
+    crypto: Option<&HydrationCrypto>,
+    index: usize,
+    total: usize,
+    stored: Vec<u8>,
+    manifest_path: &str,
+) -> Result<Vec<u8>> {
+    match crypto {
+        Some(crypto) => {
+            tcfs_crypto::decrypt_chunk(&crypto.file_key, index as u64, &crypto.file_id, &stored)
+                .with_context(|| {
+                    format!("decrypting chunk {}/{total} for {manifest_path}", index + 1)
+                })
         }
+        None => Ok(stored),
+    }
+}
+
+/// Fetch, verify, decrypt and hand each chunk's plaintext to `sink` in file
+/// order, with at most `window` chunks fetched ahead. The whole-file size
+/// and BLAKE3 identity of a modern manifest are verified incrementally; the
+/// sink has seen every byte by the time an integrity failure is reported, so
+/// a caller writing to disk must discard its output on error.
+async fn stream_prepared_content<F>(
+    op: &Operator,
+    manifest_path: &str,
+    remote_prefix: &str,
+    manifest: &SyncManifest,
+    crypto: Option<&HydrationCrypto>,
+    window: usize,
+    mut sink: F,
+) -> Result<HydrationStats>
+where
+    F: FnMut(&[u8]) -> Result<()>,
+{
+    debug!(manifest = %manifest_path, window, "hydrating");
+
+    let window = window.max(1);
+    let prefix = remote_prefix.trim_end_matches('/');
+    let hashes = manifest.chunk_hashes();
+    let total = hashes.len();
+
+    let mut pending: JoinSet<(usize, Result<Vec<u8>>)> = JoinSet::new();
+    let mut ready: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    let mut next_spawn = 0usize;
+    let mut next_emit = 0usize;
+    let mut buffered = 0u64;
+    let mut stats = HydrationStats::default();
+    let mut hasher = blake3::Hasher::new();
+
+    while next_emit < total {
+        // Keep the window full: fetched-ahead chunks plus in-flight fetches
+        // never exceed `window`, so memory is bounded by the window.
+        while next_spawn < total && pending.len() + ready.len() < window {
+            let index = next_spawn;
+            let fetch = fetch_verified_chunk(
+                op.clone(),
+                format!("{prefix}/chunks/{}", hashes[index]),
+                hashes[index].clone(),
+                index,
+                total,
+                manifest_path.to_string(),
+            );
+            pending.spawn(async move { (index, fetch.await) });
+            next_spawn += 1;
+        }
+
+        if let Some(stored) = ready.remove(&next_emit) {
+            buffered -= stored.len() as u64;
+            let plaintext = chunk_plaintext(crypto, next_emit, total, stored, manifest_path)?;
+            stats.bytes += plaintext.len() as u64;
+            if !manifest.is_legacy() {
+                anyhow::ensure!(
+                    stats.bytes <= manifest.file_size,
+                    "hydrated data exceeds declared file size for {manifest_path}: expected {}, got at least {}",
+                    manifest.file_size,
+                    stats.bytes
+                );
+            }
+            hasher.update(&plaintext);
+            sink(&plaintext)?;
+            stats.chunks += 1;
+            next_emit += 1;
+            continue;
+        }
+
+        // `next_emit` is not ready, so it is still in flight (chunks are
+        // spawned in order and the window always admits the oldest).
+        let (index, fetched) = pending
+            .join_next()
+            .await
+            .context("hydration window drained before every chunk was fetched")?
+            .context("hydration chunk task failed")?;
+        let stored = fetched?;
+        buffered += stored.len() as u64;
+        stats.peak_buffered_bytes = stats.peak_buffered_bytes.max(buffered);
+        ready.insert(index, stored);
     }
 
-    validate_plaintext(manifest, &assembled, manifest_path)?;
+    // v1 has no whole-file identity. Its chunks were verified against their
+    // content addresses while fetching.
+    if !manifest.is_legacy() {
+        anyhow::ensure!(
+            stats.bytes == manifest.file_size,
+            "hydrated file size mismatch for {manifest_path}: expected {}, got {}",
+            manifest.file_size,
+            stats.bytes
+        );
+        let actual = hasher.finalize().to_hex().to_string();
+        anyhow::ensure!(
+            actual == manifest.file_hash.as_str(),
+            "hydrated file integrity failure for {manifest_path}: expected {}, got {actual}",
+            manifest.file_hash
+        );
+    }
 
     debug!(
         manifest = %manifest_path,
-        bytes = assembled.len(),
-        chunks = manifest.chunk_hashes().len(),
+        bytes = stats.bytes,
+        chunks = stats.chunks,
+        peak_buffered_bytes = stats.peak_buffered_bytes,
         encrypted = crypto.is_some(),
         "hydrated"
     );
 
-    Ok(assembled)
+    Ok(stats)
+}
+
+/// Verify a cached plaintext file against a modern manifest by streaming it
+/// (bounded memory), returning its length.
+fn verify_cached_file(file: &mut std::fs::File, manifest: &SyncManifest) -> Result<u64> {
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(0))
+        .context("rewinding cache entry")?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut len = 0u64;
+    loop {
+        let n = file.read(&mut buf).context("reading cache entry")?;
+        if n == 0 {
+            break;
+        }
+        len += n as u64;
+        anyhow::ensure!(
+            len <= manifest.file_size,
+            "cache entry longer than manifest"
+        );
+        hasher.update(&buf[..n]);
+    }
+    anyhow::ensure!(len == manifest.file_size, "cache entry size mismatch");
+    anyhow::ensure!(
+        hasher.finalize().to_hex().as_str() == manifest.file_hash.as_str(),
+        "cache entry hash mismatch"
+    );
+    Ok(len)
+}
+
+/// Hydrate into the disk cache with bounded memory and return a read
+/// descriptor on the verified content.
+///
+/// A modern cached entry is re-verified (streamed, bounded memory) before it
+/// is trusted; a corrupt one is evicted and refetched. Legacy v1 content has
+/// no whole-file identity, so it is never cached: it is hydrated into an
+/// unlinked private file every time, as before.
+pub async fn hydrate_cached_file_from_manifest_bytes(
+    op: &Operator,
+    manifest_path: &str,
+    manifest_bytes: &[u8],
+    remote_prefix: &str,
+    cache: &DiskCache,
+    master_key: Option<&[u8; 32]>,
+) -> Result<CachedContent> {
+    hydrate_cached_file_with_window(
+        op,
+        manifest_path,
+        manifest_bytes,
+        remote_prefix,
+        cache,
+        master_key,
+        DEFAULT_HYDRATION_WINDOW,
+    )
+    .await
+}
+
+/// [`hydrate_cached_file_from_manifest_bytes`] with an explicit fetch window.
+pub async fn hydrate_cached_file_with_window(
+    op: &Operator,
+    manifest_path: &str,
+    manifest_bytes: &[u8],
+    remote_prefix: &str,
+    cache: &DiskCache,
+    master_key: Option<&[u8; 32]>,
+    window: usize,
+) -> Result<CachedContent> {
+    let (manifest, crypto) = prepare_manifest(manifest_bytes, manifest_path, master_key)?;
+    let key = cache_key_for_path(manifest_path);
+
+    if !manifest.is_legacy() {
+        if let Some(file) = cache.open_entry(&key)? {
+            let verifying = manifest.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                let mut file = file;
+                verify_cached_file(&mut file, &verifying).map(|len| (file, len))
+            })
+            .await
+            .context("cache verification task failed")?;
+            match checked {
+                Ok((file, len)) => {
+                    debug!(manifest = %manifest_path, "hydration cache hit");
+                    return Ok(CachedContent {
+                        file,
+                        len,
+                        stats: None,
+                    });
+                }
+                Err(error) => {
+                    warn!(manifest = %manifest_path, %error, "discarding unverifiable or corrupt hydration cache entry");
+                    if let Err(error) = cache.evict(&key).await {
+                        warn!(manifest = %manifest_path, %error, "failed to evict invalid hydration cache entry");
+                    }
+                }
+            }
+        }
+    }
+
+    // `tmp` removes the temporary name when it is dropped uncommitted: on an
+    // integrity or fetch error, and also when this future is dropped part way
+    // (a FUSE/NFS protocol timeout). Unverified bytes are never left where a
+    // later open, or the cache's size accounting, could miss them.
+    let (tmp, mut tmp_file) = cache.create_tmp(&key)?;
+    let stats = stream_prepared_content(
+        op,
+        manifest_path,
+        remote_prefix,
+        &manifest,
+        crypto.as_ref(),
+        window,
+        |plaintext| {
+            tmp_file
+                .write_all(plaintext)
+                .context("writing hydrated chunk to cache")
+        },
+    )
+    .await?;
+    tmp_file.flush().context("flushing hydrated cache file")?;
+
+    if manifest.is_legacy() {
+        // Keep the open descriptor, drop the name: v1 content is not cached.
+        drop(tmp);
+    } else if let Err(error) = cache.commit_tmp(tmp, &key).await {
+        // The verified bytes stay readable through the descriptor.
+        warn!(manifest = %manifest_path, %error, "failed to commit hydrated content to cache");
+    }
+
+    Ok(CachedContent {
+        file: tmp_file,
+        len: stats.bytes,
+        stats: Some(stats),
+    })
+}
+
+/// Plaintext layout of a manifest's chunks: `(offset, length)` per chunk,
+/// derived from the stored object sizes (stat only, no content reads).
+async fn chunk_layout(
+    op: &Operator,
+    prefix: &str,
+    manifest: &SyncManifest,
+    encrypted: bool,
+    manifest_path: &str,
+) -> Result<Vec<(u64, u64)>> {
+    let hashes = manifest.chunk_hashes();
+    let mut stats: JoinSet<(usize, Result<u64>)> = JoinSet::new();
+    let mut lengths = vec![0u64; hashes.len()];
+    let mut next = 0usize;
+    let mut done = 0usize;
+    while done < hashes.len() {
+        while next < hashes.len() && stats.len() < DEFAULT_HYDRATION_WINDOW * 2 {
+            let index = next;
+            let op = op.clone();
+            let key = format!("{prefix}/chunks/{}", hashes[index]);
+            stats.spawn(async move {
+                let stored = op
+                    .stat(&key)
+                    .await
+                    .map(|meta| meta.content_length())
+                    .with_context(|| format!("stat chunk {key}"));
+                (index, stored)
+            });
+            next += 1;
+        }
+        let (index, stored) = stats
+            .join_next()
+            .await
+            .context("chunk layout drained early")?
+            .context("chunk layout task failed")?;
+        let stored = stored?;
+        lengths[index] =
+            if encrypted {
+                stored.checked_sub(ENCRYPTED_CHUNK_OVERHEAD).with_context(|| {
+                format!("stored chunk {index} shorter than encryption overhead for {manifest_path}")
+            })?
+            } else {
+                stored
+            };
+        done += 1;
+    }
+
+    let mut layout = Vec::with_capacity(lengths.len());
+    let mut offset = 0u64;
+    for length in lengths {
+        layout.push((offset, length));
+        offset = offset
+            .checked_add(length)
+            .context("chunk layout overflows u64")?;
+    }
+    if !manifest.is_legacy() {
+        anyhow::ensure!(
+            offset == manifest.file_size,
+            "chunk layout for {manifest_path} covers {offset} bytes but the manifest declares {}",
+            manifest.file_size
+        );
+    }
+    Ok(layout)
+}
+
+/// Fetch `len` bytes at `offset` by fetching only the chunks that cover the
+/// range (ranged hydration). Each fetched chunk is verified against its
+/// content address and, when encrypted, authenticated by AEAD under its
+/// index; its plaintext length must match the layout. The whole-file hash
+/// cannot be checked for a partial read. Reads past EOF are clamped.
+///
+/// **Not wired to any surface yet, and must not be until the layout is bound
+/// to the signed manifest.** Chunk offsets come from storage `stat` sizes,
+/// which only the fetched chunks' content addresses verify. The sum check
+/// against the manifest's `file_size` catches one truncated or corrupt
+/// unfetched chunk, but two compensating size changes would shift every
+/// later offset undetected. Carrying per-chunk plaintext lengths in the
+/// manifest closes that; until then this is a building block, not a read
+/// path. Legacy v1 manifests carry no `file_size` at all, so they are
+/// refused here.
+pub async fn fetch_range_from_manifest_bytes(
+    op: &Operator,
+    manifest_path: &str,
+    manifest_bytes: &[u8],
+    remote_prefix: &str,
+    master_key: Option<&[u8; 32]>,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>> {
+    let (manifest, crypto) = prepare_manifest(manifest_bytes, manifest_path, master_key)?;
+    anyhow::ensure!(
+        !manifest.is_legacy(),
+        "ranged hydration refuses legacy v1 manifest {manifest_path}: it declares no file size, \
+         so a corrupt unfetched chunk could shift the layout undetected"
+    );
+    let prefix = remote_prefix.trim_end_matches('/');
+    let layout = chunk_layout(op, prefix, &manifest, crypto.is_some(), manifest_path).await?;
+    let file_len = layout
+        .last()
+        .map(|(start, length)| start + length)
+        .unwrap_or(0);
+    if offset >= file_len || len == 0 {
+        return Ok(Vec::new());
+    }
+    let end = offset.saturating_add(len).min(file_len);
+    let hashes = manifest.chunk_hashes();
+    let total = hashes.len();
+    let first = layout.partition_point(|(start, length)| start + length <= offset);
+
+    let mut out = Vec::with_capacity(usize::try_from(end - offset).unwrap_or(0));
+    for (index, &(start, length)) in layout.iter().enumerate().skip(first) {
+        if start >= end {
+            break;
+        }
+        let stored = fetch_verified_chunk(
+            op.clone(),
+            format!("{prefix}/chunks/{}", hashes[index]),
+            hashes[index].clone(),
+            index,
+            total,
+            manifest_path.to_string(),
+        )
+        .await?;
+        let plaintext = chunk_plaintext(crypto.as_ref(), index, total, stored, manifest_path)?;
+        anyhow::ensure!(
+            plaintext.len() as u64 == length,
+            "chunk {index} for {manifest_path} decoded to {} bytes, layout expected {length}",
+            plaintext.len()
+        );
+        let from = usize::try_from(offset.max(start) - start).context("range offset")?;
+        let to = usize::try_from(end.min(start + length) - start).context("range end")?;
+        out.extend_from_slice(&plaintext[from..to]);
+    }
+    Ok(out)
 }
 
 /// Fetch content using the disk cache as a read-through layer.
@@ -545,6 +967,424 @@ mod tests {
         .unwrap();
 
         assert_eq!(hydrated, bound_content);
+    }
+
+    /// Publish `content` as `chunk_len`-byte plaintext chunks.
+    async fn publish_chunked(op: &Operator, content: &[u8], chunk_len: usize) -> SyncManifest {
+        let mut hashes = Vec::new();
+        for piece in content.chunks(chunk_len) {
+            hashes.push(write_plain_chunk(op, piece).await);
+        }
+        let manifest = manifest(content, hashes);
+        write_manifest(op, &manifest).await;
+        manifest
+    }
+
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len as u64)
+            .map(|i| (i.wrapping_mul(29) ^ (i >> 9)) as u8)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn streaming_hydration_holds_at_most_window_chunks() {
+        let op = memory_op();
+        let chunk_len = 1024;
+        let content = patterned(64 * chunk_len);
+        let manifest = publish_chunked(&op, &content, chunk_len).await;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(temp.path().to_path_buf(), 64 * 1024 * 1024);
+
+        let window = 4;
+        let hydrated = hydrate_cached_file_with_window(
+            &op,
+            MANIFEST_PATH,
+            &manifest.to_bytes().unwrap(),
+            PREFIX,
+            &cache,
+            None,
+            window,
+        )
+        .await
+        .unwrap();
+
+        let stats = hydrated.stats.expect("a cold cache must fetch");
+        assert_eq!(stats.chunks, 64);
+        assert_eq!(stats.bytes, content.len() as u64);
+        assert!(
+            stats.peak_buffered_bytes <= (window * chunk_len) as u64,
+            "peak {} exceeds the {window}-chunk window",
+            stats.peak_buffered_bytes
+        );
+        assert_eq!(hydrated.len, content.len() as u64);
+        let mut file = hydrated.file;
+        let mut on_disk = Vec::new();
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_to_end(&mut on_disk).unwrap();
+        assert_eq!(on_disk, content);
+
+        // Second open is a verified cache hit with no fetch.
+        let again = hydrate_cached_file_from_manifest_bytes(
+            &op,
+            MANIFEST_PATH,
+            &manifest.to_bytes().unwrap(),
+            PREFIX,
+            &cache,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(again.stats.is_none());
+        assert_eq!(again.len, content.len() as u64);
+    }
+
+    /// Counts chunk reads as storage sees them, independent of the
+    /// hydration code's own bookkeeping.
+    #[derive(Debug, Clone, Default)]
+    struct CountChunkReads {
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct CountChunkReadsAccessor<A> {
+        inner: A,
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl<A: opendal::raw::Access> opendal::raw::Layer<A> for CountChunkReads {
+        type LayeredAccess = CountChunkReadsAccessor<A>;
+
+        fn layer(&self, inner: A) -> Self::LayeredAccess {
+            CountChunkReadsAccessor {
+                inner,
+                started: self.started.clone(),
+            }
+        }
+    }
+
+    impl<A: opendal::raw::Access> opendal::raw::LayeredAccess for CountChunkReadsAccessor<A> {
+        type Inner = A;
+        type Reader = A::Reader;
+        type Writer = A::Writer;
+        type Lister = A::Lister;
+        type Deleter = A::Deleter;
+
+        fn inner(&self) -> &A {
+            &self.inner
+        }
+
+        async fn read(
+            &self,
+            path: &str,
+            args: opendal::raw::OpRead,
+        ) -> opendal::Result<(opendal::raw::RpRead, Self::Reader)> {
+            if path.contains("/chunks/") {
+                self.started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.read(path, args).await
+        }
+
+        async fn write(
+            &self,
+            path: &str,
+            args: opendal::raw::OpWrite,
+        ) -> opendal::Result<(opendal::raw::RpWrite, Self::Writer)> {
+            self.inner.write(path, args).await
+        }
+
+        async fn delete(&self) -> opendal::Result<(opendal::raw::RpDelete, Self::Deleter)> {
+            self.inner.delete().await
+        }
+
+        async fn list(
+            &self,
+            path: &str,
+            args: opendal::raw::OpList,
+        ) -> opendal::Result<(opendal::raw::RpList, Self::Lister)> {
+            self.inner.list(path, args).await
+        }
+    }
+
+    #[tokio::test]
+    async fn chunks_fetched_ahead_of_the_writer_never_exceed_the_window() {
+        // Measured at the storage boundary: every chunk read that has started
+        // but not yet reached the sink may hold a chunk in memory (in flight,
+        // finished but not joined, or waiting its turn). That count, not the
+        // hydration code's own statistic, must stay within the window.
+        let counter = CountChunkReads::default();
+        let op = Operator::new(Memory::default())
+            .unwrap()
+            .finish()
+            .layer(counter.clone());
+        let chunk_len = 512;
+        let content = patterned(64 * chunk_len);
+        let manifest = publish_chunked(&op, &content, chunk_len).await;
+
+        for window in [1usize, 3, 8] {
+            counter
+                .started
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+            let mut emitted = 0usize;
+            let mut max_outstanding = 0usize;
+            let mut out = Vec::new();
+            stream_prepared_content(
+                &op,
+                MANIFEST_PATH,
+                PREFIX,
+                &manifest,
+                None,
+                window,
+                |plaintext| {
+                    let started = counter.started.load(std::sync::atomic::Ordering::SeqCst);
+                    max_outstanding = max_outstanding.max(started - emitted);
+                    emitted += 1;
+                    out.extend_from_slice(plaintext);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(out, content);
+            assert_eq!(
+                counter.started.load(std::sync::atomic::Ordering::SeqCst),
+                64,
+                "each chunk is fetched exactly once"
+            );
+            assert!(
+                max_outstanding <= window,
+                "{max_outstanding} chunks were fetched ahead of the writer with window {window}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_hydration_never_caches_unverified_bytes() {
+        let op = memory_op();
+        let content = patterned(8 * 1024);
+        let mut manifest = publish_chunked(&op, &content, 1024).await;
+        manifest.file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(b"other"));
+        write_manifest(&op, &manifest).await;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(temp.path().to_path_buf(), 64 * 1024 * 1024);
+
+        let error = hydrate_cached_file_from_manifest_bytes(
+            &op,
+            MANIFEST_PATH,
+            &manifest.to_bytes().unwrap(),
+            PREFIX,
+            &cache,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("file integrity failure"));
+        assert_eq!(cache.stats().await.unwrap().entry_count, 0);
+        let leftovers: Vec<_> = walk_files(temp.path());
+        assert!(
+            leftovers.is_empty(),
+            "temp bytes left behind: {leftovers:?}"
+        );
+    }
+
+    fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk_files(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn corrupt_cached_file_is_evicted_and_refetched() {
+        let op = memory_op();
+        let content = patterned(4096);
+        let manifest = publish_chunked(&op, &content, 1024).await;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(temp.path().to_path_buf(), 64 * 1024 * 1024);
+        cache.put("test", b"corrupt cached bytes").await.unwrap();
+
+        let hydrated = hydrate_cached_file_from_manifest_bytes(
+            &op,
+            MANIFEST_PATH,
+            &manifest.to_bytes().unwrap(),
+            PREFIX,
+            &cache,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            hydrated.stats.is_some(),
+            "a corrupt entry must be refetched"
+        );
+        assert_eq!(cache.get("test").await.unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn fetch_range_reads_only_covering_chunks() {
+        let op = memory_op();
+        let chunk_len = 1000;
+        let content = patterned(10 * chunk_len);
+        let manifest = publish_chunked(&op, &content, chunk_len).await;
+        let bytes = manifest.to_bytes().unwrap();
+
+        // Destroy every chunk outside chunks 2..=3. A ranged read inside
+        // them must still succeed because it never fetches the others.
+        for (index, hash) in manifest.chunk_hashes().iter().enumerate() {
+            if !(2..=3).contains(&index) {
+                op.write(&format!("{PREFIX}/chunks/{hash}"), vec![0u8; chunk_len])
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let slice =
+            fetch_range_from_manifest_bytes(&op, MANIFEST_PATH, &bytes, PREFIX, None, 2500, 1000)
+                .await
+                .unwrap();
+        assert_eq!(slice, &content[2500..3500]);
+
+        // A range touching a corrupted chunk fails closed.
+        let error =
+            fetch_range_from_manifest_bytes(&op, MANIFEST_PATH, &bytes, PREFIX, None, 3900, 200)
+                .await
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("chunk integrity failure"));
+
+        // Past EOF is clamped, not an error.
+        let tail =
+            fetch_range_from_manifest_bytes(&op, MANIFEST_PATH, &bytes, PREFIX, None, 20_000, 10)
+                .await
+                .unwrap();
+        assert!(tail.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_range_refuses_layout_shifted_by_truncated_unfetched_chunk() {
+        let op = memory_op();
+        let chunk_len = 1000;
+        let content = patterned(6 * chunk_len);
+        let manifest = publish_chunked(&op, &content, chunk_len).await;
+        let bytes = manifest.to_bytes().unwrap();
+
+        // Truncate chunk 1, which a read inside chunk 4 never fetches. Its
+        // shorter stat size would shift chunk 4's offset by 100 bytes.
+        let hashes = manifest.chunk_hashes();
+        op.write(
+            &format!("{PREFIX}/chunks/{}", hashes[1]),
+            content[chunk_len..2 * chunk_len - 100].to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let error =
+            fetch_range_from_manifest_bytes(&op, MANIFEST_PATH, &bytes, PREFIX, None, 4200, 100)
+                .await
+                .expect_err("a shifted layout must fail closed, not return misplaced bytes");
+        assert!(
+            format!("{error:#}").contains("chunk layout"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_range_refuses_legacy_v1_manifests() {
+        let op = memory_op();
+        let content = b"legacy content";
+        let chunk_hash = write_plain_chunk(&op, content).await;
+        let legacy = format!("{chunk_hash}\n").into_bytes();
+
+        let error =
+            fetch_range_from_manifest_bytes(&op, MANIFEST_PATH, &legacy, PREFIX, None, 0, 4)
+                .await
+                .expect_err("legacy v1 has no file size to bind the layout");
+        assert!(format!("{error:#}").contains("legacy v1"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_hydration_leaves_no_temp_file() {
+        let op = memory_op();
+        let content = patterned(16 * 1024);
+        let manifest = publish_chunked(&op, &content, 1024).await;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(temp.path().to_path_buf(), 64 * 1024 * 1024);
+        let manifest_bytes = manifest.to_bytes().unwrap();
+
+        // Drive the hydration until its temp file exists and the first chunk
+        // fetches are in flight, then drop it, as a protocol timeout does.
+        let mut hydration = Box::pin(hydrate_cached_file_from_manifest_bytes(
+            &op,
+            MANIFEST_PATH,
+            &manifest_bytes,
+            PREFIX,
+            &cache,
+            None,
+        ));
+        let cache_dir = temp.path().to_path_buf();
+        let cancelled = tokio::select! {
+            biased;
+            _ = &mut hydration => false,
+            _ = async {
+                while walk_files(&cache_dir).is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            } => true,
+        };
+        assert!(cancelled, "fixture must cancel mid-hydration");
+        drop(hydration);
+
+        let leftovers = walk_files(temp.path());
+        assert!(
+            leftovers.is_empty(),
+            "a cancelled hydration left files behind: {leftovers:?}"
+        );
+        assert_eq!(cache.stats().await.unwrap().entry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_range_decrypts_and_checks_layout() {
+        let op = memory_op();
+        let content = patterned(3000);
+        let file_id = *tcfs_chunks::hash_bytes(&content).as_bytes();
+        let file_key = tcfs_crypto::generate_file_key();
+        let mut hashes = Vec::new();
+        for (index, piece) in content.chunks(1000).enumerate() {
+            let ciphertext =
+                tcfs_crypto::encrypt_chunk(&file_key, index as u64, &file_id, piece).unwrap();
+            let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
+            op.write(&format!("{PREFIX}/chunks/{hash}"), ciphertext)
+                .await
+                .unwrap();
+            hashes.push(hash);
+        }
+        let master_bytes = [9u8; 32];
+        let master = tcfs_crypto::MasterKey::from_bytes(master_bytes);
+        let mut encrypted = manifest(&content, hashes);
+        encrypted.encrypted_file_key = Some(
+            base64::engine::general_purpose::STANDARD
+                .encode(tcfs_crypto::wrap_key(&master, &file_key).unwrap()),
+        );
+        let bytes = encrypted.to_bytes().unwrap();
+
+        let slice = fetch_range_from_manifest_bytes(
+            &op,
+            MANIFEST_PATH,
+            &bytes,
+            PREFIX,
+            Some(&master_bytes),
+            999,
+            1002,
+        )
+        .await
+        .unwrap();
+        assert_eq!(slice, &content[999..2001]);
     }
 
     #[tokio::test]

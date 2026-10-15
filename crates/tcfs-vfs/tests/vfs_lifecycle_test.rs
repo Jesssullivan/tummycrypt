@@ -1404,3 +1404,252 @@ async fn statfs_returns_defaults() {
     let stats = vfs.statfs().await.expect("statfs");
     assert!(stats.bsize > 0);
 }
+
+// ── streaming open (TIN-1419) ────────────────────────────────────────────
+
+#[tokio::test]
+async fn open_streaming_serves_ranges_from_verified_cache_and_materializes_on_write() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "streaming-open-contract";
+    let content: Vec<u8> = (0u64..300_000)
+        .map(|i| (i.wrapping_mul(17) ^ (i >> 4)) as u8)
+        .collect();
+
+    let writer = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("writer-cache"));
+    writer
+        .mkdir("/", OsStr::new("docs"), 0o755)
+        .await
+        .expect("mkdir docs");
+    let (fh, _) = writer
+        .create("/docs", OsStr::new("big.bin"), 0o644)
+        .await
+        .expect("create");
+    writer.write(fh, 0, &content).await.expect("write");
+    writer.release(fh).await.expect("flush");
+
+    let reader = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("reader-cache"));
+    let (fh, len) = reader
+        .open_streaming("/docs/big.bin")
+        .await
+        .expect("streaming open");
+    assert_eq!(len, content.len() as u64);
+    let len_usize = content.len();
+    for (offset, size) in [
+        (0usize, 4096u32),
+        (123_457, 65_536),
+        (len_usize - 10, 4096),
+        (len_usize + 5, 10),
+    ] {
+        let got = reader
+            .read(fh, offset as u64, size)
+            .await
+            .expect("ranged read");
+        let start = offset.min(len_usize);
+        let end = (offset + size as usize).min(len_usize);
+        assert_eq!(got, &content[start..end], "range at {offset}+{size}");
+    }
+    reader
+        .release(fh)
+        .await
+        .expect("release clean streaming handle");
+    assert_eq!(
+        reader
+            .disk_cache()
+            .stats()
+            .await
+            .expect("stats")
+            .entry_count,
+        1,
+        "a streaming open must leave one verified cache entry"
+    );
+
+    // A write through a streaming handle materializes it and round-trips.
+    let (fh, _) = reader
+        .open_streaming("/docs/big.bin")
+        .await
+        .expect("second streaming open (cache hit)");
+    reader.write(fh, 10, b"PATCH").await.expect("patch");
+    reader.release(fh).await.expect("flush patch");
+
+    let mut expected = content.clone();
+    expected[10..15].copy_from_slice(b"PATCH");
+    let verifier = memory_vfs_with_op(op, prefix, tmp.path().join("verifier-cache"));
+    let (fh, bytes) = verifier.open("/docs/big.bin").await.expect("verify");
+    assert_eq!(bytes, expected);
+    verifier.release(fh).await.expect("release verifier");
+}
+
+/// Publish `content` at `/docs/<name>` through a writer VFS.
+async fn publish_file(op: &Operator, prefix: &str, cache: PathBuf, name: &str, content: &[u8]) {
+    let writer = memory_vfs_with_op(op.clone(), prefix, cache);
+    let _ = writer.mkdir("/", OsStr::new("docs"), 0o755).await;
+    let (fh, _) = writer
+        .create("/docs", OsStr::new(name), 0o644)
+        .await
+        .expect("create");
+    writer.write(fh, 0, content).await.expect("write");
+    writer.release(fh).await.expect("flush");
+}
+
+fn cache_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(cache_files(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn open_streaming_cancelled_by_a_timeout_still_completes_the_hydration() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "streaming-cancel";
+    let content: Vec<u8> = (0u64..300_000)
+        .map(|i| (i.wrapping_mul(13) ^ (i >> 5)) as u8)
+        .collect();
+    publish_file(&op, prefix, tmp.path().join("writer"), "slow.bin", &content).await;
+
+    let cache_dir = tmp.path().join("reader-cache");
+    let reader = memory_vfs_with_op(op.clone(), prefix, cache_dir.clone());
+
+    // Drop the open while its hydration is part way through, exactly as the
+    // FUSE/NFS `VFS_TIMEOUT` does for a file that takes longer than 10 s.
+    let mut open = Box::pin(reader.open_streaming("/docs/slow.bin"));
+    let cancelled = tokio::select! {
+        biased;
+        _ = &mut open => false,
+        _ = async {
+            while !cache_files(&cache_dir)
+                .iter()
+                .any(|path| path.to_string_lossy().ends_with(".tmp"))
+            {
+                tokio::task::yield_now().await;
+            }
+        } => true,
+    };
+    assert!(cancelled, "fixture must cancel the open mid-hydration");
+    drop(open);
+
+    // The hydration was not tied to the cancelled opener: it finishes and
+    // commits one verified entry, and leaves no temporary file behind.
+    let committed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let files = cache_files(&cache_dir);
+            if !files.is_empty()
+                && files
+                    .iter()
+                    .all(|path| !path.to_string_lossy().ends_with(".tmp"))
+            {
+                return files;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a cancelled open must not abort or leak its hydration");
+    assert_eq!(committed.len(), 1, "one committed entry: {committed:?}");
+
+    // A retried open is served from the committed entry.
+    let (fh, len) = reader
+        .open_streaming("/docs/slow.bin")
+        .await
+        .expect("retried open");
+    assert_eq!(len, content.len() as u64);
+    assert_eq!(
+        reader.read(fh, 1000, 64).await.expect("read"),
+        &content[1000..1064]
+    );
+    reader.release(fh).await.expect("release");
+}
+
+#[tokio::test]
+async fn concurrent_streaming_opens_share_one_hydration() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "streaming-single-flight";
+    let content: Vec<u8> = (0u64..200_000).map(|i| (i * 7) as u8).collect();
+    publish_file(
+        &op,
+        prefix,
+        tmp.path().join("writer"),
+        "shared.bin",
+        &content,
+    )
+    .await;
+
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    let (a, b, c) = tokio::join!(
+        reader.open_streaming("/docs/shared.bin"),
+        reader.open_streaming("/docs/shared.bin"),
+        reader.open_streaming("/docs/shared.bin"),
+    );
+    for (fh, len) in [a.unwrap(), b.unwrap(), c.unwrap()] {
+        assert_eq!(len, content.len() as u64);
+        assert_eq!(reader.read(fh, 5, 10).await.unwrap(), &content[5..15]);
+        reader.release(fh).await.unwrap();
+    }
+    assert_eq!(
+        reader.disk_cache().stats().await.unwrap().entry_count,
+        1,
+        "one shared hydration commits one entry"
+    );
+}
+
+#[tokio::test]
+async fn write_to_cached_handle_beyond_memory_limit_is_efbig_not_a_full_load() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "streaming-efbig";
+    let content = vec![0x5Au8; 100_000];
+    publish_file(
+        &op,
+        prefix,
+        tmp.path().join("writer"),
+        "large.bin",
+        &content,
+    )
+    .await;
+
+    // The file is larger than this mount's in-memory limit: a 1-byte write
+    // must not materialize all of it.
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"))
+        .with_max_write_bytes(64 * 1024);
+    let (fh, len) = reader
+        .open_streaming("/docs/large.bin")
+        .await
+        .expect("open");
+    assert_eq!(len, 100_000);
+    let error = reader
+        .write(fh, 0, b"x")
+        .await
+        .expect_err("materializing past the limit must be refused");
+    assert!(format!("{error:#}").contains("EFBIG"), "{error:#}");
+
+    // A truncate that keeps less than the limit loads only what it keeps.
+    reader
+        .truncate(None, Some(fh), 1000)
+        .await
+        .expect("truncate within the limit");
+    reader
+        .write(fh, 0, b"y")
+        .await
+        .expect("write after truncate");
+    reader.release(fh).await.expect("release");
+}

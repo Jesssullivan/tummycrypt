@@ -45,19 +45,118 @@ impl DiskCache {
                 .with_context(|| format!("creating cache dir: {}", parent.display()))?;
         }
 
-        // Atomic write
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, data)
+        // Atomic write through a per-writer temporary name: two concurrent
+        // puts of one key must never interleave into one temp file. The
+        // guard removes the temp file if this future is dropped (a protocol
+        // timeout) or fails before the rename.
+        let mut tmp = CacheTmp::new(unique_tmp_path(&path));
+        fs::write(tmp.path(), data)
             .await
-            .with_context(|| format!("writing cache tmp: {}", tmp.display()))?;
-        fs::rename(&tmp, &path)
+            .with_context(|| format!("writing cache tmp: {}", tmp.path().display()))?;
+        fs::rename(tmp.path(), &path)
             .await
             .with_context(|| format!("renaming cache entry: {}", path.display()))?;
+        tmp.disarm();
 
         // Best-effort eviction; failure is non-fatal
         let _ = self.evict_if_needed().await;
 
         Ok(())
+    }
+
+    /// Open a cached entry for reading, or `None` when it is not cached.
+    ///
+    /// The returned descriptor keeps the content readable even if the entry
+    /// is evicted or replaced afterwards.
+    pub fn open_entry(&self, key: &str) -> Result<Option<std::fs::File>> {
+        let path = self.path_for(key);
+        match std::fs::File::open(&path) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => {
+                Err(error).with_context(|| format!("opening cache entry: {}", path.display()))
+            }
+        }
+    }
+
+    /// Create a private, uniquely named temporary file beside `key`'s entry,
+    /// open for reading and writing. Commit it with [`DiskCache::commit_tmp`].
+    ///
+    /// The returned [`CacheTmp`] removes the file's name when it is dropped
+    /// uncommitted, so an error, a panic or a cancelled future (for example a
+    /// protocol timeout around hydration) never leaves an orphan behind. An
+    /// open descriptor keeps the bytes readable after the name is gone.
+    pub fn create_tmp(&self, key: &str) -> Result<(CacheTmp, std::fs::File)> {
+        let path = self.path_for(key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating cache dir: {}", parent.display()))?;
+        }
+        let tmp = unique_tmp_path(&path);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("creating cache tmp: {}", tmp.display()))?;
+        Ok((CacheTmp::new(tmp), file))
+    }
+
+    /// Atomically publish a temporary file from [`DiskCache::create_tmp`] as
+    /// `key`'s entry, then evict old entries if the cache is over capacity.
+    /// On failure the temporary file is removed.
+    pub async fn commit_tmp(&self, mut tmp: CacheTmp, key: &str) -> Result<()> {
+        let path = self.path_for(key);
+        fs::rename(tmp.path(), &path)
+            .await
+            .with_context(|| format!("renaming cache entry: {}", path.display()))?;
+        tmp.disarm();
+        let _ = self.evict_if_needed().await;
+        Ok(())
+    }
+
+    /// Remove temporary files older than `older_than` from the shard
+    /// directories, returning how many were removed.
+    ///
+    /// A writer that died mid-hydration (a killed or restarted daemon) leaves
+    /// its temporary file behind, and `stats()` and eviction never count
+    /// `*.tmp` names, so without a sweep they would grow without bound. A live
+    /// writer keeps its file's mtime fresh, so an age threshold well above any
+    /// write gap never removes a file someone is still filling.
+    pub fn sweep_stale_tmp(&self, older_than: std::time::Duration) -> usize {
+        let now = std::time::SystemTime::now();
+        let mut removed = 0usize;
+        let Ok(top) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        for shard in top.flatten() {
+            if !shard.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let Ok(inner) = std::fs::read_dir(shard.path()) else {
+                continue;
+            };
+            for entry in inner.flatten() {
+                if !entry.file_name().to_string_lossy().ends_with(".tmp") {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                let age = meta
+                    .modified()
+                    .ok()
+                    .and_then(|mtime| now.duration_since(mtime).ok())
+                    .unwrap_or_default();
+                if age >= older_than && std::fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        removed
     }
 
     /// Returns true if the key is already cached.
@@ -200,6 +299,53 @@ impl DiskCache {
     }
 }
 
+/// A cache temporary file's name, removed on drop unless committed.
+#[derive(Debug)]
+pub struct CacheTmp {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl CacheTmp {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// The temporary file's path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CacheTmp {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// A temporary sibling of `path` that no other writer can be using. The
+/// `.tmp` suffix keeps it out of `stats()` and eviction accounting.
+fn unique_tmp_path(path: &std::path::Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        "{name}.{}.{}.{n}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ))
+}
+
 /// Derive a safe filesystem key from a manifest path by hashing it.
 /// Use the manifest hash directly when available; this is for fallback.
 pub fn cache_key_for_path(manifest_path: &str) -> String {
@@ -284,6 +430,86 @@ mod tests {
         let stats = cache.stats().await.unwrap();
         assert_eq!(stats.entry_count, 1);
         assert_eq!(stats.total_bytes, 11);
+    }
+
+    #[tokio::test]
+    async fn tmp_files_are_unique_and_commit_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 1024 * 1024);
+
+        let (tmp_a, mut file_a) = cache.create_tmp("abc123").unwrap();
+        let (tmp_b, _file_b) = cache.create_tmp("abc123").unwrap();
+        assert_ne!(
+            tmp_a.path(),
+            tmp_b.path(),
+            "concurrent writers must not share a temp file"
+        );
+        assert!(cache.open_entry("abc123").unwrap().is_none());
+
+        use std::io::Write;
+        file_a.write_all(b"committed").unwrap();
+        cache.commit_tmp(tmp_a, "abc123").await.unwrap();
+        assert_eq!(cache.get("abc123").await.unwrap(), b"committed");
+        assert!(cache.open_entry("abc123").unwrap().is_some());
+        assert_eq!(cache.stats().await.unwrap().entry_count, 1);
+    }
+
+    fn tmp_names(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for shard in std::fs::read_dir(dir).unwrap().flatten() {
+            if shard.path().is_dir() {
+                for entry in std::fs::read_dir(shard.path()).unwrap().flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.ends_with(".tmp") {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn uncommitted_tmp_is_removed_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 1024 * 1024);
+
+        let (tmp, file) = cache.create_tmp("abc123").unwrap();
+        assert!(tmp.path().exists());
+        drop(tmp);
+        drop(file);
+        assert!(
+            tmp_names(dir.path()).is_empty(),
+            "a dropped, uncommitted temp file must not be left behind"
+        );
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_tmp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 1024 * 1024);
+        let shard = dir.path().join("ab");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join("abc123"), b"entry").unwrap();
+        let stale = shard.join("abc123.1.dead.0.tmp");
+        std::fs::write(&stale, b"orphan").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let fresh = shard.join("abc123.1.live.1.tmp");
+        std::fs::write(&fresh, b"in progress").unwrap();
+
+        assert_eq!(
+            cache.sweep_stale_tmp(std::time::Duration::from_secs(3600)),
+            1
+        );
+        assert!(!stale.exists(), "a stale temp file must be swept");
+        assert!(fresh.exists(), "a live writer's temp file must be kept");
+        assert!(shard.join("abc123").exists(), "entries are never swept");
     }
 
     #[tokio::test]
