@@ -44,7 +44,9 @@ use tcfs_sync::index_entry::{
 use tcfs_sync::manifest::{SymlinkManifest, SyncManifest};
 
 use crate::cache::DiskCache;
-use crate::hydrate::{fetch_cached_from_manifest_bytes, hydrate_cached_file_from_manifest_bytes};
+use crate::hydrate::{
+    fetch_cached_from_manifest_bytes, hydrate_cached_file_with_limits, HydrationLimits,
+};
 use crate::negative_cache::NegativeCache;
 use crate::stub::IndexEntry;
 use crate::types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};
@@ -53,6 +55,24 @@ use crate::vfs::VirtualFilesystem;
 /// Maximum in-memory file buffer size (10 GB).
 /// Writes exceeding this are rejected with EFBIG.
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024 * 1024;
+
+/// Background hydrations allowed to fetch from storage at once, unless
+/// `TCFS_VFS_MAX_CONCURRENT_HYDRATIONS` or
+/// [`TcfsVfs::with_max_concurrent_hydrations`] says otherwise. Each one keeps
+/// up to a window of chunk reads in flight, so this also bounds how much of
+/// the storage operation limit hydration can take from everything else.
+pub const DEFAULT_MAX_CONCURRENT_HYDRATIONS: usize = 4;
+
+/// Environment override for [`DEFAULT_MAX_CONCURRENT_HYDRATIONS`].
+pub const MAX_CONCURRENT_HYDRATIONS_ENV: &str = "TCFS_VFS_MAX_CONCURRENT_HYDRATIONS";
+
+/// Parse a concurrent-hydration cap: a positive integer, else the default.
+pub fn parse_max_concurrent_hydrations(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&cap| cap > 0)
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_HYDRATIONS)
+}
 
 /// Hydration cache temporary files untouched for this long belong to a writer
 /// that died (a killed or restarted daemon) and are swept at startup.
@@ -248,6 +268,10 @@ pub struct TcfsVfs {
     /// its own task, so a protocol timeout that drops an opener does not
     /// abort the download; the next open joins it instead of restarting it.
     hydrations: HydrationFlights,
+    /// Bounds on those background hydrations: per-chunk and stall deadlines
+    /// (so a stalled storage read cannot wedge a flight forever) and the
+    /// shared admission cap.
+    hydration_limits: HydrationLimits,
     /// Largest content a handle may hold in memory (write, truncate, or the
     /// materialization of a cached handle). Defaults to `MAX_WRITE_SIZE`.
     max_write_bytes: u64,
@@ -297,8 +321,31 @@ impl TcfsVfs {
             trash_enabled: false,
             known_dirs: Arc::new(RwLock::new(HashMap::new())),
             hydrations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            hydration_limits: HydrationLimits {
+                admission: Some(Arc::new(tokio::sync::Semaphore::new(
+                    parse_max_concurrent_hydrations(
+                        std::env::var(MAX_CONCURRENT_HYDRATIONS_ENV).ok().as_deref(),
+                    ),
+                ))),
+                ..HydrationLimits::default()
+            },
             max_write_bytes: MAX_WRITE_SIZE as u64,
         }
+    }
+
+    /// Cap background hydrations fetching from storage at once (at least 1).
+    pub fn with_max_concurrent_hydrations(mut self, max: usize) -> Self {
+        self.hydration_limits.admission = Some(Arc::new(tokio::sync::Semaphore::new(max.max(1))));
+        self
+    }
+
+    /// Deadlines for background hydration: each chunk download, and the
+    /// longest wait for any chunk to complete. A hydration that misses one
+    /// fails, leaves the in-flight map, and the next open starts afresh.
+    pub fn with_hydration_timeouts(mut self, chunk: Duration, stall: Duration) -> Self {
+        self.hydration_limits.chunk_timeout = chunk;
+        self.hydration_limits.stall_timeout = stall;
+        self
     }
 
     /// Lower the largest content a handle may hold in memory (default
@@ -1061,46 +1108,54 @@ impl TcfsVfs {
         bound: &BoundRegularManifest,
     ) -> Result<(Arc<std::fs::File>, u64)> {
         let key = (bound.manifest_path.clone(), bound.master_key);
-        let mut receiver = {
+        let (mut receiver, leader) = {
             let mut flights = self
                 .hydrations
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(receiver) = flights.get(&key) {
-                receiver.clone()
+                (receiver.clone(), None)
             } else {
                 let (sender, receiver) = tokio::sync::watch::channel(None);
                 flights.insert(key.clone(), receiver.clone());
-                let entry = FlightEntry {
-                    flights: Arc::clone(&self.hydrations),
-                    key,
-                };
-                let op = self.op.clone();
-                let prefix = self.prefix.trim_end_matches('/').to_string();
-                let cache = Arc::clone(&self.disk_cache);
-                let manifest_path = bound.manifest_path.clone();
-                let manifest_bytes = bound.manifest_bytes.clone();
-                let master_key = bound.master_key;
-                tokio::spawn(async move {
-                    let outcome = hydrate_cached_file_from_manifest_bytes(
-                        &op,
-                        &manifest_path,
-                        &manifest_bytes,
-                        &prefix,
-                        &cache,
-                        master_key.as_ref(),
-                    )
-                    .await
-                    .map(|content| (Arc::new(content.file), content.len))
-                    .map_err(Arc::new);
-                    // Leave the in-flight map before publishing, so an open
-                    // that arrives later starts from the (now warm) cache.
-                    drop(entry);
-                    let _ = sender.send(Some(outcome));
-                });
-                receiver
+                (receiver, Some(sender))
             }
         };
+        // Spawn only after the map lock is released. A task spawned while
+        // the runtime shuts down is dropped inside `tokio::spawn`, and its
+        // `FlightEntry` drop takes this same lock.
+        if let Some(sender) = leader {
+            let entry = FlightEntry {
+                flights: Arc::clone(&self.hydrations),
+                key,
+            };
+            let op = self.op.clone();
+            let prefix = self.prefix.trim_end_matches('/').to_string();
+            let cache = Arc::clone(&self.disk_cache);
+            let manifest_path = bound.manifest_path.clone();
+            let manifest_bytes = bound.manifest_bytes.clone();
+            let master_key = bound.master_key;
+            let limits = self.hydration_limits.clone();
+            tokio::spawn(async move {
+                let outcome = hydrate_cached_file_with_limits(
+                    &op,
+                    &manifest_path,
+                    &manifest_bytes,
+                    &prefix,
+                    &cache,
+                    master_key.as_ref(),
+                    &limits,
+                )
+                .await
+                .map(|content| (Arc::new(content.file), content.len))
+                .map_err(Arc::new);
+                // Leave the in-flight map before publishing, so an open
+                // that arrives later starts from the (now warm) cache, or
+                // retries afresh after a failure.
+                drop(entry);
+                let _ = sender.send(Some(outcome));
+            });
+        }
         let outcome = receiver
             .wait_for(Option::is_some)
             .await

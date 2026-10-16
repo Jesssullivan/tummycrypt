@@ -1510,6 +1510,150 @@ fn cache_files(dir: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
+/// Holds every chunk read at the storage boundary until the test opens the
+/// gate, so a test decides when hydration may make progress instead of
+/// racing an in-memory backend that finishes in microseconds.
+#[derive(Debug, Clone, Default)]
+struct ChunkGate {
+    state: std::sync::Arc<ChunkGateState>,
+}
+
+#[derive(Debug, Default)]
+struct ChunkGateState {
+    open: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+    /// Chunk reads currently held at the gate.
+    waiting: std::sync::atomic::AtomicUsize,
+    /// Chunk reads ever started.
+    started: std::sync::atomic::AtomicUsize,
+}
+
+impl ChunkGate {
+    fn release(&self) {
+        self.state
+            .open
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.state.notify.notify_waiters();
+    }
+
+    fn waiting(&self) -> usize {
+        self.state.waiting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn started(&self) -> usize {
+        self.state.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait (bounded) until at least `n` chunk reads are held at the gate.
+    async fn wait_for_waiting(&self, n: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.waiting() < n {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected {n} chunk reads at the gate, saw {}",
+                self.waiting()
+            )
+        });
+    }
+
+    async fn pass(&self) {
+        let state = &self.state;
+        state
+            .started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        state
+            .waiting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Decrement on every exit, including the read being cancelled.
+        struct Leave<'a>(&'a ChunkGateState);
+        impl Drop for Leave<'_> {
+            fn drop(&mut self) {
+                self.0
+                    .waiting
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _leave = Leave(state);
+        loop {
+            let notified = state.notify.notified();
+            if state.open.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ChunkGateAccessor<A> {
+    inner: A,
+    gate: ChunkGate,
+}
+
+impl<A: opendal::raw::Access> opendal::raw::Layer<A> for ChunkGate {
+    type LayeredAccess = ChunkGateAccessor<A>;
+
+    fn layer(&self, inner: A) -> Self::LayeredAccess {
+        ChunkGateAccessor {
+            inner,
+            gate: self.clone(),
+        }
+    }
+}
+
+impl<A: opendal::raw::Access> opendal::raw::LayeredAccess for ChunkGateAccessor<A> {
+    type Inner = A;
+    type Reader = A::Reader;
+    type Writer = A::Writer;
+    type Lister = A::Lister;
+    type Deleter = A::Deleter;
+
+    fn inner(&self) -> &A {
+        &self.inner
+    }
+
+    async fn read(
+        &self,
+        path: &str,
+        args: opendal::raw::OpRead,
+    ) -> opendal::Result<(opendal::raw::RpRead, Self::Reader)> {
+        if path.contains("/chunks/") {
+            self.gate.pass().await;
+        }
+        self.inner.read(path, args).await
+    }
+
+    async fn write(
+        &self,
+        path: &str,
+        args: opendal::raw::OpWrite,
+    ) -> opendal::Result<(opendal::raw::RpWrite, Self::Writer)> {
+        self.inner.write(path, args).await
+    }
+
+    async fn delete(&self) -> opendal::Result<(opendal::raw::RpDelete, Self::Deleter)> {
+        self.inner.delete().await
+    }
+
+    async fn list(
+        &self,
+        path: &str,
+        args: opendal::raw::OpList,
+    ) -> opendal::Result<(opendal::raw::RpList, Self::Lister)> {
+        self.inner.list(path, args).await
+    }
+}
+
+fn has_tmp(dir: &std::path::Path) -> bool {
+    cache_files(dir)
+        .iter()
+        .any(|path| path.to_string_lossy().ends_with(".tmp"))
+}
+
 #[tokio::test]
 async fn open_streaming_cancelled_by_a_timeout_still_completes_the_hydration() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1522,29 +1666,33 @@ async fn open_streaming_cancelled_by_a_timeout_still_completes_the_hydration() {
         .collect();
     publish_file(&op, prefix, tmp.path().join("writer"), "slow.bin", &content).await;
 
+    let gate = ChunkGate::default();
     let cache_dir = tmp.path().join("reader-cache");
-    let reader = memory_vfs_with_op(op.clone(), prefix, cache_dir.clone());
+    let reader = memory_vfs_with_op(op.clone().layer(gate.clone()), prefix, cache_dir.clone());
 
     // Drop the open while its hydration is part way through, exactly as the
     // FUSE/NFS `VFS_TIMEOUT` does for a file that takes longer than 10 s.
+    // Chunk reads are held at the gate, so the open cannot finish first: the
+    // outcome does not depend on scheduling.
     let mut open = Box::pin(reader.open_streaming("/docs/slow.bin"));
     let cancelled = tokio::select! {
-        biased;
         _ = &mut open => false,
-        _ = async {
-            while !cache_files(&cache_dir)
-                .iter()
-                .any(|path| path.to_string_lossy().ends_with(".tmp"))
-            {
-                tokio::task::yield_now().await;
-            }
-        } => true,
+        _ = gate.wait_for_waiting(1) => true,
     };
-    assert!(cancelled, "fixture must cancel the open mid-hydration");
+    assert!(
+        cancelled,
+        "the open cannot complete while chunk reads are gated"
+    );
+    assert!(
+        has_tmp(&cache_dir),
+        "the hydration is mid-flight with a private temporary file"
+    );
     drop(open);
 
-    // The hydration was not tied to the cancelled opener: it finishes and
-    // commits one verified entry, and leaves no temporary file behind.
+    // The hydration was not tied to the cancelled opener: once storage
+    // answers, it finishes and commits one verified entry, and leaves no
+    // temporary file behind.
+    gate.release();
     let committed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let files = cache_files(&cache_dir);
@@ -1562,17 +1710,254 @@ async fn open_streaming_cancelled_by_a_timeout_still_completes_the_hydration() {
     .expect("a cancelled open must not abort or leak its hydration");
     assert_eq!(committed.len(), 1, "one committed entry: {committed:?}");
 
-    // A retried open is served from the committed entry.
+    // A retried open is served from the committed entry, without new reads.
+    let reads_before_retry = gate.started();
     let (fh, len) = reader
         .open_streaming("/docs/slow.bin")
         .await
         .expect("retried open");
     assert_eq!(len, content.len() as u64);
+    assert_eq!(gate.started(), reads_before_retry, "retry is a cache hit");
     assert_eq!(
         reader.read(fh, 1000, 64).await.expect("read"),
         &content[1000..1064]
     );
     reader.release(fh).await.expect("release");
+}
+
+#[tokio::test]
+async fn background_hydrations_are_capped_globally() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "streaming-cap";
+    // Six distinct single-chunk files.
+    let files: Vec<(String, Vec<u8>)> = (0u8..6)
+        .map(|n| {
+            (
+                format!("f{n}.bin"),
+                vec![n.wrapping_mul(37) ^ 0xA5; 1000 + n as usize],
+            )
+        })
+        .collect();
+    for (name, content) in &files {
+        publish_file(&op, prefix, tmp.path().join("writer"), name, content).await;
+    }
+
+    let gate = ChunkGate::default();
+    let reader = std::sync::Arc::new(memory_vfs_with_op(
+        op.clone().layer(gate.clone()),
+        prefix,
+        tmp.path().join("reader-cache"),
+    ));
+    let mut opens = Vec::new();
+    for (name, _) in &files {
+        let reader = std::sync::Arc::clone(&reader);
+        let path = format!("/docs/{name}");
+        opens.push(tokio::spawn(
+            async move { reader.open_streaming(&path).await },
+        ));
+    }
+
+    // At most the default cap (4) of hydrations reach storage at once; the
+    // rest wait for a slot instead of piling onto the backend.
+    gate.wait_for_waiting(4).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(gate.waiting(), 4, "only 4 hydrations may hold chunk reads");
+    assert_eq!(gate.started(), 4, "queued hydrations start no reads");
+
+    gate.release();
+    for (open, (_, content)) in opens.into_iter().zip(&files) {
+        let (fh, len) = open.await.expect("join").expect("open after release");
+        assert_eq!(len, content.len() as u64);
+        reader.release(fh).await.expect("release");
+    }
+}
+
+/// A storage read that never completes must not wedge the shared flight:
+/// the hydration fails at its deadline, leaves the in-flight map, aborts its
+/// stuck reads, and a later open retries from scratch.
+#[tokio::test]
+async fn stalled_chunk_read_fails_the_hydration_and_a_later_open_retries() {
+    for (chunk, stall, expect) in [
+        // The per-chunk deadline fires first.
+        (
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+            "timed out",
+        ),
+        // The no-progress deadline fires first.
+        (
+            Duration::from_secs(30),
+            Duration::from_millis(200),
+            "stalled",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let op = Operator::new(opendal::services::Memory::default())
+            .unwrap()
+            .finish();
+        let prefix = "streaming-stall";
+        let content: Vec<u8> = (0u64..100_000).map(|i| (i * 11) as u8).collect();
+        publish_file(
+            &op,
+            prefix,
+            tmp.path().join("writer"),
+            "stuck.bin",
+            &content,
+        )
+        .await;
+
+        let gate = ChunkGate::default();
+        let reader = memory_vfs_with_op(
+            op.clone().layer(gate.clone()),
+            prefix,
+            tmp.path().join("reader-cache"),
+        )
+        .with_hydration_timeouts(chunk, stall);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            reader.open_streaming("/docs/stuck.bin"),
+        )
+        .await
+        .expect("a stalled hydration must fail at its deadline, not hang")
+        .expect_err("storage never answered");
+        assert!(format!("{error:#}").contains(expect), "{error:#}");
+        // The stuck reads were aborted, not leaked (they would otherwise keep
+        // holding storage operation permits).
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while gate.waiting() > 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("stuck chunk reads must be cancelled with the hydration");
+
+        // Storage recovers: the next open starts a new hydration.
+        gate.release();
+        let (fh, len) = reader
+            .open_streaming("/docs/stuck.bin")
+            .await
+            .expect("an open after the failed flight retries");
+        assert_eq!(len, content.len() as u64);
+        assert_eq!(reader.read(fh, 7, 9).await.unwrap(), &content[7..16]);
+        reader.release(fh).await.unwrap();
+    }
+}
+
+/// Every NFS READ is an `open_streaming`. A cache entry already verified for
+/// the same manifest, and unchanged on disk since, is not re-hashed.
+#[tokio::test]
+async fn repeated_streaming_opens_of_a_cached_file_verify_it_once() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "streaming-memo";
+    let content: Vec<u8> = (0u64..200_000).map(|i| ((i * 5) ^ (i >> 3)) as u8).collect();
+    publish_file(&op, prefix, tmp.path().join("writer"), "hot.bin", &content).await;
+
+    // Warm the cache, then start over as a restarted daemon would: a cached
+    // entry nobody in this process has verified yet.
+    let cache_dir = tmp.path().join("reader-cache");
+    let warm = memory_vfs_with_op(op.clone(), prefix, cache_dir.clone());
+    let (fh, _) = warm.open_streaming("/docs/hot.bin").await.unwrap();
+    warm.release(fh).await.unwrap();
+    assert_eq!(
+        warm.disk_cache().full_verifications(),
+        0,
+        "content verified while streaming in is not re-hashed"
+    );
+    drop(warm);
+
+    let reader = memory_vfs_with_op(op.clone(), prefix, cache_dir.clone());
+    for _ in 0..3 {
+        let (fh, len) = reader.open_streaming("/docs/hot.bin").await.unwrap();
+        assert_eq!(len, content.len() as u64);
+        assert_eq!(reader.read(fh, 100, 50).await.unwrap(), &content[100..150]);
+        reader.release(fh).await.unwrap();
+    }
+    assert_eq!(
+        reader.disk_cache().full_verifications(),
+        1,
+        "three opens of one cached file hash it once"
+    );
+
+    // Any change to the cached file invalidates the memo: it is re-hashed,
+    // found corrupt, and repaired from storage.
+    let entry = cache_files(&cache_dir)
+        .into_iter()
+        .find(|path| !path.to_string_lossy().ends_with(".tmp"))
+        .expect("cache entry");
+    {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&entry)
+            .unwrap();
+        file.write_at(b"XXXX", 100).unwrap();
+    }
+    let (fh, _) = reader.open_streaming("/docs/hot.bin").await.unwrap();
+    assert_eq!(reader.read(fh, 100, 50).await.unwrap(), &content[100..150]);
+    reader.release(fh).await.unwrap();
+    assert_eq!(reader.disk_cache().full_verifications(), 2);
+}
+
+#[test]
+fn concurrent_hydration_cap_parses_positive_integers_only() {
+    use tcfs_vfs::driver::{parse_max_concurrent_hydrations, DEFAULT_MAX_CONCURRENT_HYDRATIONS};
+    assert_eq!(parse_max_concurrent_hydrations(Some("2")), 2);
+    assert_eq!(parse_max_concurrent_hydrations(Some(" 16 ")), 16);
+    for bad in [None, Some(""), Some("0"), Some("-1"), Some("four")] {
+        assert_eq!(
+            parse_max_concurrent_hydrations(bad),
+            DEFAULT_MAX_CONCURRENT_HYDRATIONS,
+            "{bad:?}"
+        );
+    }
+}
+
+/// A hydration spawned while the runtime shuts down is dropped inside
+/// `tokio::spawn`. Its in-flight entry's drop must not need the lock the
+/// spawning open still holds, or the open deadlocks.
+#[test]
+fn open_during_runtime_shutdown_fails_instead_of_deadlocking() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "streaming-shutdown";
+    let content = vec![0x42u8; 4096];
+    rt.block_on(publish_file(
+        &op,
+        prefix,
+        tmp.path().join("writer"),
+        "late.bin",
+        &content,
+    ));
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    let handle = rt.handle().clone();
+    // Wait for the workers to finish shutting down, so every later spawn
+    // on this runtime is dropped immediately.
+    rt.shutdown_timeout(Duration::from_secs(10));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = handle.block_on(reader.open_streaming("/docs/late.bin"));
+        let _ = tx.send(outcome.map(|_| ()).map_err(|error| format!("{error:#}")));
+    });
+    let outcome = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("an open during runtime shutdown must not deadlock");
+    let error = outcome.expect_err("no task can hydrate on a shut-down runtime");
+    assert!(error.contains("hydration task ended"), "{error}");
 }
 
 #[tokio::test]

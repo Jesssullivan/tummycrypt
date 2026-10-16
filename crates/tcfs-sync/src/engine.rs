@@ -1872,8 +1872,12 @@ fn capture_upload_snapshot(
 /// that landed during the manifest publish would be recorded as synced, and
 /// `needs_sync` would never upload it. The captured size and mtime describe
 /// the bytes that were actually published. If the path's stat identity has
-/// moved since the capture, the recorded mtime is one no file has (0), so the
-/// next `needs_sync` re-hashes the file instead of trusting its stat.
+/// moved since the capture, or the capture was racy (its stat was too fresh
+/// to vouch for the bytes, so a same-size rewrite in the same mtime second
+/// would be indistinguishable), the recorded mtime is one no file has (0), so
+/// the next `needs_sync` re-hashes the file instead of trusting its stat.
+/// Once that re-hash matches on a settled stat,
+/// [`StateCache::needs_sync_refreshing`] records the real mtime again.
 ///
 /// Platforms without POSIX stat identity keep the previous behaviour.
 fn make_sync_state_from_snapshot(
@@ -1898,10 +1902,12 @@ fn make_sync_state_from_snapshot(
         Ok(Some(current)) => current != captured,
         Ok(None) | Err(_) => true,
     };
-    let mtime = if moved {
+    let mtime = if moved || snapshot.racy {
         debug!(
             path = %local_path.display(),
-            "source moved after capture; recording it for re-verification"
+            moved,
+            racy = snapshot.racy,
+            "capture stat cannot vouch for the bytes; recording it for re-verification"
         );
         0
     } else {
@@ -2210,8 +2216,8 @@ pub async fn upload_file_with_device(
     rel_path: Option<&str>,
     encryption: OptionalEncryption<'_>,
 ) -> Result<UploadResult> {
+    let sync_reason = state.needs_sync_refreshing(local_path)?;
     let tracked_state = state.get(local_path).cloned();
-    let sync_reason = state.needs_sync(local_path)?;
     let (result, state_update) = upload_file_with_device_with_state(
         op,
         local_path,
@@ -4787,14 +4793,14 @@ async fn push_tree_with_device_with_runtime(
                 cb(i as u64, total as u64, &msg);
             }
 
-            let tracked_state = state.get(path).cloned();
-            let sync_reason = match state.needs_sync(path) {
+            let sync_reason = match state.needs_sync_refreshing(path) {
                 Ok(reason) => reason,
                 Err(e) => {
                     warn!(path = %path.display(), "upload preflight failed: {e}");
                     continue;
                 }
             };
+            let tracked_state = state.get(path).cloned();
 
             match upload_file_with_device_with_state(
                 op,
@@ -4954,14 +4960,14 @@ async fn push_regular_files_concurrently(
             cb(i as u64, total as u64, &msg);
         }
 
-        let tracked_state = state.get(path).cloned();
-        let sync_reason = match state.needs_sync(path) {
+        let sync_reason = match state.needs_sync_refreshing(path) {
             Ok(reason) => reason,
             Err(e) => {
                 warn!(path = %path.display(), "upload preflight failed: {e}");
                 continue;
             }
         };
+        let tracked_state = state.get(path).cloned();
 
         let op = op.clone();
         let path = path.clone();
@@ -10861,6 +10867,44 @@ mod tests {
         assert!(
             state.needs_sync(&local).unwrap().is_some(),
             "an edit made during the publish must not be recorded as synced"
+        );
+    }
+
+    /// A capture whose stat is too fresh to vouch for its bytes (racy) must
+    /// not record that stat as synced: a same-size rewrite in the same
+    /// second keeps `(size, mtime-seconds)` and would otherwise never upload.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn racy_capture_is_recorded_for_reverification() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("racy.txt");
+        let published = b"version one, published";
+        let rewritten = b"version two, rewritten";
+        assert_eq!(published.len(), rewritten.len());
+        // Freshly written: the capture is racy (no SettledCaptures override).
+        std::fs::write(&local, published).unwrap();
+        let captured_mtime = std::fs::metadata(&local).unwrap().modified().unwrap();
+
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let result = upload_file_with_device(&op, &local, "data", &mut state, None, "", None, None)
+            .await
+            .unwrap();
+        assert!(!result.skipped);
+
+        // A same-size rewrite in the same mtime second (pinned, so the test
+        // does not depend on the wall clock crossing a second boundary).
+        std::fs::write(&local, rewritten).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&local)
+            .unwrap()
+            .set_modified(captured_mtime)
+            .unwrap();
+
+        assert!(
+            state.needs_sync(&local).unwrap().is_some(),
+            "a same-second same-size rewrite after a racy capture must be re-synced"
         );
     }
 

@@ -16,6 +16,8 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -29,6 +31,40 @@ use crate::cache::{cache_key_for_path, DiskCache};
 /// Chunks fetched ahead of the writer during streaming hydration. Peak
 /// memory is about this many stored chunks, whatever the file size.
 pub const DEFAULT_HYDRATION_WINDOW: usize = 8;
+
+/// Longest one chunk download may take. A storage read whose body stalls
+/// (no transport timeout fires on an idle keep-alive connection) fails here
+/// instead of wedging the hydration, and every open joined to it, forever.
+pub const DEFAULT_CHUNK_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Longest a streaming hydration may go without any chunk completing.
+pub const DEFAULT_HYDRATION_STALL_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Bounds on one streaming hydration.
+#[derive(Debug, Clone)]
+pub struct HydrationLimits {
+    /// Chunks fetched ahead of the writer.
+    pub window: usize,
+    /// Deadline for each chunk download.
+    pub chunk_timeout: Duration,
+    /// Deadline for any chunk to complete while the hydration waits.
+    pub stall_timeout: Duration,
+    /// Shared cap on hydrations fetching from storage at once. A permit is
+    /// taken only for a fetch, after the cache was consulted, so a cache hit
+    /// never waits behind downloads.
+    pub admission: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl Default for HydrationLimits {
+    fn default() -> Self {
+        Self {
+            window: DEFAULT_HYDRATION_WINDOW,
+            chunk_timeout: DEFAULT_CHUNK_FETCH_TIMEOUT,
+            stall_timeout: DEFAULT_HYDRATION_STALL_TIMEOUT,
+            admission: None,
+        }
+    }
+}
 
 /// Bytes an encrypted chunk adds to its plaintext (XChaCha20 nonce + tag).
 const ENCRYPTED_CHUNK_OVERHEAD: u64 = (tcfs_crypto::NONCE_SIZE + tcfs_crypto::TAG_SIZE) as u64;
@@ -221,7 +257,7 @@ async fn fetch_prepared_content(
         remote_prefix,
         manifest,
         crypto,
-        DEFAULT_HYDRATION_WINDOW,
+        &HydrationLimits::default(),
         |plaintext| {
             assembled.extend_from_slice(plaintext);
             Ok(())
@@ -231,7 +267,8 @@ async fn fetch_prepared_content(
     Ok(assembled)
 }
 
-/// Fetch one stored chunk and verify it against its content address.
+/// Fetch one stored chunk, within `timeout`, and verify it against its
+/// content address.
 async fn fetch_verified_chunk(
     op: Operator,
     chunk_key: String,
@@ -239,10 +276,16 @@ async fn fetch_verified_chunk(
     index: usize,
     total: usize,
     manifest_path: String,
+    timeout: Duration,
 ) -> Result<Vec<u8>> {
-    let chunk = op
-        .read(&chunk_key)
+    let chunk = tokio::time::timeout(timeout, op.read(&chunk_key))
         .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "timed out after {timeout:?} downloading chunk {}/{total}: {chunk_key}",
+                index + 1
+            )
+        })?
         .with_context(|| format!("downloading chunk {}/{total}: {chunk_key}", index + 1))?;
     let chunk_bytes = chunk.to_vec();
     let actual_chunk_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
@@ -272,25 +315,29 @@ fn chunk_plaintext(
 }
 
 /// Fetch, verify, decrypt and hand each chunk's plaintext to `sink` in file
-/// order, with at most `window` chunks fetched ahead. The whole-file size
-/// and BLAKE3 identity of a modern manifest are verified incrementally; the
-/// sink has seen every byte by the time an integrity failure is reported, so
-/// a caller writing to disk must discard its output on error.
+/// order, with at most `limits.window` chunks fetched ahead. The whole-file
+/// size and BLAKE3 identity of a modern manifest are verified incrementally;
+/// the sink has seen every byte by the time an integrity failure is
+/// reported, so a caller writing to disk must discard its output on error.
+///
+/// Every chunk download is bounded by `limits.chunk_timeout`, and the wait
+/// for the next completed chunk by `limits.stall_timeout`. On any error the
+/// outstanding downloads are aborted with the window.
 async fn stream_prepared_content<F>(
     op: &Operator,
     manifest_path: &str,
     remote_prefix: &str,
     manifest: &SyncManifest,
     crypto: Option<&HydrationCrypto>,
-    window: usize,
+    limits: &HydrationLimits,
     mut sink: F,
 ) -> Result<HydrationStats>
 where
     F: FnMut(&[u8]) -> Result<()>,
 {
+    let window = limits.window.max(1);
     debug!(manifest = %manifest_path, window, "hydrating");
 
-    let window = window.max(1);
     let prefix = remote_prefix.trim_end_matches('/');
     let hashes = manifest.chunk_hashes();
     let total = hashes.len();
@@ -315,6 +362,7 @@ where
                 index,
                 total,
                 manifest_path.to_string(),
+                limits.chunk_timeout,
             );
             pending.spawn(async move { (index, fetch.await) });
             next_spawn += 1;
@@ -341,9 +389,14 @@ where
 
         // `next_emit` is not ready, so it is still in flight (chunks are
         // spawned in order and the window always admits the oldest).
-        let (index, fetched) = pending
-            .join_next()
+        let (index, fetched) = tokio::time::timeout(limits.stall_timeout, pending.join_next())
             .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "hydration of {manifest_path} stalled: no chunk completed within {:?}",
+                    limits.stall_timeout
+                )
+            })?
             .context("hydration window drained before every chunk was fetched")?
             .context("hydration chunk task failed")?;
         let stored = fetched?;
@@ -447,11 +500,50 @@ pub async fn hydrate_cached_file_with_window(
     master_key: Option<&[u8; 32]>,
     window: usize,
 ) -> Result<CachedContent> {
+    hydrate_cached_file_with_limits(
+        op,
+        manifest_path,
+        manifest_bytes,
+        remote_prefix,
+        cache,
+        master_key,
+        &HydrationLimits {
+            window,
+            ..HydrationLimits::default()
+        },
+    )
+    .await
+}
+
+/// [`hydrate_cached_file_from_manifest_bytes`] with explicit limits.
+///
+/// A modern cache entry that this cache already verified against the same
+/// manifest, and whose file is unchanged since (same device, inode, size,
+/// mtime and ctime), is served without re-hashing it; any other entry is
+/// re-verified in full first.
+pub async fn hydrate_cached_file_with_limits(
+    op: &Operator,
+    manifest_path: &str,
+    manifest_bytes: &[u8],
+    remote_prefix: &str,
+    cache: &DiskCache,
+    master_key: Option<&[u8; 32]>,
+    limits: &HydrationLimits,
+) -> Result<CachedContent> {
     let (manifest, crypto) = prepare_manifest(manifest_bytes, manifest_path, master_key)?;
     let key = cache_key_for_path(manifest_path);
 
     if !manifest.is_legacy() {
         if let Some(file) = cache.open_entry(&key)? {
+            if cache.is_verified(&key, &file, &manifest.file_hash, manifest.file_size) {
+                debug!(manifest = %manifest_path, "hydration cache hit (already verified)");
+                return Ok(CachedContent {
+                    file,
+                    len: manifest.file_size,
+                    stats: None,
+                });
+            }
+            cache.note_full_verification();
             let verifying = manifest.clone();
             let checked = tokio::task::spawn_blocking(move || {
                 let mut file = file;
@@ -462,6 +554,7 @@ pub async fn hydrate_cached_file_with_window(
             match checked {
                 Ok((file, len)) => {
                     debug!(manifest = %manifest_path, "hydration cache hit");
+                    cache.remember_verified(&key, &file, &manifest.file_hash, len);
                     return Ok(CachedContent {
                         file,
                         len,
@@ -478,6 +571,17 @@ pub async fn hydrate_cached_file_with_window(
         }
     }
 
+    // Only a fetch takes an admission slot, and only for as long as it runs.
+    let _admitted = match &limits.admission {
+        Some(admission) => Some(
+            Arc::clone(admission)
+                .acquire_owned()
+                .await
+                .context("hydration admission closed")?,
+        ),
+        None => None,
+    };
+
     // `tmp` removes the temporary name when it is dropped uncommitted: on an
     // integrity or fetch error, and also when this future is dropped part way
     // (a FUSE/NFS protocol timeout). Unverified bytes are never left where a
@@ -489,7 +593,7 @@ pub async fn hydrate_cached_file_with_window(
         remote_prefix,
         &manifest,
         crypto.as_ref(),
-        window,
+        limits,
         |plaintext| {
             tmp_file
                 .write_all(plaintext)
@@ -502,9 +606,15 @@ pub async fn hydrate_cached_file_with_window(
     if manifest.is_legacy() {
         // Keep the open descriptor, drop the name: v1 content is not cached.
         drop(tmp);
-    } else if let Err(error) = cache.commit_tmp(tmp, &key).await {
-        // The verified bytes stay readable through the descriptor.
-        warn!(manifest = %manifest_path, %error, "failed to commit hydrated content to cache");
+    } else {
+        match cache.commit_tmp(tmp, &key).await {
+            // Just verified while streaming: a later open need not re-hash it.
+            Ok(()) => cache.remember_verified(&key, &tmp_file, &manifest.file_hash, stats.bytes),
+            // The verified bytes stay readable through the descriptor.
+            Err(error) => {
+                warn!(manifest = %manifest_path, %error, "failed to commit hydrated content to cache")
+            }
+        }
     }
 
     Ok(CachedContent {
@@ -634,6 +744,7 @@ pub async fn fetch_range_from_manifest_bytes(
             index,
             total,
             manifest_path.to_string(),
+            DEFAULT_CHUNK_FETCH_TIMEOUT,
         )
         .await?;
         let plaintext = chunk_plaintext(crypto.as_ref(), index, total, stored, manifest_path)?;
@@ -1135,7 +1246,10 @@ mod tests {
                 PREFIX,
                 &manifest,
                 None,
-                window,
+                &HydrationLimits {
+                    window,
+                    ..HydrationLimits::default()
+                },
                 |plaintext| {
                     let started = counter.started.load(std::sync::atomic::Ordering::SeqCst);
                     max_outstanding = max_outstanding.max(started - emitted);

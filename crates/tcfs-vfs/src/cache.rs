@@ -7,18 +7,158 @@
 //! Cache layout: `{cache_dir}/{hash[0..2]}/{hash}` (two-level sharding).
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
+
+/// Most cache entries whose verification is remembered at once.
+const VERIFIED_MEMO_CAPACITY: usize = 4096;
 
 pub struct DiskCache {
     dir: PathBuf,
     max_bytes: u64,
+    /// Entries already verified against a manifest identity, so a repeat
+    /// open (every NFS READ is one) does not re-hash the whole file.
+    verified: std::sync::Mutex<VerifiedMemo>,
+    /// Full re-hashes of cached entries performed, for tests and metrics.
+    full_verifications: AtomicU64,
+}
+
+/// What the filesystem says about one cache file. Any write to the file, a
+/// replacement of it, or a different file under the same name changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EntryStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl EntryStamp {
+    #[cfg(unix)]
+    fn of(file: &std::fs::File) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata().ok()?;
+        meta.is_file().then(|| EntryStamp {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+        })
+    }
+
+    /// Without POSIX inode metadata nothing is remembered: every open
+    /// re-verifies, as before.
+    #[cfg(not(unix))]
+    fn of(_file: &std::fs::File) -> Option<Self> {
+        None
+    }
+}
+
+/// Bounded least-recently-used memo of verified entries.
+#[derive(Default)]
+struct VerifiedMemo {
+    entries: HashMap<String, VerifiedEntry>,
+    tick: u64,
+}
+
+struct VerifiedEntry {
+    stamp: EntryStamp,
+    file_hash: String,
+    used: u64,
+}
+
+impl VerifiedMemo {
+    fn touch(&mut self) -> u64 {
+        self.tick += 1;
+        self.tick
+    }
 }
 
 impl DiskCache {
     /// Create a new disk cache at `dir` with the given capacity.
     pub fn new(dir: PathBuf, max_bytes: u64) -> Self {
-        DiskCache { dir, max_bytes }
+        DiskCache {
+            dir,
+            max_bytes,
+            verified: std::sync::Mutex::new(VerifiedMemo::default()),
+            full_verifications: AtomicU64::new(0),
+        }
+    }
+
+    fn memo(&self) -> std::sync::MutexGuard<'_, VerifiedMemo> {
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `file`, opened from `key`'s entry, is exactly the file this
+    /// cache last verified for a manifest with `file_hash` and `len`, and has
+    /// not changed since (same device, inode, size, mtime and ctime).
+    pub fn is_verified(&self, key: &str, file: &std::fs::File, file_hash: &str, len: u64) -> bool {
+        let Some(stamp) = EntryStamp::of(file) else {
+            return false;
+        };
+        if stamp.len != len {
+            return false;
+        }
+        let mut memo = self.memo();
+        let tick = memo.touch();
+        match memo.entries.get_mut(key) {
+            Some(entry) if entry.stamp == stamp && entry.file_hash == file_hash => {
+                entry.used = tick;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Remember that `file` (`key`'s entry) holds verified content for a
+    /// manifest with `file_hash` and `len`.
+    pub fn remember_verified(&self, key: &str, file: &std::fs::File, file_hash: &str, len: u64) {
+        let Some(stamp) = EntryStamp::of(file) else {
+            return;
+        };
+        if stamp.len != len {
+            return;
+        }
+        let mut memo = self.memo();
+        let used = memo.touch();
+        memo.entries.insert(
+            key.to_string(),
+            VerifiedEntry {
+                stamp,
+                file_hash: file_hash.to_string(),
+                used,
+            },
+        );
+        if memo.entries.len() > VERIFIED_MEMO_CAPACITY {
+            if let Some(oldest) = memo
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| key.clone())
+            {
+                memo.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn forget_verified(&self, key: &str) {
+        self.memo().entries.remove(key);
+    }
+
+    /// Count one full re-hash of a cached entry.
+    pub fn note_full_verification(&self) {
+        self.full_verifications.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Full re-hashes of cached entries performed so far.
+    pub fn full_verifications(&self) -> u64 {
+        self.full_verifications.load(Ordering::Relaxed)
     }
 
     /// Return the cache path for a given manifest hash key.
@@ -57,6 +197,7 @@ impl DiskCache {
             .await
             .with_context(|| format!("renaming cache entry: {}", path.display()))?;
         tmp.disarm();
+        self.forget_verified(key);
 
         // Best-effort eviction; failure is non-fatal
         let _ = self.evict_if_needed().await;
@@ -111,6 +252,7 @@ impl DiskCache {
             .await
             .with_context(|| format!("renaming cache entry: {}", path.display()))?;
         tmp.disarm();
+        self.forget_verified(key);
         let _ = self.evict_if_needed().await;
         Ok(())
     }
@@ -197,6 +339,9 @@ impl DiskCache {
                 break;
             }
             let _ = fs::remove_file(&path).await;
+            if let Some(key) = path.file_name().and_then(|name| name.to_str()) {
+                self.forget_verified(key);
+            }
             total = total.saturating_sub(size);
         }
 
@@ -205,6 +350,7 @@ impl DiskCache {
 
     /// Evict a specific cache entry by key. Returns bytes freed, or 0 if not cached.
     pub async fn evict(&self, key: &str) -> Result<u64> {
+        self.forget_verified(key);
         let path = self.path_for(key);
         match fs::metadata(&path).await {
             Ok(meta) => {
@@ -222,6 +368,9 @@ impl DiskCache {
     ///
     /// Walks the two-level shard directories and removes matching files.
     pub async fn evict_prefix(&self, prefix: &str) -> Result<u64> {
+        self.memo()
+            .entries
+            .retain(|key, _| !key.starts_with(prefix));
         let mut freed = 0u64;
         let mut top = fs::read_dir(&self.dir).await?;
         while let Some(shard) = top.next_entry().await? {

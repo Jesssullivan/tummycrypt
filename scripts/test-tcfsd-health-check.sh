@@ -43,8 +43,8 @@ run_check() {
         TCFS_HEALTH_MOUNT_PATH="${CHECK_MOUNT_PATH:-}" \
         TCFS_HEALTH_STATE_DIR="${WORK}/state" \
         TCFS_HEALTH_RESTART_CMD="echo restart >> '${RESTART_LOG}'" \
-        TCFS_HEALTH_BACKOFF_BASE_SECS=60 \
-        TCFS_HEALTH_BACKOFF_CAP_SECS=3600 \
+        TCFS_HEALTH_BACKOFF_BASE_SECS="${CHECK_BASE_SECS-60}" \
+        TCFS_HEALTH_BACKOFF_CAP_SECS="${CHECK_CAP_SECS-3600}" \
         TCFS_HEALTH_NOW="${NOW}" \
         STUB_HEALTH_EXIT="${STUB_HEALTH_EXIT}" \
         "${SCRIPT}"
@@ -140,9 +140,13 @@ for tool in bash sh env mktemp cat rm sleep date uname id mkdir mv; do
     ln -sf "$(command -v "${tool}")" "${BIN}/${tool}"
 done
 [[ ! -e "${BIN}/timeout" && ! -e "${BIN}/gtimeout" ]] || fail "fixture PATH must lack timeout"
-# A stale mount: `ls` never returns.
-printf '#!%s\nexec sleep 60\n' "$(command -v bash)" >"${BIN}/ls"
+# A stale mount: `ls` never returns. Each probe start is logged, so the
+# harness can count how many probes the check spawned.
+PROBE_LOG="${WORK}/probes.log"
+: >"${PROBE_LOG}"
+printf '#!%s\necho probe >> %q\nexec sleep 60\n' "$(command -v bash)" "${PROBE_LOG}" >"${BIN}/ls"
 chmod +x "${BIN}/ls"
+probes() { wc -l <"${PROBE_LOG}" | tr -d ' '; }
 CHECK_PATH="${BIN}"
 CHECK_TIMEOUT_SECS=1
 
@@ -163,6 +167,53 @@ started="$(date +%s)"
 NOW=$((NOW + 100000)); expect_exit 2
 (( $(date +%s) - started < 10 )) || fail "a hung mount probe must be abandoned at the deadline"
 [[ "$(restarts)" == $((before + 1)) ]] || fail "a stale mount with the daemon up must restart once"
+
+# 8. While that restart's backoff is active, a mount whose last probe hung
+#    is not probed again: a probe stuck in the kernel on a dead mount can
+#    outlive SIGKILL, so one new `ls` per tick would leak one process per
+#    tick. The check reports DOWN without spawning a probe.
+probes_before="$(probes)"
+restarts_before="$(restarts)"
+NOW=$((NOW + 10)); expect_exit 2
+[[ "$(probes)" == "${probes_before}" ]] || fail "a hung mount must not be re-probed during restart backoff: ${LAST_OUT}"
+[[ "$(restarts)" == "${restarts_before}" ]] || fail "no restart inside the backoff window"
+[[ "${LAST_OUT}" == *"probe skipped"* ]] || fail "a skipped probe must be reported: ${LAST_OUT}"
+#    Once the backoff (here 120 s, the second restart) expires the mount is
+#    probed again (and restarted).
+NOW=$((NOW + 200)); expect_exit 2
+[[ "$(probes)" == $((probes_before + 1)) ]] || fail "the mount must be re-probed after the backoff expires"
+[[ "$(restarts)" == $((restarts_before + 1)) ]] || fail "a still-stale mount restarts after the backoff"
+#    A mount that answers again clears the hung-probe marker.
+printf '#!%s\nexit 0\n' "$(command -v bash)" >"${BIN}/ls"
+NOW=$((NOW + 100000)); expect_exit 0
+printf '#!%s\necho probe >> %q\nexec sleep 60\n' "$(command -v bash)" "${PROBE_LOG}" >"${BIN}/ls"
+#    A daemon-down restart's backoff alone never suppresses the probe.
+STUB_HEALTH_EXIT=2
+NOW=$((NOW + 1)); expect_exit 2
+STUB_HEALTH_EXIT=0
+probes_before="$(probes)"
+NOW=$((NOW + 1)); expect_exit 2
+[[ "$(probes)" == $((probes_before + 1)) ]] || fail "a mount that never hung must still be probed during backoff"
 unset CHECK_PATH CHECK_TIMEOUT_SECS CHECK_MOUNT_PATH
+
+# 9. Malformed backoff settings fall back to the defaults (300 s base,
+#    21600 s cap) instead of breaking the arithmetic: `5m` must not turn
+#    into a restart on every tick or an arithmetic error.
+rm -rf "${WORK}/state"
+STUB_HEALTH_EXIT=2
+for bad in 5m 0 -1 ""; do
+    rm -rf "${WORK}/state"
+    CHECK_BASE_SECS="${bad}"
+    CHECK_CAP_SECS="${bad}"
+    before="$(restarts)"
+    NOW=$((NOW + 100000)); expect_exit 2
+    [[ "${LAST_OUT}" != *"syntax error"* && "${LAST_OUT}" != *"error token"* ]] \
+        || fail "backoff '${bad}' broke the check: ${LAST_OUT}"
+    [[ "$(restarts)" == $((before + 1)) ]] || fail "backoff '${bad}': first outage must restart once"
+    [[ "${LAST_OUT}" == *"no sooner than 300s"* ]] || fail "backoff '${bad}' must use the 300s default: ${LAST_OUT}"
+    for _ in 1 2 3 4; do NOW=$((NOW + 60)); expect_exit 2; done
+    [[ "$(restarts)" == $((before + 1)) ]] || fail "backoff '${bad}': restart storm within the default backoff"
+done
+unset CHECK_BASE_SECS CHECK_CAP_SECS
 
 echo "tcfsd-health-check: all checks passed"

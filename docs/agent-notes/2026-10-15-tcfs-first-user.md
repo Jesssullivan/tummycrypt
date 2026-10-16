@@ -152,3 +152,61 @@ Follow-ups that were not done:
   that predates `5bc2175`.
 - `tcfs status` does not show the reconcile retry time.
 - A daemon that stays `DAEMON_BUSY` needs an operator. There is no escalation.
+
+## Re-review fix round
+
+An adversarial re-review of `cad5c5d` found one blocker, three majors and
+five minors. All nine are fixed in the working tree (staged, not committed).
+
+- **Flaky cancel test (blocker).** The test now holds chunk reads in an
+  OpenDAL layer (`ChunkGate`) and drops the open while a read is held, so
+  the outcome no longer depends on scheduling. 20 of 20 runs passed.
+- **Stalled hydration wedges the flight.** Each chunk download now has a
+  deadline (default 120 s). The wait for the next chunk to complete has a
+  no-progress deadline (default 180 s). A miss fails the flight, aborts its
+  stuck reads, and removes the in-flight entry, so the next open retries.
+  `TcfsVfs::with_hydration_timeouts` sets both. The S3 operator also gets
+  an OpenDAL `TimeoutLayer` below the retry layer (120 s per operation,
+  60 s per IO step). That wiring has no network test.
+- **Re-hash on every NFS READ.** `DiskCache` keeps a bounded LRU memo
+  (4096 entries) of entries already verified against a manifest. The key is
+  the cache key plus the manifest `file_hash`. The memo also checks device,
+  inode, size, mtime and ctime. A memo hit skips the re-hash. A changed file
+  is re-hashed, and a corrupt one is repaired. Content verified while it
+  streamed in is memoized at commit. FUSE benefits too, because its open
+  also goes through `open_streaming`. Residual: each READ still reads the
+  index entry and the manifest (two small GETs). That is the manifest
+  binding, kept on purpose.
+- **Racy capture recorded as synced.** `make_sync_state_from_snapshot`
+  now records mtime 0 when the capture is racy, as it already did when the
+  source moved.
+- **The mtime-0 sentinel never cleared.** The new
+  `StateCache::needs_sync_refreshing` records the current mtime after a
+  matching re-hash. It does this only when the stat identity is the same
+  before and after the hash and is outside the racy window. It is used by
+  `upload_file_with_device` and by both `push_tree` loops. `needs_sync`
+  itself stays pure.
+- **Uncapped background hydrations.** A per-mount semaphore caps hydrations
+  at 4 by default. `TCFS_VFS_MAX_CONCURRENT_HYDRATIONS` or
+  `with_max_concurrent_hydrations` overrides it. The permit is taken only
+  for a fetch, after the cache check, so a cache hit never waits behind
+  downloads.
+- **Spawn under the std mutex.** The open now inserts the flight entry,
+  releases the lock, then spawns. A test opens a file on a runtime that has
+  shut down. Before the fix it deadlocked. Now it fails cleanly.
+- **Backoff settings.** `TCFS_HEALTH_BACKOFF_{BASE,CAP}_SECS` must be
+  positive integers, otherwise the default applies. Before the fix, `5m`
+  caused a bash arithmetic error, exit 1, and a restart on every tick. A
+  cap below the base is raised to the base.
+- **Leaked mount probes.** A mount probe abandoned at its deadline now
+  records its PID (`mount_hung`) in the state file. While that marker is
+  set and the restart backoff is active, the check does not probe the mount
+  again. It reports `DOWN ... probe skipped` and exits 2. After the backoff
+  expires the mount is probed again. A successful probe clears the marker.
+
+Tests that failed on the old code with a real assertion: the cap test (6
+reads at the gate instead of 4), the shutdown test (deadlock), the racy
+capture test, and the harness cases for `5m` and for skipping the probe.
+Tests that need the new APIs could not compile against the old code: the
+stall/retry test, the memo counter test, the cap-parse test, and both
+sentinel tests.
