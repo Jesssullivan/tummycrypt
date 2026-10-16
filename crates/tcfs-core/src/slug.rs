@@ -450,10 +450,7 @@ mod tests {
         let dotted = "/Users/jess/git/tinyland.dev";
         assert_ne!(encode_path_slug(dotted), dotted.replace('/', "-"));
         let scored = "/Users/jess/git/spear_resumes";
-        assert_ne!(
-            encode_path_slug(scored),
-            scored.replace('/', "-").replace('.', "-")
-        );
+        assert_ne!(encode_path_slug(scored), scored.replace(['/', '.'], "-"));
     }
 
     #[test]
