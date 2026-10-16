@@ -19,6 +19,9 @@ prost = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }

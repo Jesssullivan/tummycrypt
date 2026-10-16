@@ -75,8 +75,25 @@ pub enum NatsTokenError {
     )]
     InlineTokenRefused,
 
-    #[error("NATS token file path must be absolute (or start with ~/): {path}")]
-    RelativePath { path: PathBuf },
+    /// The value is deliberately not echoed: a relative "path" is often a
+    /// token pasted into the path field by mistake.
+    #[error(
+        "NATS token file path is not absolute and does not start with ~/ \
+         (value not shown, {len} bytes); set an absolute path"
+    )]
+    RelativePath { len: usize },
+
+    #[error("NATS token file path starts with ~/ but HOME is unset, empty, relative or /")]
+    HomeUnusable,
+
+    #[error(
+        "NATS token file is owned by uid {owner}, not by the service user or root: {resolved}"
+    )]
+    NotOwned {
+        path: PathBuf,
+        resolved: PathBuf,
+        owner: u32,
+    },
 
     #[error("NATS token file does not exist (or is a dangling symlink): {path}")]
     Missing { path: PathBuf },
@@ -166,24 +183,66 @@ fn resolve_with_env(
     let Some(source) = nats_token_file_source(sync, env_value)? else {
         return Ok(None);
     };
+    // Log the path only once it has validated: a value that is not an
+    // absolute path may be a token pasted into the path field.
+    let token = read_nats_token_file_with(source.path(), credentials_dir)?;
     tracing::info!(
         origin = source.origin(),
         path = %source.path().display(),
-        "NATS: reading auth token file"
+        "NATS: read auth token file"
     );
-    read_nats_token_file_with(source.path(), credentials_dir).map(Some)
+    Ok(Some(token))
+}
+
+/// Process facts the token reader depends on. Injected so tests can pin them.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(not(unix), allow(dead_code))]
+struct ReadContext {
+    /// systemd `$CREDENTIALS_DIRECTORY`, if set.
+    credentials_dir: Option<PathBuf>,
+    /// `$HOME` (or `%USERPROFILE%`), used only to expand a leading `~/`.
+    home: Option<OsString>,
+    /// Effective uid of this process (Unix only).
+    euid: Option<u32>,
+}
+
+impl ReadContext {
+    fn from_process(credentials_dir: Option<&Path>) -> Self {
+        ReadContext {
+            credentials_dir: credentials_dir.map(Path::to_path_buf),
+            home: std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+            euid: process_euid(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn process_euid() -> Option<u32> {
+    // SAFETY: geteuid has no preconditions and only reads process identity.
+    Some(unsafe { libc::geteuid() })
+}
+
+#[cfg(not(unix))]
+fn process_euid() -> Option<u32> {
+    None
 }
 
 /// Read and validate a NATS token file.
 ///
 /// Policy (OI-1003-Q177):
-/// - the path must be absolute (a leading `~/` is expanded);
+/// - the path must be absolute, or start with `~/` and HOME must be an
+///   absolute directory other than `/`; a relative value is never echoed
+///   (it may be a token pasted into the path field);
 /// - symlinks are followed (sops-nix, agenix and Home Manager secrets are
 ///   symlinks into a generation directory), but every check applies to the
 ///   resolved target, a dangling link is [`NatsTokenError::Missing`], and a
 ///   target under `/nix/store` is refused;
 /// - the target must be a regular file no larger than
 ///   [`MAX_NATS_TOKEN_FILE_BYTES`];
+/// - the target is opened `O_NONBLOCK | O_NOFOLLOW` and its `fstat` must
+///   match the earlier stat, so a FIFO or symlink swapped in cannot hang or
+///   redirect the read;
+/// - on Unix, the owner must be the effective uid or root;
 /// - on Unix, `mode & 0o077` must be 0. Exception: a direct child of
 ///   systemd's `$CREDENTIALS_DIRECTORY` may show group bits, because systemd
 ///   grants a non-root unit access through a POSIX ACL whose mask surfaces as
@@ -201,12 +260,96 @@ fn read_nats_token_file_with(
     path: &Path,
     credentials_dir: Option<&Path>,
 ) -> Result<NatsToken, NatsTokenError> {
+    read_with_context(path, &ReadContext::from_process(credentials_dir))
+}
+
+/// Expand a leading `~/` against `home`.
+///
+/// Unlike the shared `config::expand_tilde`, an unset, empty, relative or `/`
+/// HOME is refused: `"~/x"` would otherwise silently become `"/x"` (a
+/// DynamicUser or container often has `HOME=/` or no HOME), i.e. the wrong file.
+fn expand_token_path(
+    path: &Path,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, NatsTokenError> {
+    let Some(rest) = path.to_str().and_then(|s| s.strip_prefix("~/")) else {
+        return Ok(path.to_path_buf());
+    };
+    let home = home.map(Path::new).filter(|home| {
+        home.is_absolute()
+            && home
+                .components()
+                .any(|c| matches!(c, std::path::Component::Normal(_)))
+    });
+    match home {
+        Some(home) => Ok(home.join(rest)),
+        None => Err(NatsTokenError::HomeUnusable),
+    }
+}
+
+/// OpenSSH `StrictModes`-style owner rule: the token file must belong to the
+/// reading user or to root (a systemd credential is root- or unit-owned).
+#[cfg(unix)]
+fn owner_allowed(file_uid: u32, euid: u32) -> bool {
+    file_uid == euid || file_uid == 0
+}
+
+/// Open `resolved` without blocking and verify the handle.
+///
+/// `O_NONBLOCK` means a FIFO renamed over the path after the caller's stat
+/// cannot hang the open (regular-file reads ignore the flag). `O_NOFOLLOW`
+/// refuses a symlink planted over the canonical path in the same window. The
+/// `fstat` of the opened handle is authoritative: it must be a regular file
+/// and the same inode the caller stat'ed.
+fn open_regular_file(
+    resolved: &Path,
+    before: &std::fs::Metadata,
+    display_path: &Path,
+) -> Result<(std::fs::File, std::fs::Metadata), NatsTokenError> {
+    let changed = || NatsTokenError::Changed {
+        path: display_path.to_path_buf(),
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(resolved).map_err(|source| {
+        #[cfg(unix)]
+        if source.raw_os_error() == Some(libc::ELOOP) {
+            return changed();
+        }
+        if source.kind() == std::io::ErrorKind::NotFound {
+            return changed();
+        }
+        NatsTokenError::Unreadable {
+            path: display_path.to_path_buf(),
+            source,
+        }
+    })?;
+    let meta = file
+        .metadata()
+        .map_err(|source| NatsTokenError::Unreadable {
+            path: display_path.to_path_buf(),
+            source,
+        })?;
+    if !meta.is_file() || !same_file(before, &meta) {
+        return Err(changed());
+    }
+    Ok((file, meta))
+}
+
+fn read_with_context(path: &Path, ctx: &ReadContext) -> Result<NatsToken, NatsTokenError> {
     use std::io::Read;
 
     let display_path = path.to_path_buf();
-    let expanded = crate::config::expand_tilde(path);
+    let expanded = expand_token_path(path, ctx.home.as_deref())?;
     if !expanded.is_absolute() {
-        return Err(NatsTokenError::RelativePath { path: display_path });
+        return Err(NatsTokenError::RelativePath {
+            len: path.as_os_str().len(),
+        });
     }
     if is_nix_store_path(&expanded) {
         return Err(NatsTokenError::InNixStore {
@@ -236,7 +379,7 @@ fn read_nats_token_file_with(
         });
     }
 
-    // stat before open so a FIFO or device is never opened (a FIFO open blocks).
+    // stat before open: refuse a FIFO or device without opening it.
     let before = std::fs::metadata(&resolved).map_err(io_err)?;
     if !before.is_file() {
         return Err(NatsTokenError::NotRegularFile {
@@ -245,17 +388,24 @@ fn read_nats_token_file_with(
         });
     }
 
-    let file = std::fs::File::open(&resolved).map_err(io_err)?;
-    let meta = file.metadata().map_err(io_err)?;
-    if !meta.is_file() || !same_file(&before, &meta) {
-        return Err(NatsTokenError::Changed { path: display_path });
-    }
+    let (file, meta) = open_regular_file(&resolved, &before, &display_path)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        if let Some(euid) = ctx.euid {
+            if !owner_allowed(meta.uid(), euid) {
+                return Err(NatsTokenError::NotOwned {
+                    path: display_path,
+                    resolved,
+                    owner: meta.uid(),
+                });
+            }
+        }
         let mode = meta.mode() & 0o7777;
-        let in_credentials_dir = credentials_dir
+        let in_credentials_dir = ctx
+            .credentials_dir
+            .as_deref()
             .and_then(|dir| std::fs::canonicalize(dir).ok())
             .is_some_and(|dir| resolved.parent() == Some(dir.as_path()));
         let forbidden = if in_credentials_dir { 0o007 } else { 0o077 };
@@ -267,8 +417,6 @@ fn read_nats_token_file_with(
             });
         }
     }
-    #[cfg(not(unix))]
-    let _ = credentials_dir;
 
     if meta.len() > MAX_NATS_TOKEN_FILE_BYTES {
         return Err(NatsTokenError::TooLarge {
@@ -277,7 +425,11 @@ fn read_nats_token_file_with(
         });
     }
 
-    let mut buf = Zeroizing::new(Vec::with_capacity(meta.len() as usize));
+    // Capacity is capped: meta.len() is only a hint (and the pre-check above
+    // already refused oversized files).
+    let mut buf = Zeroizing::new(Vec::with_capacity(
+        meta.len().min(MAX_NATS_TOKEN_FILE_BYTES + 1) as usize,
+    ));
     file.take(MAX_NATS_TOKEN_FILE_BYTES + 1)
         .read_to_end(&mut buf)
         .map_err(io_err)?;
@@ -631,5 +783,222 @@ mod tests {
         assert!(resolve_with_env(&sync_with(None, None), None, None)
             .unwrap()
             .is_none());
+    }
+
+    // ── Review follow-ups (FIFO race, HOME, echo, owner, mutation gaps) ──
+
+    #[cfg(unix)]
+    fn ctx(home: Option<&str>, euid: Option<u32>) -> ReadContext {
+        ReadContext {
+            credentials_dir: None,
+            home: home.map(OsString::from),
+            euid,
+        }
+    }
+
+    #[cfg(unix)]
+    fn my_euid() -> u32 {
+        process_euid().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_swapped_in_after_stat_does_not_block_open() {
+        // Race: the path was a regular file at stat time, then a FIFO was
+        // renamed over it. A blocking open(2) on a FIFO with no writer hangs
+        // forever; the open must be non-blocking and the fstat must refuse it.
+        let dir = tempfile::tempdir().unwrap();
+        let regular = write_token(dir.path(), "regular", SENTINEL.as_bytes(), 0o600);
+        let before = std::fs::metadata(&regular).unwrap();
+        let fifo = dir.path().join("fifo");
+        let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c_fifo is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_for_thread = fifo.clone();
+        std::thread::spawn(move || {
+            let result = open_regular_file(&fifo_for_thread, &before, &fifo_for_thread);
+            let _ = tx.send(result.map(|_| ()));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
+        if outcome.is_err() {
+            // Unblock the stuck reader so the thread can finish.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+            panic!("opening a FIFO blocked: the token open must be O_NONBLOCK");
+        }
+        let err = outcome.unwrap().unwrap_err();
+        assert!(matches!(err, NatsTokenError::Changed { .. }), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_different_file_than_was_stat_ed() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_token(dir.path(), "a", SENTINEL.as_bytes(), 0o600);
+        let b = write_token(dir.path(), "b", SENTINEL.as_bytes(), 0o600);
+        let before = std::fs::metadata(&a).unwrap();
+        let err = open_regular_file(&b, &before, &b).unwrap_err();
+        assert!(matches!(err, NatsTokenError::Changed { .. }), "{err:?}");
+        assert!(open_regular_file(&a, &before, &a).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tilde_path_expands_against_home() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("secrets")).unwrap();
+        write_token(
+            &home.path().join("secrets"),
+            "nats-token",
+            SENTINEL.as_bytes(),
+            0o600,
+        );
+        let token = read_with_context(
+            Path::new("~/secrets/nats-token"),
+            &ctx(home.path().to_str(), None),
+        )
+        .unwrap();
+        assert_eq!(token.expose_secret(), SENTINEL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tilde_path_without_usable_home_is_refused() {
+        // HOME unset/empty/relative/"/" would turn "~/x" into "/x" (or a
+        // relative path): the wrong file, silently. Refuse instead.
+        for home in [None, Some(""), Some("relative/home"), Some("/")] {
+            let err =
+                read_with_context(Path::new("~/secrets/nats-token"), &ctx(home, None)).unwrap_err();
+            assert!(
+                matches!(err, NatsTokenError::HomeUnusable),
+                "HOME={home:?}: {err:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_error_does_not_echo_the_value() {
+        // A token pasted into nats_token_file must not reach logs or errors.
+        let err = read_with_context(Path::new(SENTINEL), &ctx(None, None)).unwrap_err();
+        assert!(
+            matches!(err, NatsTokenError::RelativePath { .. }),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains(SENTINEL), "{err}");
+        assert!(!format!("{err:?}").contains(SENTINEL), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_not_owned_by_euid_or_root_is_refused() {
+        let me = my_euid();
+        if me == 0 {
+            // A root-owned file is always acceptable; nothing to prove as root.
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_token(dir.path(), "t", SENTINEL.as_bytes(), 0o600);
+        // Same file, but the reading process is a different, non-root user.
+        let err = read_with_context(&path, &ctx(None, Some(me + 1))).unwrap_err();
+        match err {
+            NatsTokenError::NotOwned { owner, .. } => assert_eq!(owner, me),
+            other => panic!("expected NotOwned, got {other:?}"),
+        }
+        assert_eq!(
+            read_with_context(&path, &ctx(None, Some(me)))
+                .unwrap()
+                .expose_secret(),
+            SENTINEL
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_rule_allows_self_and_root_only() {
+        assert!(owner_allowed(1000, 1000));
+        assert!(owner_allowed(0, 1000));
+        assert!(owner_allowed(0, 0));
+        assert!(!owner_allowed(1001, 1000));
+        assert!(!owner_allowed(1000, 0));
+    }
+
+    #[test]
+    fn nix_store_path_is_refused_before_touching_the_filesystem() {
+        // The literal path is refused even when it does not exist (otherwise
+        // it would surface as Missing, after a stat into the store).
+        let err = read_nats_token_file_with(
+            Path::new("/nix/store/00000000000000000000000000000000-tcfs-nats-token-absent"),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, NatsTokenError::InNixStore { .. }), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    fn some_nix_store_regular_file() -> Option<PathBuf> {
+        let mut dirs = Vec::new();
+        for entry in std::fs::read_dir("/nix/store").ok()?.flatten().take(500) {
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            if meta.is_file() {
+                return Some(path);
+            }
+            if meta.is_dir() && dirs.len() < 50 {
+                dirs.push(path);
+            }
+        }
+        for dir in dirs {
+            for entry in std::fs::read_dir(dir).ok()?.flatten().take(50) {
+                let path = entry.path();
+                if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_into_nix_store_is_refused() {
+        let Some(store_file) = some_nix_store_regular_file() else {
+            eprintln!("SKIP: no regular file found under /nix/store");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&store_file, &link).unwrap();
+        let err = read_nats_token_file_with(&link, None).unwrap_err();
+        assert!(matches!(err, NatsTokenError::InNixStore { .. }), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_whitespace_control_characters_are_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [("nul", &b"left\0right"[..]), ("bel", &b"left\x07right"[..])] {
+            let path = write_token(dir.path(), name, body, 0o600);
+            let err = read_nats_token_file_with(&path, None).unwrap_err();
+            assert!(
+                matches!(err, NatsTokenError::Malformed { .. }),
+                "{name}: {err:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credentials_dir_exception_applies_only_to_direct_children() {
+        let creds = tempfile::tempdir().unwrap();
+        let nested = creds.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let path = write_token(&nested, "nats-token", SENTINEL.as_bytes(), 0o440);
+        let err = read_nats_token_file_with(&path, Some(creds.path())).unwrap_err();
+        assert!(
+            matches!(err, NatsTokenError::InsecurePermissions { .. }),
+            "{err:?}"
+        );
     }
 }

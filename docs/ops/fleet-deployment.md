@@ -163,10 +163,13 @@ The file is refused, with a typed error that never contains token bytes, when:
 
 | Condition | Error |
 |-----------|-------|
-| path is relative (a leading `~/` is expanded first) | `RelativePath` |
+| path is relative (the value itself is not echoed: it may be a pasted token) | `RelativePath` |
+| path starts with `~/` but HOME is unset, empty, relative or `/` | `HomeUnusable` |
 | missing, or a dangling symlink | `Missing` |
 | path or symlink target is under `/nix/store` | `InNixStore` |
 | target is not a regular file (directory, device, FIFO) | `NotRegularFile` |
+| target swapped (different inode, FIFO or symlink) between stat and open | `Changed` |
+| target owned by neither the service user nor root | `NotOwned` |
 | `mode & 0o077 != 0` on the target (`chmod 600`/`400`) | `InsecurePermissions` |
 | larger than 4096 bytes | `TooLarge` |
 | empty after trimming one trailing `\n` / `\r\n` | `Empty` |
@@ -178,6 +181,15 @@ target. One narrow exception: a direct child of systemd's
 `$CREDENTIALS_DIRECTORY` may show a group read bit, because systemd grants a
 non-root unit access through a POSIX ACL whose mask surfaces as group bits;
 world bits are still refused there.
+
+The target is opened `O_NONBLOCK | O_NOFOLLOW` and the opened handle's `fstat`
+is authoritative, so a FIFO renamed over the path cannot hang daemon startup.
+The path is logged only after it validates.
+
+Token auth over `nats://` sends the token in the clear inside the CONNECT
+frame; it relies on the transport (the tailnet) for confidentiality, and tcfs
+already warns when it connects without TLS. If the NATS URL ever points at a
+host outside the tailnet, use `tls://` / `nats_tls = true`.
 
 The daemon treats NATS as best-effort, so a token refusal logs at `error`
 (`NATS token refused: ...`) and fleet sync stays disabled until fixed. The

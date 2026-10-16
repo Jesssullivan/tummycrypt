@@ -15,6 +15,7 @@
 //!   AWS_ACCESS_KEY_ID=<from k8s secret seaweedfs-admin> \
 //!   AWS_SECRET_ACCESS_KEY=<from k8s secret seaweedfs-admin> \
 //!   TCFS_NATS_URL=nats://nats-tcfs:4222 \
+//!   TCFS_NATS_TOKEN_FILE=/path/to/0600/nats-token \\   # token-auth NATS (OI-1003-Q177)
 //!   cargo test -p tcfs-e2e --test fleet_live -- --nocapture
 //!
 //! Or run the named smoke lane wrapper:
@@ -55,6 +56,40 @@ fn s3_bucket() -> String {
 
 fn nats_url() -> String {
     std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| "nats://nats-tcfs:4222".into())
+}
+
+/// SyncConfig for live NATS clients: plaintext over the tailnet (as the
+/// former `NatsClient::connect(url, false, None)` calls), token resolved from
+/// `TCFS_NATS_TOKEN_FILE` by the same policy as tcfsd (OI-1003-Q177).
+fn live_sync_config() -> tcfs_core::config::SyncConfig {
+    tcfs_core::config::SyncConfig {
+        nats_tls: false,
+        ..Default::default()
+    }
+}
+
+/// tcfs `NatsClient` for the live server, with the token file applied.
+async fn live_nats_client() -> NatsClient {
+    NatsClient::connect_with_config(&nats_url(), &live_sync_config())
+        .await
+        .unwrap_or_else(|e| panic!("NATS connect failed: {e:#}"))
+}
+
+/// Raw async-nats client for the live server, with the token file applied.
+async fn live_raw_nats() -> async_nats::Client {
+    let url = nats_url();
+    let token = tcfs_core::nats_token::resolve_nats_token(&live_sync_config())
+        .unwrap_or_else(|e| panic!("NATS token file refused: {e}"));
+    let connected = match token {
+        Some(token) => {
+            async_nats::ConnectOptions::with_token(token.expose_secret().to_owned())
+                .connect(&url)
+                .await
+        }
+        None => async_nats::connect(&url).await,
+    };
+    // Do not format the error: keep the token path out of panics entirely.
+    connected.unwrap_or_else(|_| panic!("NATS connect failed (check URL and TCFS_NATS_TOKEN_FILE)"))
 }
 
 fn parse_explicit_bool(value: &str) -> Option<bool> {
@@ -258,10 +293,7 @@ async fn nats_connect_and_jetstream() {
         return;
     }
 
-    let url = nats_url();
-    let client = async_nats::connect(&url)
-        .await
-        .unwrap_or_else(|e| panic!("NATS connect to {url} failed: {e}"));
+    let client = live_raw_nats().await;
 
     // Verify JetStream is available
     let js = async_nats::jetstream::new(client.clone());
@@ -432,8 +464,7 @@ async fn live_nats_pubsub_roundtrip() {
         return;
     }
 
-    let url = nats_url();
-    let client = async_nats::connect(&url).await.expect("NATS connect");
+    let client = live_raw_nats().await;
 
     let test_id = uuid::Uuid::new_v4().to_string();
     let subject = format!("tcfs.e2e.test.{}", &test_id[..8]);
@@ -479,17 +510,13 @@ async fn live_state_consumer_replay_and_ephemeral_new_only() {
     let first_manifest = format!("manifests/{}/first", &test_id[..8]);
     let second_manifest = format!("manifests/{}/second", &test_id[..8]);
 
-    let publisher = NatsClient::connect(&nats_url(), false, None)
-        .await
-        .expect("connect publisher NATS client");
+    let publisher = live_nats_client().await;
     publisher
         .ensure_streams()
         .await
         .expect("ensure NATS streams");
 
-    let reader = NatsClient::connect(&nats_url(), false, None)
-        .await
-        .expect("connect reader NATS client");
+    let reader = live_nats_client().await;
     reader.ensure_streams().await.expect("ensure NATS streams");
 
     // Establish a fresh durable cursor at the current tail so historical
@@ -549,8 +576,7 @@ async fn neo_honey_two_device_sync_smoke() {
     }
 
     let op = live_operator().expect("S3 credentials required");
-    let url = nats_url();
-    let client = async_nats::connect(&url).await.expect("NATS connect");
+    let client = live_raw_nats().await;
 
     let neo_root = TempDir::new().unwrap();
     let honey_root = TempDir::new().unwrap();

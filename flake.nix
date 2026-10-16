@@ -193,6 +193,12 @@
           inherit tcfsd-app;
         };
 
+        # Eval-only regression check for the programs.tcfs config renderer
+        # (natsTokenFile must not drop syncRoot; OI-1003-Q177).
+        checks.tcfs-user-config-render =
+          assert import ./nix/tests/tcfs-user-config-render.nix { inherit (pkgs) lib; };
+          pkgs.runCommand "tcfs-user-config-render" { } "touch $out";
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ (with pkgs; [
             rustToolchain

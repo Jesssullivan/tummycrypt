@@ -195,22 +195,10 @@ in {
 
     home.packages = [ cfg.package ];
 
-    xdg.configFile."tcfs/config.toml".source = toml.generate "tcfs-config" (
-      lib.recursiveUpdate {
-        daemon.socket = "%t/tcfsd/tcfsd.sock";
-        secrets.age_identity = cfg.identity;
-        # Emit nats_tls explicitly — the Rust default is true, but lab NATS is
-        # plaintext (tailnet-encrypted). Consumer `settings` can override.
-        sync.nats_tls = cfg.natsTls;
-      } (lib.recursiveUpdate
-        (lib.optionalAttrs (cfg.syncRoot != null) {
-          sync.sync_root = cfg.syncRoot;
-        } // lib.optionalAttrs (cfg.natsTokenFile != null) {
-          sync.nats_token_file = cfg.natsTokenFile;
-        })
-        cfg.settings
-      )
-    );
+    # Rendered by a pure helper so nix/tests/tcfs-user-config-render.nix can
+    # check it (both syncRoot and natsTokenFile must survive the merge).
+    xdg.configFile."tcfs/config.toml".source = toml.generate "tcfs-config"
+      (import ./tcfs-user-config.nix { inherit lib; } cfg);
 
     # ── Linux: systemd user service ─────────────────────────────────────────
     systemd.user.services.tcfsd = lib.mkIf pkgs.stdenv.isLinux {
