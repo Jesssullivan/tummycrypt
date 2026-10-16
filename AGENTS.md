@@ -2,12 +2,13 @@
 
 ## Ratified rulings (read first)
 
-Operator interview 2026-09-20, Linear TIN-3692; placement per R-N14
-(2026-09-21). R-N11 and R-N12 were superseded on 2026-10-04 by
-**R-HOOK-CONVERGENCE-20261004** (explicit operator interview, TIN-3692 comment
-`98cf680c`), which replaced the former blanket process ban and hook-stop
-mechanics. The operator's machine-level rulings and lab `AGENTS.md` carry the
-fuller text; this block is the summary and applies in this repo unchanged.
+**R-HOOK-CONVERGENCE-20261004**, explicit operator interview, Linear TIN-3692
+comment `98cf680c-7299-4949-bfb2-60079053ad43`, supersedes the former R-N11
+blanket process ban and R-N12 hook-stop mechanics. This block is copied from
+the lab-managed machine defaults ("Ratified rulings" in the global Claude
+defaults); escape hatches and the receipt format live in lab
+`docs/operations/HOOK_ADVISORY.md`. Ratified operator rulings from
+2026-10-04 on outrank this file.
 
 - **R-N11 — Ownership before action.** Your own recorded tasks and named
   services are permitted after checking ownership and live sessions.
@@ -28,6 +29,10 @@ fuller text; this block is the summary and applies in this repo unchanged.
   session writes a `docs/agent-notes/` entry before ending, and distilled
   facts go to Linear. Ticket descriptions are never rewritten, only
   superseded by dated comments.
+- **Force push is allowed** (operator, 2026-10-16: "force push is totally
+  allowe[d]"). `--force` and `--force-with-lease` need no extra confirmation;
+  server-side branch protection is the only gate. Do not restate bans the
+  operator did not give, in this file, a lane brief or a receipt.
 
 ## Program context — where truth lives
 
@@ -286,12 +291,12 @@ concurrently. Adapted from the GFTB multi-agent orchestration pattern
 (`site.scaffold` `docs/patterns/multi-agent-orchestration.md` §3, commit
 `36c14ae`) and lab's durable-notes rule (`lab` commit `b48d46f7`, `TIN-2520`).
 
-- **Shared-PR lane claims — the `#534` lesson.** Claude-driven feature
-  branches live on the personal remote (`origin` = `Jesssullivan/tummycrypt`);
-  `codex/sync-origin-main-*` branches/PRs on the org mirror (`tinyland` =
-  `tinyland-inc/tummycrypt`) are codex-owned reconciliation lanes — don't
-  hand-edit or merge another agent's lane without diffing against the history
-  it reconciles.
+- **Shared-PR lane claims — the `#534` lesson.** Feature branches live on
+  the personal remote (`origin` = `Jesssullivan/tummycrypt`). A branch or PR
+  another session owns, including the older `codex/*` reconciliation lanes,
+  is a cross-session target: change or merge it only with explicit user
+  authorization (R-N11 above), and diff it against the history it reconciles
+  first.
 - **DO-NOT-TOUCH lists.** When a lane is in flight, its PR body should carry
   a short list of the crates it owns (e.g. "this PR owns `crates/tcfs-sync`
   — coordinate before stacking commits").
@@ -306,14 +311,14 @@ concurrently. Adapted from the GFTB multi-agent orchestration pattern
   tracks deliberate user-content conflicts on these two paths for the TIN-2658
   production resolver gate. Editing them in a PR is fine; do not "resolve" the
   live host-side divergence as a side effect of a docs change.
-- **Durable notes over scratchpad.** Session working notes go in
-  `docs/agent-notes/` (R-N13); product and operations records that matter
-  beyond the session go in dated files under `docs/ops/`. Neither lives
-  only in an ephemeral scratchpad or chat context a compaction/rotation
-  sweep can wipe. This repo rule outranks a harness default that says to
-  park working files in `/tmp` or a scratchpad dir — that default covers
-  genuinely transient scratch only (lab's `TIN-2520` clause is the canonical
-  statement of this precedence).
-- **Instruction precedence.** Repo-root `AGENTS.md` (this file) > the
-  nearest in-repo `.claude/CLAUDE.md` overlay > named `docs/ops/` facet docs
-  referenced from here or a task > machine-level / home-manager defaults.
+- **Durable notes over scratchpad.** Session working notes go in dated files
+  under `docs/agent-notes/` (`YYYY-MM-DD-<lane>.md`, R-N13); distilled facts
+  and rulings go on the owning Linear issue. `docs/ops/` holds runbooks,
+  designs and the live status doc, not session notes. Nothing durable is left
+  only in `/tmp`, a harness scratchpad or chat context; that default covers
+  genuinely transient scratch only.
+- **Instruction precedence.** Ratified operator rulings
+  (R-HOOK-CONVERGENCE-20261004 and later, above) outrank this file. Below
+  them: repo-root `AGENTS.md` (this file) > the root `CLAUDE.md` import
+  overlay > named `docs/ops/` facet docs referenced from here or a task >
+  machine-level / home-manager defaults.
