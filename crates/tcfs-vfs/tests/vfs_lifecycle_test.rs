@@ -1856,7 +1856,9 @@ async fn repeated_streaming_opens_of_a_cached_file_verify_it_once() {
         .unwrap()
         .finish();
     let prefix = "streaming-memo";
-    let content: Vec<u8> = (0u64..200_000).map(|i| ((i * 5) ^ (i >> 3)) as u8).collect();
+    let content: Vec<u8> = (0u64..200_000)
+        .map(|i| ((i * 5) ^ (i >> 3)) as u8)
+        .collect();
     publish_file(&op, prefix, tmp.path().join("writer"), "hot.bin", &content).await;
 
     // Warm the cache, then start over as a restarted daemon would: a cached
