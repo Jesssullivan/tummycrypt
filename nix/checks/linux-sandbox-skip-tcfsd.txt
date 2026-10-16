@@ -114,6 +114,7 @@ grpc::tests::resolve_conflict_retires_git_internal_path_before_classification
 grpc::tests::resolve_conflict_retires_normal_per_file_mutations
 grpc::tests::resolve_conflict_retires_symlink_alias_without_classification
 grpc::tests::resolve_conflict_retires_without_consulting_stored_git_path
+grpc::tests::status_answers_while_a_pull_is_in_flight
 grpc::tests::status_rechecks_live_storage_health
 grpc::tests::status_returns_version
 grpc::tests::sync_status_reports_explicit_conflict_state

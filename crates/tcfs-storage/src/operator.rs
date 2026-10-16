@@ -112,6 +112,11 @@ fn build_unlimited_s3_operator(
     Ok(Operator::new(builder)
         .context("creating OpenDAL S3 operator")?
         .layer(opendal::layers::LoggingLayer::default())
+        // Below the retry layer, so a timed-out attempt (a temporary error)
+        // is retried. Without it a response body that stops arriving on a
+        // live connection is awaited forever: reqwest has no read timeout
+        // here, and a stuck read holds its ConcurrentLimitLayer permit.
+        .layer(s3_timeout_layer())
         .layer(
             opendal::layers::RetryLayer::new()
                 .with_max_times(5)
@@ -119,6 +124,20 @@ fn build_unlimited_s3_operator(
                 .with_jitter(),
         )
         .finish())
+}
+
+/// Deadline for one non-streaming S3 operation (stat, delete, list page,
+/// starting a read or write).
+const S3_OP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Deadline for one IO step of a streaming read or write (one body chunk or
+/// one multipart part). A stalled transfer fails here instead of hanging.
+const S3_IO_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn s3_timeout_layer() -> opendal::layers::TimeoutLayer {
+    opendal::layers::TimeoutLayer::new()
+        .with_timeout(S3_OP_TIMEOUT)
+        .with_io_timeout(S3_IO_TIMEOUT)
 }
 
 const CONDITIONAL_WRITE_PROBE_TIMEOUT: Duration = Duration::from_secs(15);

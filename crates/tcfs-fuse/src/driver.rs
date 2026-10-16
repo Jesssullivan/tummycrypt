@@ -319,7 +319,7 @@ impl PathFilesystem for TcfsFs {
     async fn open(&self, _req: Request, path: &OsStr, flags: u32) -> fuse3::Result<ReplyOpen> {
         let path_str = path.to_str().ok_or(Errno::from(libc::ENOENT))?;
 
-        let (fh, _data) = tokio::time::timeout(VFS_TIMEOUT, self.vfs.open(path_str))
+        let (fh, _len) = tokio::time::timeout(VFS_TIMEOUT, self.vfs.open_streaming(path_str))
             .await
             .map_err(|_| {
                 warn!(path = %path_str, "FUSE OPEN timed out");

@@ -41,7 +41,9 @@ fresh deployment with `sync_always` and auth (Q177).
 Positioning (rulings Q155 and Q156, TIN-4543): tcfs is the long-run product.
 Bulkload is the migration tool. Their boundary is in
 [tcfs-bulkload-boundary.md](tcfs-bulkload-boundary.md). The Mac-only cohort on
-neo will be tcfs's first real use case: it will be mounted, not copied.
+neo will be tcfs's first real use case: it will be mounted, not copied. The
+end-to-end path, remaining gaps and acceptance test are in
+[first-user-mac-cohort.md](first-user-mac-cohort.md).
 
 Everything below this block is the **2026-08-22 snapshot and is historical**.
 It predates the pause. Its "proven now" rows describe what was true while the

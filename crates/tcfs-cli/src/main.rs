@@ -99,6 +99,10 @@ enum Commands {
     /// Show daemon and storage status
     Status,
 
+    /// One-line health verdict for supervisors: exit 0 UP, 2 DAEMON_DOWN
+    /// (restart may help), 3 BACKEND_DOWN and 4 DAEMON_BUSY (do not restart)
+    Health,
+
     /// Inspect daemon-enrolled stable roots (read-only)
     Roots {
         #[command(subcommand)]
@@ -845,6 +849,12 @@ async fn main() -> Result<()> {
     match cli.command {
         #[cfg(unix)]
         Commands::Status => cmd_status(&config).await,
+        #[cfg(unix)]
+        Commands::Health => cmd_health(&config).await,
+        #[cfg(not(unix))]
+        Commands::Health => {
+            anyhow::bail!("health command requires Unix daemon socket (not available on Windows)")
+        }
         #[cfg(not(unix))]
         Commands::Status => {
             anyhow::bail!("status command requires Unix daemon socket (not available on Windows)")
@@ -3977,6 +3987,71 @@ async fn cmd_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     check_for_update(&status.version);
 
     Ok(())
+}
+
+/// `tcfs health`: probe the daemon and storage, print one verdict line, and
+/// exit with the verdict's code (see `tcfs_cli::commands::health`). Never
+/// fails with a generic error: an unreachable daemon is itself a verdict.
+#[cfg(unix)]
+async fn cmd_health(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
+    use tcfs_cli::commands::health::{DaemonHealth, HealthProbe, StatusProbe};
+
+    let socket = &config.daemon.socket;
+    let socket_present = socket.exists();
+    let (status, detail) = if !socket_present {
+        (
+            StatusProbe::Failed,
+            format!("socket missing: {}", socket.display()),
+        )
+    } else {
+        match connect_daemon_without_session(socket).await {
+            Err(error) => (StatusProbe::Failed, format!("connect failed: {error:#}")),
+            Ok(mut client) => match tokio::time::timeout(
+                DAEMON_RPC_TIMEOUT,
+                client.status(tonic::Request::new(StatusRequest {})),
+            )
+            .await
+            {
+                Err(_elapsed) => (
+                    StatusProbe::TimedOut,
+                    format!(
+                        "connected, but the status RPC did not answer within {}s",
+                        DAEMON_RPC_TIMEOUT.as_secs()
+                    ),
+                ),
+                Ok(Err(error)) => (StatusProbe::Failed, format!("status RPC failed: {error}")),
+                Ok(Ok(response)) => {
+                    let status = response.into_inner();
+                    (
+                        StatusProbe::Answered {
+                            storage_ok: status.storage_ok,
+                        },
+                        format!(
+                            "storage={} endpoint={} nats={}",
+                            if status.storage_ok {
+                                "ok"
+                            } else {
+                                "unreachable"
+                            },
+                            sanitize_http_endpoint_for_display(&status.storage_endpoint),
+                            if status.nats_ok {
+                                "connected"
+                            } else {
+                                "disconnected"
+                            },
+                        ),
+                    )
+                }
+            },
+        }
+    };
+
+    let verdict = DaemonHealth::classify(HealthProbe {
+        socket_present,
+        status,
+    });
+    println!("{} {detail}", verdict.label());
+    std::process::exit(verdict.exit_code());
 }
 
 /// Check GitHub Releases for a newer tcfs version.

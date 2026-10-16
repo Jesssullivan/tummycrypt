@@ -229,18 +229,44 @@ pub fn chunk_file_streaming_metadata(path: &Path) -> Result<(Vec<Chunk>, crate::
         return Ok((vec![], crate::blake3::hash_bytes(&[])));
     }
 
-    let sizes = ChunkSizes::for_path(path);
+    let metadata = chunk_reader_streaming_metadata(file, ChunkSizes::for_path(path))?;
+    Ok((metadata.chunks, metadata.file_hash))
+}
 
+/// Chunk metadata, whole-file hash and byte count from one streaming pass.
+#[derive(Debug, Clone)]
+pub struct StreamingMetadata {
+    /// Content-defined chunk boundaries and per-chunk hashes.
+    pub chunks: Vec<Chunk>,
+    /// BLAKE3 of every byte the pass read, in order.
+    pub file_hash: crate::blake3::Hash,
+    /// Bytes the pass read. A caller compares this with the size it expected
+    /// from `fstat`, so a file that grew or shrank mid-read is refused.
+    pub bytes_read: u64,
+}
+
+/// Chunk an already-open reader in one streaming pass (bounded memory).
+///
+/// The caller owns the descriptor, so it can take a stat identity of that
+/// same descriptor before and after the pass. Each byte is read exactly once
+/// and feeds both the chunk hashes and the whole-file hash. An empty reader
+/// yields no chunks and the hash of the empty string.
+pub fn chunk_reader_streaming_metadata<R: std::io::Read>(
+    reader: R,
+    sizes: ChunkSizes,
+) -> Result<StreamingMetadata> {
     let chunker =
-        fastcdc::v2020::StreamCDC::new(file, sizes.min_size, sizes.avg_size, sizes.max_size);
+        fastcdc::v2020::StreamCDC::new(reader, sizes.min_size, sizes.avg_size, sizes.max_size);
 
     let mut chunks = Vec::new();
     let mut file_hasher = blake3::Hasher::new();
+    let mut bytes_read = 0u64;
 
     for result in chunker {
         let entry = result.map_err(|e| anyhow::anyhow!("streaming chunk metadata error: {e}"))?;
         let hash = crate::blake3::hash_bytes(&entry.data);
         file_hasher.update(&entry.data);
+        bytes_read += entry.data.len() as u64;
         chunks.push(Chunk {
             offset: entry.offset,
             length: entry.data.len(),
@@ -248,7 +274,11 @@ pub fn chunk_file_streaming_metadata(path: &Path) -> Result<(Vec<Chunk>, crate::
         });
     }
 
-    Ok((chunks, file_hasher.finalize()))
+    Ok(StreamingMetadata {
+        chunks,
+        file_hash: file_hasher.finalize(),
+        bytes_read,
+    })
 }
 
 #[cfg(test)]
@@ -337,6 +367,52 @@ mod tests {
             assert_eq!(mem.length, stream.data.len(), "chunk {i} length mismatch");
             assert_eq!(mem.hash, stream.hash, "chunk {i} hash mismatch");
         }
+    }
+
+    #[test]
+    fn reader_streaming_metadata_matches_path_variant_in_one_pass() {
+        let data: Vec<u8> = (0u64..300_000)
+            .map(|i| (i.wrapping_mul(13) ^ (i >> 5)) as u8)
+            .collect();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &data).unwrap();
+
+        let (path_chunks, path_hash) = chunk_file_streaming_metadata(tmp.path()).unwrap();
+
+        // Count every byte the reader hands out: one pass must read the file
+        // exactly once.
+        struct Counting<R> {
+            inner: R,
+            read: u64,
+        }
+        impl<R: std::io::Read> std::io::Read for Counting<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.inner.read(buf)?;
+                self.read += n as u64;
+                Ok(n)
+            }
+        }
+        let mut counting = Counting {
+            inner: std::fs::File::open(tmp.path()).unwrap(),
+            read: 0,
+        };
+        let metadata =
+            chunk_reader_streaming_metadata(&mut counting, ChunkSizes::for_path(tmp.path()))
+                .unwrap();
+
+        assert_eq!(counting.read, data.len() as u64);
+        assert_eq!(metadata.bytes_read, data.len() as u64);
+        assert_eq!(metadata.file_hash, path_hash);
+        assert_eq!(metadata.file_hash, crate::blake3::hash_bytes(&data));
+        assert_eq!(metadata.chunks.len(), path_chunks.len());
+        for (a, b) in metadata.chunks.iter().zip(path_chunks.iter()) {
+            assert_eq!((a.offset, a.length, a.hash), (b.offset, b.length, b.hash));
+        }
+
+        let empty = chunk_reader_streaming_metadata(std::io::empty(), ChunkSizes::SMALL).unwrap();
+        assert!(empty.chunks.is_empty());
+        assert_eq!(empty.bytes_read, 0);
+        assert_eq!(empty.file_hash, crate::blake3::hash_bytes(&[]));
     }
 
     #[test]

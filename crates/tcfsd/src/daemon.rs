@@ -1444,6 +1444,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 let orphan_chunk_cleanup_sweep_interval =
                     Duration::from_secs(orphan_chunk_cleanup_sweep_interval_secs);
                 let mut last_orphan_chunk_sweep = None;
+                // An unreachable backend fails every cycle the same way. Space
+                // full reconcile retries out (interval, 2x, 4x, … up to an
+                // hour) instead of hammering a dead endpoint and the log on
+                // every tick. Only backend failures back off, and a cheap
+                // health probe on each tick ends the backoff as soon as the
+                // backend answers again (`crate::backoff`).
+                let mut recon_backoff = crate::backoff::BackendBackoff::new(
+                    Duration::from_secs(recon_interval),
+                    Duration::from_secs(recon_interval.max(3600)),
+                );
                 // Skip the first immediate tick — startup index discovery covers it
                 interval.tick().await;
 
@@ -1459,6 +1469,22 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         }
                     };
                     drop(op_guard);
+
+                    if let Some(retry_in) = recon_backoff.retry_in(std::time::Instant::now()) {
+                        // One LIST with a short timeout, not a full reconcile.
+                        if tcfs_storage::check_health_for_prefix(&op, &recon_prefix)
+                            .await
+                            .is_err()
+                        {
+                            debug!(
+                                retry_in_secs = retry_in.as_secs(),
+                                "reconcile backing off; backend still unreachable"
+                            );
+                            continue;
+                        }
+                        recon_backoff.record_success();
+                        info!("backend answered a health probe; ending reconcile backoff early");
+                    }
 
                     // A missing policy file is the legitimate empty first-run
                     // store. Any existing unreadable/corrupt store is authority
@@ -1511,9 +1537,38 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     )
                     .await
                     {
-                        Ok(p) => p,
+                        Ok(p) => {
+                            if recon_backoff.record_success() {
+                                info!("periodic reconcile recovered; backoff reset");
+                            }
+                            p
+                        }
                         Err(e) => {
-                            warn!("periodic reconcile failed: {e}");
+                            // Classify by asking the backend, not by parsing
+                            // the error: a local refusal while storage answers
+                            // must not push the next attempt out by an hour.
+                            let kind = if tcfs_storage::check_health_for_prefix(&op, &recon_prefix)
+                                .await
+                                .is_ok()
+                            {
+                                crate::backoff::CycleFailure::Local
+                            } else {
+                                crate::backoff::CycleFailure::Backend
+                            };
+                            match recon_backoff
+                                .record_cycle_failure(std::time::Instant::now(), kind)
+                            {
+                                Some(delay) => warn!(
+                                    failures = recon_backoff.consecutive_failures(),
+                                    retry_in_secs = delay.as_secs(),
+                                    "periodic reconcile failed and storage is unreachable; \
+                                     backing off: {e}"
+                                ),
+                                None => warn!(
+                                    "periodic reconcile failed with storage reachable; \
+                                     retrying next interval: {e}"
+                                ),
+                            }
                             continue;
                         }
                     };

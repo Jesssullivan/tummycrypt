@@ -1543,6 +1543,35 @@ impl StateCache {
     /// Returns `None` if the file is up to date (unchanged since last sync).
     /// Returns `Some(reason)` if the file needs to be synced.
     pub fn needs_sync(&self, local_path: &Path) -> Result<Option<String>> {
+        self.check_sync(local_path).map(|(reason, _)| reason)
+    }
+
+    /// [`Self::needs_sync`], and when a stat mismatch is resolved by the
+    /// content hash (the bytes still match), record the file's current mtime
+    /// so later checks trust the stat again instead of re-hashing the file
+    /// every time. This clears the mtime-0 "re-verify" sentinel that a moved
+    /// or racy upload capture records.
+    ///
+    /// Only a settled stat is recorded: the stat identity must be the same
+    /// before and after the hash, and its mtime and ctime must be older than
+    /// the racy window. A fresher stat could hide a same-size rewrite in the
+    /// same mtime second, so it keeps being re-hashed until it settles.
+    pub fn needs_sync_refreshing(&mut self, local_path: &Path) -> Result<Option<String>> {
+        let (reason, refreshed_mtime) = self.check_sync(local_path)?;
+        if let Some(mtime) = refreshed_mtime {
+            if let Some(entry) = self.entries.get_mut(&path_key(local_path)) {
+                if entry.mtime != mtime {
+                    entry.mtime = mtime;
+                    self.dirty = true;
+                }
+            }
+        }
+        Ok(reason)
+    }
+
+    /// The sync verdict, plus the mtime (seconds) to record when the content
+    /// hash vouched for a settled stat that differs from the recorded one.
+    fn check_sync(&self, local_path: &Path) -> Result<(Option<String>, Option<u64>)> {
         let meta = std::fs::metadata(local_path)
             .with_context(|| format!("stat: {}", local_path.display()))?;
 
@@ -1555,22 +1584,41 @@ impl StateCache {
             .unwrap_or(0);
 
         match self.get(local_path) {
-            None => Ok(Some("new file".into())),
+            None => Ok((Some("new file".into()), None)),
             Some(cached) => {
                 if cached.size != size {
-                    return Ok(Some(format!("size changed: {} → {}", cached.size, size)));
+                    return Ok((
+                        Some(format!("size changed: {} → {}", cached.size, size)),
+                        None,
+                    ));
                 }
                 if cached.mtime != mtime {
                     // mtime changed — verify content hash before uploading
+                    let started_ns = crate::ingest::now_ns();
+                    let before = crate::ingest::path_identity(local_path).ok().flatten();
                     let hash = tcfs_chunks::hash_file(local_path)?;
                     let hash_hex = tcfs_chunks::hash_to_hex(&hash);
                     if hash_hex != cached.blake3 {
-                        return Ok(Some("content changed (hash mismatch)".into()));
+                        return Ok((Some("content changed (hash mismatch)".into()), None));
                     }
-                    // mtime changed but content is identical — update mtime only
-                    // (will be handled by caller updating the cache)
+                    // Content is identical. Its stat may be recorded only if
+                    // it vouched for exactly the bytes just hashed and is too
+                    // old for a same-second rewrite to hide behind it.
+                    let after = crate::ingest::path_identity(local_path).ok().flatten();
+                    let ended_ns = crate::ingest::now_ns();
+                    let refreshed = match (before, after) {
+                        (Some(before), Some(after))
+                            if before == after
+                                && before.size == cached.size
+                                && !crate::ingest::is_racy(Some(&before), started_ns, ended_ns) =>
+                        {
+                            u64::try_from(before.mtime_sec).ok()
+                        }
+                        _ => None,
+                    };
+                    return Ok((None, refreshed));
                 }
-                Ok(None)
+                Ok((None, None))
             }
         }
     }
@@ -2765,6 +2813,77 @@ mod tests {
         let result = cache.needs_sync(&file).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "new file");
+    }
+
+    fn reverify_sentinel_state(file: &Path, content: &[u8]) -> SyncState {
+        SyncState {
+            blake3: tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(content)),
+            size: content.len() as u64,
+            // The sentinel a moved or racy upload capture records.
+            mtime: 0,
+            chunk_count: 1,
+            remote_path: format!("bucket/{}", file.display()),
+            last_synced: 9999,
+            vclock: VectorClock::new(),
+            device_id: String::new(),
+            conflict: None,
+            status: Default::default(),
+        }
+    }
+
+    fn mtime_secs(file: &Path) -> u64 {
+        std::fs::metadata(file)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rehash_match_on_a_settled_stat_clears_the_reverify_sentinel() {
+        let _settled = crate::ingest::test_support::SettledCaptures::enable();
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let file = dir.path().join("settled.txt");
+        std::fs::write(&file, b"unchanged bytes").unwrap();
+        cache.set(&file, reverify_sentinel_state(&file, b"unchanged bytes"));
+
+        // The pure check re-hashes but records nothing.
+        assert_eq!(cache.needs_sync(&file).unwrap(), None);
+        assert_eq!(cache.get(&file).unwrap().mtime, 0);
+
+        // The refreshing check records the verified, settled stat, so the
+        // next check trusts it instead of re-hashing forever.
+        assert_eq!(cache.needs_sync_refreshing(&file).unwrap(), None);
+        assert_eq!(cache.get(&file).unwrap().mtime, mtime_secs(&file));
+
+        // A later edit is still detected. (It changes the size: with the
+        // racy window disabled, a same-second same-size rewrite is exactly
+        // what a stat cannot see, which is why a racy stat is never recorded.)
+        std::fs::write(&file, b"changed bytes, longer").unwrap();
+        assert!(cache.needs_sync_refreshing(&file).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rehash_match_on_a_racy_stat_keeps_the_reverify_sentinel() {
+        // No SettledCaptures: a file written a moment ago is racy, so a
+        // same-second same-size rewrite could still hide behind its stat.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let file = dir.path().join("fresh.txt");
+        std::fs::write(&file, b"fresh bytes").unwrap();
+        cache.set(&file, reverify_sentinel_state(&file, b"fresh bytes"));
+
+        assert_eq!(cache.needs_sync_refreshing(&file).unwrap(), None);
+        assert_eq!(
+            cache.get(&file).unwrap().mtime,
+            0,
+            "a racy stat must keep being re-verified"
+        );
     }
 
     #[test]

@@ -44,7 +44,9 @@ use tcfs_sync::index_entry::{
 use tcfs_sync::manifest::{SymlinkManifest, SyncManifest};
 
 use crate::cache::DiskCache;
-use crate::hydrate::fetch_cached_from_manifest_bytes;
+use crate::hydrate::{
+    fetch_cached_from_manifest_bytes, hydrate_cached_file_with_limits, HydrationLimits,
+};
 use crate::negative_cache::NegativeCache;
 use crate::stub::IndexEntry;
 use crate::types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};
@@ -53,6 +55,56 @@ use crate::vfs::VirtualFilesystem;
 /// Maximum in-memory file buffer size (10 GB).
 /// Writes exceeding this are rejected with EFBIG.
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024 * 1024;
+
+/// Background hydrations allowed to fetch from storage at once, unless
+/// `TCFS_VFS_MAX_CONCURRENT_HYDRATIONS` or
+/// [`TcfsVfs::with_max_concurrent_hydrations`] says otherwise. Each one keeps
+/// up to a window of chunk reads in flight, so this also bounds how much of
+/// the storage operation limit hydration can take from everything else.
+pub const DEFAULT_MAX_CONCURRENT_HYDRATIONS: usize = 4;
+
+/// Environment override for [`DEFAULT_MAX_CONCURRENT_HYDRATIONS`].
+pub const MAX_CONCURRENT_HYDRATIONS_ENV: &str = "TCFS_VFS_MAX_CONCURRENT_HYDRATIONS";
+
+/// Parse a concurrent-hydration cap: a positive integer, else the default.
+pub fn parse_max_concurrent_hydrations(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&cap| cap > 0)
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_HYDRATIONS)
+}
+
+/// Hydration cache temporary files untouched for this long belong to a writer
+/// that died (a killed or restarted daemon) and are swept at startup.
+const STALE_CACHE_TMP_AGE: Duration = Duration::from_secs(3600);
+
+/// One shared streaming hydration's outcome: a read descriptor on verified
+/// content and its length.
+type HydrationOutcome = std::result::Result<(Arc<std::fs::File>, u64), Arc<anyhow::Error>>;
+
+/// Hydrations in flight, keyed by manifest object and the master key they
+/// run under, so concurrent and retried opens of one file share one fetch.
+type HydrationFlights = Arc<
+    std::sync::Mutex<
+        HashMap<(String, Option<[u8; 32]>), tokio::sync::watch::Receiver<Option<HydrationOutcome>>>,
+    >,
+>;
+
+/// Removes a hydration's entry from the in-flight map when the task ends,
+/// however it ends (including a panic).
+struct FlightEntry {
+    flights: HydrationFlights,
+    key: (String, Option<[u8; 32]>),
+}
+
+impl Drop for FlightEntry {
+    fn drop(&mut self) {
+        self.flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+    }
+}
 
 /// Sentinel filename written under empty directories so they appear
 /// in S3 `list()` results. Filtered out of readdir output.
@@ -80,14 +132,61 @@ pub fn virtual_path_to_canonical_rel_path(vpath: &str) -> Result<&str> {
 /// answer as a directory without first attempting a noisy missing object read.
 const DIR_HINT_TTL: Duration = Duration::from_secs(2);
 
-/// An open file handle — holds content in memory, tracks write state.
+/// An open file handle — holds or references content, tracks write state.
 struct FileHandle {
     /// Virtual path (e.g., "/src/main.rs")
     path: String,
-    /// File content in memory (hydrated on open, modified on write)
-    data: Vec<u8>,
+    /// File content (hydrated on open, modified on write)
+    data: HandleData,
     /// True if data has been modified since open (needs flush on release)
     modified: bool,
+}
+
+/// Content behind an open handle.
+enum HandleData {
+    /// Whole content in memory: handles opened through `open()`, created
+    /// files, and any handle that has been written or truncated.
+    Memory(Vec<u8>),
+    /// Verified hydrated content in the disk cache, read by range without a
+    /// resident copy (TIN-1419). Becomes `Memory` on the first write or
+    /// truncate.
+    Cached { file: Arc<std::fs::File>, len: u64 },
+}
+
+impl HandleData {
+    /// Mutable in-memory content. A cached handle must be materialized first
+    /// with [`TcfsVfs::materialize_handle`], which loads it without holding
+    /// the handle table lock.
+    fn memory_mut(&mut self) -> Result<&mut Vec<u8>> {
+        match self {
+            HandleData::Memory(data) => Ok(data),
+            HandleData::Cached { .. } => {
+                anyhow::bail!("EAGAIN: cached handle was not materialized before mutation")
+            }
+        }
+    }
+}
+
+/// Positional read of `[offset, offset + size)` from a cached handle's file,
+/// clamped to `len`.
+fn read_cached_range(file: &std::fs::File, len: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+    if offset >= len {
+        return Ok(Vec::new());
+    }
+    let end = offset.saturating_add(size).min(len);
+    let mut buf = vec![0u8; usize::try_from(end - offset).context("read size")?];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let at = offset + filled as u64;
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(file, &mut buf[filled..], at);
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(file, &mut buf[filled..], at);
+        let n = n.context("reading hydrated cache file")?;
+        anyhow::ensure!(n > 0, "hydrated cache file ended early at byte {at}");
+        filled += n;
+    }
+    Ok(buf)
 }
 
 /// An index entry paired with the logical path that selected it.
@@ -165,6 +264,17 @@ pub struct TcfsVfs {
     trash_enabled: bool,
     /// Recently observed remote directories from list results.
     known_dirs: Arc<RwLock<HashMap<String, Instant>>>,
+    /// Streaming hydrations in flight (single-flight). A hydration runs in
+    /// its own task, so a protocol timeout that drops an opener does not
+    /// abort the download; the next open joins it instead of restarting it.
+    hydrations: HydrationFlights,
+    /// Bounds on those background hydrations: per-chunk and stall deadlines
+    /// (so a stalled storage read cannot wedge a flight forever) and the
+    /// shared admission cap.
+    hydration_limits: HydrationLimits,
+    /// Largest content a handle may hold in memory (write, truncate, or the
+    /// materialization of a cached handle). Defaults to `MAX_WRITE_SIZE`.
+    max_write_bytes: u64,
 }
 
 impl TcfsVfs {
@@ -187,13 +297,18 @@ impl TcfsVfs {
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         #[cfg(not(unix))]
         let (uid, gid) = (0u32, 0u32);
+        let disk_cache = DiskCache::new(cache_dir, cache_max_bytes);
+        let swept = disk_cache.sweep_stale_tmp(STALE_CACHE_TMP_AGE);
+        if swept > 0 {
+            tracing::info!(swept, "removed stale hydration cache temporary files");
+        }
         TcfsVfs {
             op,
             prefix,
             uid,
             gid,
             negative_cache: Arc::new(NegativeCache::new(negative_ttl)),
-            disk_cache: Arc::new(DiskCache::new(cache_dir, cache_max_bytes)),
+            disk_cache: Arc::new(disk_cache),
             handles: Arc::new(RwLock::new(HashMap::new())),
             next_fh: Arc::new(AtomicU64::new(1)),
             mount_time: SystemTime::now(),
@@ -205,7 +320,40 @@ impl TcfsVfs {
             writes_enabled: true,
             trash_enabled: false,
             known_dirs: Arc::new(RwLock::new(HashMap::new())),
+            hydrations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            hydration_limits: HydrationLimits {
+                admission: Some(Arc::new(tokio::sync::Semaphore::new(
+                    parse_max_concurrent_hydrations(
+                        std::env::var(MAX_CONCURRENT_HYDRATIONS_ENV).ok().as_deref(),
+                    ),
+                ))),
+                ..HydrationLimits::default()
+            },
+            max_write_bytes: MAX_WRITE_SIZE as u64,
         }
+    }
+
+    /// Cap background hydrations fetching from storage at once (at least 1).
+    pub fn with_max_concurrent_hydrations(mut self, max: usize) -> Self {
+        self.hydration_limits.admission = Some(Arc::new(tokio::sync::Semaphore::new(max.max(1))));
+        self
+    }
+
+    /// Deadlines for background hydration: each chunk download, and the
+    /// longest wait for any chunk to complete. A hydration that misses one
+    /// fails, leaves the in-flight map, and the next open starts afresh.
+    pub fn with_hydration_timeouts(mut self, chunk: Duration, stall: Duration) -> Self {
+        self.hydration_limits.chunk_timeout = chunk;
+        self.hydration_limits.stall_timeout = stall;
+        self
+    }
+
+    /// Lower the largest content a handle may hold in memory (default
+    /// 10 GiB). Writes, truncates and cached-handle materialization beyond it
+    /// fail with `EFBIG`.
+    pub fn with_max_write_bytes(mut self, max: u64) -> Self {
+        self.max_write_bytes = max.min(MAX_WRITE_SIZE as u64);
+        self
     }
 
     /// Enable sync trash (unlink moves to .tcfs-trash/ instead of deleting).
@@ -893,6 +1041,174 @@ impl TcfsVfs {
     }
 }
 
+/// The manifest an open is bound to: read once, validated against the index
+/// entry, and reused for every later step of the open.
+struct BoundRegularManifest {
+    manifest_path: String,
+    manifest_bytes: Vec<u8>,
+    manifest: SyncManifest,
+    master_key: Option<[u8; 32]>,
+}
+
+impl TcfsVfs {
+    /// Resolve `path`, then bind the index-selected manifest object, kind and
+    /// path before consulting the plaintext cache. A valid object for another
+    /// path must not hydrate through a forged or stale index entry.
+    async fn bind_regular_manifest(&self, path: &str) -> Result<BoundRegularManifest> {
+        let resolved = self
+            .get_index_entry_with_legacy_stub_fallback(path)
+            .await?
+            .context(format!("index entry not found: {}", path))?;
+        let entry = &resolved.entry;
+
+        if entry.kind == RemoteEntryKind::Symlink {
+            anyhow::bail!("ELOOP: open called on symlink: {}", path);
+        }
+
+        let manifest_path = entry.manifest_path(&self.prefix);
+
+        debug!(path = %path, manifest = %manifest_path, "hydrating on open");
+
+        let manifest_bytes = self
+            .op
+            .read(&manifest_path)
+            .await
+            .with_context(|| format!("reading manifest binding: {manifest_path}"))?
+            .to_vec();
+        validate_indexed_manifest_entry_binding(
+            &manifest_bytes,
+            &entry.manifest_hash,
+            &entry.as_remote_entry(),
+            &resolved.logical_rel_path,
+        )
+        .with_context(|| format!("validating manifest binding for {path}"))?;
+        let manifest = SyncManifest::from_bytes(&manifest_bytes)
+            .with_context(|| format!("parsing manifest clock for {path}"))?;
+
+        // Read master key from shared mutex (may be injected after mount via gRPC unlock)
+        let master_key = self.master_key.lock().await.as_ref().map(|k| *k.as_bytes());
+
+        Ok(BoundRegularManifest {
+            manifest_path,
+            manifest_bytes,
+            manifest,
+            master_key,
+        })
+    }
+
+    /// Hydrate `bound` into the disk cache through a shared, detached task.
+    ///
+    /// Concurrent opens of one manifest join one fetch (or one cache-hit
+    /// verification). Dropping this future, as a FUSE or NFS timeout does,
+    /// only stops waiting: the task runs on and commits the verified entry,
+    /// so a retried open finds it instead of restarting a download that can
+    /// never finish inside the protocol timeout.
+    async fn hydrate_shared(
+        &self,
+        bound: &BoundRegularManifest,
+    ) -> Result<(Arc<std::fs::File>, u64)> {
+        let key = (bound.manifest_path.clone(), bound.master_key);
+        let (mut receiver, leader) = {
+            let mut flights = self
+                .hydrations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(receiver) = flights.get(&key) {
+                (receiver.clone(), None)
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                flights.insert(key.clone(), receiver.clone());
+                (receiver, Some(sender))
+            }
+        };
+        // Spawn only after the map lock is released. A task spawned while
+        // the runtime shuts down is dropped inside `tokio::spawn`, and its
+        // `FlightEntry` drop takes this same lock.
+        if let Some(sender) = leader {
+            let entry = FlightEntry {
+                flights: Arc::clone(&self.hydrations),
+                key,
+            };
+            let op = self.op.clone();
+            let prefix = self.prefix.trim_end_matches('/').to_string();
+            let cache = Arc::clone(&self.disk_cache);
+            let manifest_path = bound.manifest_path.clone();
+            let manifest_bytes = bound.manifest_bytes.clone();
+            let master_key = bound.master_key;
+            let limits = self.hydration_limits.clone();
+            tokio::spawn(async move {
+                let outcome = hydrate_cached_file_with_limits(
+                    &op,
+                    &manifest_path,
+                    &manifest_bytes,
+                    &prefix,
+                    &cache,
+                    master_key.as_ref(),
+                    &limits,
+                )
+                .await
+                .map(|content| (Arc::new(content.file), content.len))
+                .map_err(Arc::new);
+                // Leave the in-flight map before publishing, so an open
+                // that arrives later starts from the (now warm) cache, or
+                // retries afresh after a failure.
+                drop(entry);
+                let _ = sender.send(Some(outcome));
+            });
+        }
+        let outcome = receiver
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| anyhow::anyhow!("hydration task ended without a result"))?
+            .clone()
+            .expect("waited for Some");
+        outcome.map_err(|error| anyhow::anyhow!("{error:#}"))
+    }
+
+    /// Load a cached handle's content into memory before it is mutated,
+    /// keeping at most `keep` bytes (for a truncate).
+    ///
+    /// The load is a blocking read of up to the whole file, so it runs on the
+    /// blocking pool without the handle table lock: other opens, reads and
+    /// releases proceed meanwhile. Content larger than the in-memory limit is
+    /// refused with `EFBIG` instead of being materialized.
+    async fn materialize_handle(&self, fh: u64, keep: Option<u64>) -> Result<()> {
+        let (file, len) = {
+            let handles = self.handles.read().await;
+            let handle = handles
+                .get(&fh)
+                .context(format!("bad file handle: {}", fh))?;
+            match &handle.data {
+                HandleData::Memory(_) => return Ok(()),
+                HandleData::Cached { file, len } => (Arc::clone(file), *len),
+            }
+        };
+        let want = keep.map_or(len, |keep| keep.min(len));
+        if want > self.max_write_bytes {
+            anyhow::bail!(
+                "EFBIG: loading {want} bytes for modification exceeds the in-memory limit of {} bytes",
+                self.max_write_bytes
+            );
+        }
+        let loader = Arc::clone(&file);
+        let loaded = tokio::task::spawn_blocking(move || read_cached_range(&loader, len, 0, want))
+            .await
+            .context("cached load task failed")??;
+
+        let mut handles = self.handles.write().await;
+        let handle = handles
+            .get_mut(&fh)
+            .context(format!("bad file handle: {}", fh))?;
+        // Another mutation may have materialized (and changed) the handle
+        // while this load ran; its content wins.
+        if matches!(&handle.data, HandleData::Cached { file: current, .. } if Arc::ptr_eq(current, &file))
+        {
+            handle.data = HandleData::Memory(loaded);
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl VirtualFilesystem for TcfsVfs {
     async fn getattr(&self, path: &str) -> Result<VfsAttr> {
@@ -979,52 +1295,14 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn open(&self, path: &str) -> Result<(u64, Vec<u8>)> {
-        let resolved = self
-            .get_index_entry_with_legacy_stub_fallback(path)
-            .await?
-            .context(format!("index entry not found: {}", path))?;
-        let entry = &resolved.entry;
-
-        if entry.kind == RemoteEntryKind::Symlink {
-            anyhow::bail!("ELOOP: open called on symlink: {}", path);
-        }
-
-        let manifest_path = entry.manifest_path(&self.prefix);
-        let prefix = self.prefix.trim_end_matches('/');
-
-        debug!(path = %path, manifest = %manifest_path, "hydrating on open");
-
-        // Bind the index-selected object, kind, and path before consulting the
-        // plaintext cache. A valid object for another path must not hydrate
-        // through a forged or stale index entry.
-        let manifest_bytes = self
-            .op
-            .read(&manifest_path)
-            .await
-            .with_context(|| format!("reading manifest binding: {manifest_path}"))?
-            .to_bytes();
-        validate_indexed_manifest_entry_binding(
-            &manifest_bytes,
-            &entry.manifest_hash,
-            &entry.as_remote_entry(),
-            &resolved.logical_rel_path,
-        )
-        .with_context(|| format!("validating manifest binding for {path}"))?;
-        let bound_manifest = SyncManifest::from_bytes(&manifest_bytes)
-            .with_context(|| format!("parsing manifest clock for {path}"))?;
-
-        // Read master key from shared mutex (may be injected after mount via gRPC unlock)
-        let mk_guard = self.master_key.lock().await;
-        let mk_bytes: Option<[u8; 32]> = mk_guard.as_ref().map(|k| *k.as_bytes());
-        drop(mk_guard);
-
+        let bound = self.bind_regular_manifest(path).await?;
         let data = fetch_cached_from_manifest_bytes(
             &self.op,
-            &manifest_path,
-            &manifest_bytes,
-            prefix,
+            &bound.manifest_path,
+            &bound.manifest_bytes,
+            self.prefix.trim_end_matches('/'),
             &self.disk_cache,
-            mk_bytes.as_ref(),
+            bound.master_key.as_ref(),
         )
         .await
         .with_context(|| format!("hydration failed: {}", path))?;
@@ -1032,14 +1310,14 @@ impl VirtualFilesystem for TcfsVfs {
         self.vclocks
             .lock()
             .await
-            .insert(path.to_string(), bound_manifest.vclock);
+            .insert(path.to_string(), bound.manifest.vclock);
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         self.handles.write().await.insert(
             fh,
             FileHandle {
                 path: path.to_string(),
-                data: data.clone(),
+                data: HandleData::Memory(data.clone()),
                 modified: false,
             },
         );
@@ -1047,19 +1325,53 @@ impl VirtualFilesystem for TcfsVfs {
         Ok((fh, data))
     }
 
-    async fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>> {
-        let handles = self.handles.read().await;
-        let handle = handles
-            .get(&fh)
-            .context(format!("bad file handle: {}", fh))?;
+    async fn open_streaming(&self, path: &str) -> Result<(u64, u64)> {
+        let bound = self.bind_regular_manifest(path).await?;
+        let (file, len) = self
+            .hydrate_shared(&bound)
+            .await
+            .with_context(|| format!("hydration failed: {}", path))?;
 
-        let data = &handle.data;
-        let start = offset as usize;
-        if start >= data.len() {
-            return Ok(Vec::new());
-        }
-        let end = (start + size as usize).min(data.len());
-        Ok(data[start..end].to_vec())
+        self.vclocks
+            .lock()
+            .await
+            .insert(path.to_string(), bound.manifest.vclock);
+
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+        self.handles.write().await.insert(
+            fh,
+            FileHandle {
+                path: path.to_string(),
+                data: HandleData::Cached { file, len },
+                modified: false,
+            },
+        );
+
+        Ok((fh, len))
+    }
+
+    async fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>> {
+        let (file, len) = {
+            let handles = self.handles.read().await;
+            let handle = handles
+                .get(&fh)
+                .context(format!("bad file handle: {}", fh))?;
+
+            match &handle.data {
+                HandleData::Memory(data) => {
+                    let start = offset as usize;
+                    if start >= data.len() {
+                        return Ok(Vec::new());
+                    }
+                    let end = (start + size as usize).min(data.len());
+                    return Ok(data[start..end].to_vec());
+                }
+                HandleData::Cached { file, len } => (Arc::clone(file), *len),
+            }
+        };
+        tokio::task::spawn_blocking(move || read_cached_range(&file, len, offset, u64::from(size)))
+            .await
+            .context("cached read task failed")?
     }
 
     async fn release(&self, fh: u64) -> Result<()> {
@@ -1067,9 +1379,12 @@ impl VirtualFilesystem for TcfsVfs {
 
         if let Some(h) = handle {
             if h.modified {
+                let HandleData::Memory(data) = &h.data else {
+                    anyhow::bail!("modified handle {fh} is not materialized in memory");
+                };
                 // Flush modified content to SeaweedFS
-                debug!(path = %h.path, bytes = h.data.len(), "flushing modified file to S3");
-                if let Err(error) = self.flush_to_remote(&h.path, &h.data).await {
+                debug!(path = %h.path, bytes = data.len(), "flushing modified file to S3");
+                if let Err(error) = self.flush_to_remote(&h.path, data).await {
                     // A key lock or transient storage failure must not discard
                     // the only buffered copy. Keep the handle retryable.
                     self.handles.write().await.insert(fh, h);
@@ -1083,27 +1398,31 @@ impl VirtualFilesystem for TcfsVfs {
 
     async fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32> {
         self.ensure_write_ready().await?;
+
+        // Prevent OOM: reject writes that would exceed the maximum buffer size
+        let end = offset as usize + data.len();
+        if end as u64 > self.max_write_bytes {
+            anyhow::bail!(
+                "EFBIG: write would exceed maximum file size ({} bytes, limit {} bytes)",
+                end,
+                self.max_write_bytes
+            );
+        }
+
+        // A range-backed handle is loaded (bounded, off the lock) first.
+        self.materialize_handle(fh, None).await?;
+
         let mut handles = self.handles.write().await;
         let handle = handles
             .get_mut(&fh)
             .context(format!("bad file handle: {}", fh))?;
-
-        // Prevent OOM: reject writes that would exceed the maximum buffer size
-        let end = offset as usize + data.len();
-        if end > MAX_WRITE_SIZE {
-            anyhow::bail!(
-                "EFBIG: write would exceed maximum file size ({} bytes, limit {} bytes)",
-                end,
-                MAX_WRITE_SIZE
-            );
-        }
-
+        let buffer = handle.data.memory_mut()?;
         // Extend buffer if write extends past current end
-        if end > handle.data.len() {
-            handle.data.resize(end, 0);
+        if end > buffer.len() {
+            buffer.resize(end, 0);
         }
 
-        handle.data[offset as usize..end].copy_from_slice(data);
+        buffer[offset as usize..end].copy_from_slice(data);
         handle.modified = true;
 
         Ok(data.len() as u32)
@@ -1111,40 +1430,71 @@ impl VirtualFilesystem for TcfsVfs {
 
     async fn truncate(&self, path: Option<&str>, fh: Option<u64>, size: u64) -> Result<VfsAttr> {
         self.ensure_write_ready().await?;
-        if size as usize > MAX_WRITE_SIZE {
+        if size > self.max_write_bytes {
             anyhow::bail!(
                 "EFBIG: truncate would exceed maximum file size ({} bytes, limit {} bytes)",
                 size,
-                MAX_WRITE_SIZE
+                self.max_write_bytes
             );
         }
 
         if let Some(fh) = fh {
+            self.materialize_handle(fh, Some(size)).await?;
             let mut handles = self.handles.write().await;
             let handle = handles
                 .get_mut(&fh)
                 .context(format!("truncate: bad file handle: {}", fh))?;
-            handle.data.resize(size as usize, 0);
+            handle.data.memory_mut()?.resize(size as usize, 0);
             handle.modified = true;
             return Ok(self.file_attr(size));
         }
 
         let path = path.context("truncate requires path or file handle")?;
 
-        {
+        // Materialize every open handle on `path` off the lock, then apply the
+        // truncation under it. A handle opened in between is caught on the
+        // next pass.
+        let mut settled = false;
+        for _ in 0..3 {
+            let cached: Vec<u64> = {
+                let handles = self.handles.read().await;
+                handles
+                    .iter()
+                    .filter(|(_, handle)| {
+                        handle.path == path && matches!(handle.data, HandleData::Cached { .. })
+                    })
+                    .map(|(fh, _)| *fh)
+                    .collect()
+            };
+            for fh in cached {
+                self.materialize_handle(fh, Some(size)).await?;
+            }
+
             let mut handles = self.handles.write().await;
+            if handles.values().any(|handle| {
+                handle.path == path && matches!(handle.data, HandleData::Cached { .. })
+            }) {
+                continue;
+            }
             let mut matched = false;
             for handle in handles.values_mut().filter(|handle| handle.path == path) {
-                handle.data.resize(size as usize, 0);
+                handle.data.memory_mut()?.resize(size as usize, 0);
                 handle.modified = true;
                 matched = true;
             }
             if matched {
                 return Ok(self.file_attr(size));
             }
+            settled = true;
+            break;
         }
+        anyhow::ensure!(
+            settled,
+            "EAGAIN: handles on {path} kept being reopened during truncate"
+        );
 
-        let (fh, _) = self.open(path).await?;
+        // Range-backed open: truncation loads at most `size` bytes.
+        let (fh, _) = self.open_streaming(path).await?;
         self.truncate(None, Some(fh), size).await?;
         self.release(fh).await?;
 
@@ -1167,7 +1517,7 @@ impl VirtualFilesystem for TcfsVfs {
             fh,
             FileHandle {
                 path: vpath,
-                data: Vec::new(),
+                data: HandleData::Memory(Vec::new()),
                 modified: true, // new file = modified (needs flush)
             },
         );
@@ -1423,22 +1773,26 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn fsync(&self, fh: u64, _datasync: bool) -> Result<()> {
-        // Clone data out of the handle to avoid holding the lock during flush
-        let (path, data, modified) = {
+        // Clone data out of the handle to avoid holding the lock during flush.
+        // An unmodified handle (including a cached, range-read one) has
+        // nothing to flush and is never copied.
+        let (path, data) = {
             let handles = self.handles.read().await;
             let handle = handles
                 .get(&fh)
                 .context(format!("fsync: bad file handle: {}", fh))?;
-            (handle.path.clone(), handle.data.clone(), handle.modified)
+            if !handle.modified {
+                return Ok(());
+            }
+            let HandleData::Memory(data) = &handle.data else {
+                anyhow::bail!("modified handle {fh} is not materialized in memory");
+            };
+            (handle.path.clone(), data.clone())
         };
-
-        if !modified {
-            return Ok(());
-        }
 
         self.flush_to_remote(&path, &data).await?;
         if let Some(handle) = self.handles.write().await.get_mut(&fh) {
-            if handle.data == data {
+            if matches!(&handle.data, HandleData::Memory(current) if *current == data) {
                 handle.modified = false;
             }
         }
