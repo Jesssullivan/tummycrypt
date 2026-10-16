@@ -424,8 +424,8 @@ Target window: 2026-06-15 through 2026-06-30.
   2026-05-31 read-only preflight helper added:
   `scripts/honey-backbone-preflight.sh` / `task lazy:honey-backbone-preflight`.
   First audit shows `neo` storage+NATS green, `honey` storage green but NATS
-  disconnected, split NATS reachability (`neo` reaches `nats-tcfs`; `honey`
-  reaches `10.245.131.232`), and divergent device registries with a
+  disconnected, split NATS reachability (`neo` reaches `<nats-host>`; `honey`
+  reaches `<nats-cluster-ip>`), and divergent device registries with a
   placeholder-shaped honey public key. G2/G3 remain blocked until NATS is
   canonical from both hosts and honey is re-enrolled through the production
   per-device path.

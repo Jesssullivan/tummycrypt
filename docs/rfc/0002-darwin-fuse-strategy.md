@@ -6,6 +6,12 @@
 **Tracking**: Sprint 7+
 **Supersedes**: Initial draft (FUSE-only framing)
 
+> **Note (2026-10-16):** the zstd compress/decompress steps below were the
+> design. Compression is not in the tcfs data path (see
+> [ARCHITECTURE.md](../ARCHITECTURE.md)), and manifests are located through
+> the remote index, not by `manifests/{file_hash}`. The rest of this RFC is
+> left as written.
+
 ---
 
 ## Abstract

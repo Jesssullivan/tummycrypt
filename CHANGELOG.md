@@ -13,6 +13,22 @@ intent rather than the current supported/proven surface.
 
 ### Added
 
+- `tcfs health` prints one verdict and exits `0` (`UP`), `2` (`DAEMON_DOWN`),
+  `3` (`BACKEND_DOWN`) or `4` (`DAEMON_BUSY`, no answer within 10 s).
+  `scripts/tcfsd-health-check.sh` is a reference supervisor check that
+  restarts tcfsd only on `DAEMON_DOWN` or a stale mount, with backoff (#612).
+- Single-read ingest (`crates/tcfs-sync/src/ingest.rs`): each file is read
+  once between stat-identity checks (twice above the 64 MiB streaming
+  threshold); a file that changes mid-read is retried three times, then
+  refused with a typed `SourceChanged`. Non-UTF-8 names and unreadable
+  directories are typed refusals instead of silent drops or whole-root
+  aborts, and reconcile never deletes or pulls under a refused path (#612).
+- Streaming hydration (TIN-1419): bounded parallel chunk fetch verified as
+  bytes arrive, single-flight hydration with deadlines, and NFS READs served
+  by range from a verified cache file with bounded memory (#612).
+- `docs/SPEC.md`: tcfs product spec (purpose, requirements, acceptance,
+  boundary with bulkload, current status, single-source map).
+
 - `tcfs device revoke` gained an operator-grade UX (TIN-1417): `--dry-run`
   previews the resolved target, post-revoke roll-call impact, effective
   `crypto.wrap_mode`, and propagation target without mutating anything;
@@ -44,6 +60,23 @@ intent rather than the current supported/proven surface.
   host-local bindings have independent BLAKE3 fingerprints; availability and
   persisted state counts are source-only B0a status, with reconcile support
   fixed to `none`.
+
+### Changed
+
+- Periodic reconcile backs off (up to one hour) while a storage probe fails,
+  and push/pull no longer hold the lock the status RPC needs (#612).
+- The old-stack revival paths are retired: the paused posture-gateway and
+  smoke-tunnel manifests are removed, the pause record's Restore section is
+  superseded, and the paused-replicas test refuses revival commands (#611).
+
+### Fixed
+
+- Documentation truthing: the LaTeX security, architecture, protocol and
+  FileProvider documents no longer claim zstd compression, encrypted
+  manifests or filenames, platform keychain storage, or FileProvider
+  uploads; the example config no longer claims a generic `TCFS_*` override,
+  a RocksDB cache or a live `workers`/`max_retries`; private addresses and
+  tailnet names were removed from public docs.
 
 ### Security
 
@@ -570,7 +603,7 @@ previously present in deployed builds but in no published tag.
 - `upload_file_with_device()` and `download_file_with_device()` accept optional `EncryptionContext`
 - `tcfs-file-provider` crate type changed from lib to `["lib", "staticlib"]` with cbindgen header generation
 - Lab fleet examples rewritten from `services.tcfsd` (NixOS) to `programs.tcfs` (Home Manager)
-- NATS URL in fleet configs changed to Tailscale MagicDNS (`nats://nats-tcfs:4222`)
+- NATS URL in fleet configs changed to a Tailscale MagicDNS name
 - `dist/com.tummycrypt.tcfsd.plist` updated with `--mode daemon` flag and Nix usage guidance
 - Fleet deployment docs overhauled: Tailscale NATS, Home Manager startup, corrected env var names
 - `just` added to flake.nix devShell

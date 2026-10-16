@@ -5,6 +5,13 @@
 **Date**: 2026-02-22 (updated 2026-04-15)
 **Tracking**: Swift sources + build script exist, but the public iOS posture remains read-only proof-of-concept pending stronger acceptance coverage
 
+> **Note (2026-10-16):** the zstd compress/decompress steps below were the
+> design. Compression is not in the tcfs data path (see
+> [ARCHITECTURE.md](../ARCHITECTURE.md)), and manifests are located through
+> the remote index, not by `manifests/{file_hash}`. The rest of this RFC is
+> left as written; its checked "compress" items describe
+> the design, not shipped behavior.
+
 ---
 
 ## Abstract

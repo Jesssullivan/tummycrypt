@@ -43,7 +43,7 @@ Known evidence:
 
 - run `26118552975` proved the workflow and artifact shape against the private
   PZM smoke backend.
-- that run used `http://seaweedfs-tcfs:8333` with `require_https=false`.
+- that run used `http://<s3-host>:8333` with `require_https=false`.
 - it is not a production posture packet because the endpoint was plaintext and
   private, and the credentials were the existing smoke credentials.
 - run `26209080328` on `main` at `6990ffb` passed against

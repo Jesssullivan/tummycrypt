@@ -3,7 +3,10 @@
 Status: **accepted 2026-07-14**. Strategy **A → B → C** is the product order.
 The stable-root source boundary was refreshed on 2026-08-22 against
 `origin/main` at `dfe8282a4d93af0ca1c495065ec82002352d4d86`. This does not
-refresh or widen live fleet evidence.
+refresh or widen live fleet evidence. Since 2026-09-29 the backend is
+paused (see [ops/current.md](ops/current.md#status-2026-10-15)); no gate below
+can be re-proven until it returns. Purpose, requirements and acceptance
+stages are in [SPEC.md](SPEC.md).
 
 ## Decision
 

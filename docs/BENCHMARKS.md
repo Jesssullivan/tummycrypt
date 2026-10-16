@@ -7,6 +7,11 @@ not release evidence or current performance claims.
 
 ## Chunking Throughput
 
+The zstd rows below are microbenchmarks of the `tcfs-chunks` module.
+Compression is not in the tcfs data path today (see
+[ARCHITECTURE.md](ARCHITECTURE.md)), so the "full pipeline" row is not the
+real upload pipeline.
+
 FastCDC content-defined chunking with BLAKE3 hashing (single-threaded, in-memory):
 
 | Operation | 1 KiB | 64 KiB | 1 MiB | 10 MiB |
