@@ -47,6 +47,23 @@ intent rather than the current supported/proven surface.
 
 ### Security
 
+- NATS token auth now reads the token from a file at connect time
+  (OI-1003-Q177): `sync.nats_token_file`, overridden by `TCFS_NATS_TOKEN_FILE`.
+  The daemon, the sync worker, and `tcfs mount` all resolve it through
+  `tcfs_core::nats_token`. The file must be absolute (or `~/`), a regular file
+  (symlinks are followed and the target is checked), outside `/nix/store`,
+  `mode & 0o077 == 0` (a direct child of systemd's `$CREDENTIALS_DIRECTORY`
+  may carry the ACL-mask group bit, never world bits), non-empty, at most
+  4096 bytes, and free of whitespace/control characters after one trailing
+  newline is trimmed. Every refusal is a typed `NatsTokenError` that never
+  carries token bytes. **Breaking:** the inline `sync.nats_token` value is now
+  refused at connect time (it still parses, so `config show` keeps reporting
+  `nats_token_configured`), because an inline token rendered by Nix lands in
+  the world-readable store. The NixOS module gains `services.tcfsd.natsTokenFile`
+  (delivered via systemd `LoadCredential`) and the Home Manager module gains
+  `programs.tcfs.natsTokenFile`; both take a runtime path string, never a value
+  or a Nix path literal, and assert against `/nix/store` paths and inline
+  `settings.sync.nats_token`.
 - `tcfs device revoke` now confirms before mutating, and refuses to proceed on a
   non-interactive stdin without `--yes`, because revocation is sticky
   fleet-wide: the registry merge only ever flips `revoked` false to true and no

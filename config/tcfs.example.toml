@@ -40,6 +40,14 @@ credentials_file = "/etc/tcfs/credentials.yaml"
 [sync]
 # NATS JetStream endpoint
 nats_url = "nats://localhost:4222"
+# NATS token auth (OI-1003-Q177): the token is read from a file at connect
+# time, never from this config. The file must be a regular file with no
+# group/other permission bits (chmod 600; systemd $CREDENTIALS_DIRECTORY files
+# may show an ACL-mask group bit), outside /nix/store, at most 4096 bytes; one
+# trailing newline is trimmed. Symlinks are followed and the target is checked.
+# Precedence: TCFS_NATS_TOKEN_FILE env > nats_token_file > no token.
+# An inline `nats_token = "..."` is REFUSED at connect time.
+# nats_token_file = "/run/secrets/tcfs-nats-token"
 # RocksDB local state cache (tracks file hashes + sync state)
 state_db = "/var/lib/tcfsd/state.db"
 # Trusted parent for daemon-enrolled, isolated root caches. Set this for system

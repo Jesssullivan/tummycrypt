@@ -25,7 +25,8 @@ mod inner {
     use tracing::{debug, error, info, warn};
 
     use crate::conflict::VectorClock;
-    use tcfs_core::config::sanitize_nats_endpoint_for_display;
+    use tcfs_core::config::{sanitize_nats_endpoint_for_display, SyncConfig};
+    use tcfs_core::nats_token::{resolve_nats_token, NatsToken};
 
     // ── Stream / consumer names ───────────────────────────────────────────────
 
@@ -231,13 +232,20 @@ mod inner {
         /// Connect to NATS and return a client with JetStream enabled.
         ///
         /// If `require_tls` is true and the URL uses `nats://`, it is upgraded to `tls://`.
-        pub async fn connect(url: &str, require_tls: bool, token: Option<&str>) -> Result<Self> {
+        ///
+        /// `token` comes from [`tcfs_core::nats_token`] (a token file); there is
+        /// no way to pass an inline string. Prefer [`NatsClient::connect_with_config`].
+        pub async fn connect(
+            url: &str,
+            require_tls: bool,
+            token: Option<&NatsToken>,
+        ) -> Result<Self> {
             let effective_url = resolve_nats_url(url, require_tls);
             let effective_url_display = sanitize_nats_endpoint_for_display(&effective_url);
 
             let client = if let Some(tok) = token {
                 info!("NATS: connecting with token auth");
-                async_nats::ConnectOptions::with_token(tok.to_string())
+                async_nats::ConnectOptions::with_token(tok.expose_secret().to_owned())
                     .connect(&effective_url)
                     .await
                     .map_err(|_| {
@@ -258,6 +266,18 @@ mod inner {
             info!("NATS: connected to {effective_url_display}");
             let js = jetstream::new(client);
             Ok(NatsClient { js })
+        }
+
+        /// Resolve the NATS token from `sync` (`TCFS_NATS_TOKEN_FILE` or
+        /// `sync.nats_token_file`; inline `sync.nats_token` is refused) at
+        /// connect time, then connect to `url`.
+        ///
+        /// A token-policy refusal is returned as a
+        /// [`tcfs_core::nats_token::NatsTokenError`] inside the `anyhow` error,
+        /// so callers can `downcast_ref` it. The token is never logged.
+        pub async fn connect_with_config(url: &str, sync: &SyncConfig) -> Result<Self> {
+            let token = resolve_nats_token(sync)?;
+            Self::connect(url, sync.nats_tls, token.as_ref()).await
         }
 
         /// Ensure all required JetStream streams exist.
@@ -868,6 +888,56 @@ mod inner {
                     "leaked {forbidden}: {display}"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn connect_with_config_refuses_inline_token_before_dialing() {
+            use tcfs_core::nats_token::NatsTokenError;
+            const TOKEN: &str = "OI1003-inline-token-sentinel";
+            let sync = SyncConfig {
+                nats_token: Some(TOKEN.into()),
+                ..SyncConfig::default()
+            };
+            // Port 9 (discard) is never a NATS server; a refusal must come from
+            // token policy, not from a failed dial.
+            let err = NatsClient::connect_with_config("nats://localhost:9", &sync)
+                .await
+                .err()
+                .expect("inline token must be refused");
+            assert!(
+                matches!(
+                    err.downcast_ref::<NatsTokenError>(),
+                    Some(NatsTokenError::InlineTokenRefused)
+                ),
+                "{err:#}"
+            );
+            assert!(!format!("{err:#}").contains(TOKEN));
+            assert!(!format!("{err:?}").contains(TOKEN));
+        }
+
+        #[tokio::test]
+        async fn connect_with_config_refuses_missing_token_file_before_dialing() {
+            use tcfs_core::nats_token::{NatsTokenError, NATS_TOKEN_FILE_ENV};
+            if std::env::var_os(NATS_TOKEN_FILE_ENV).is_some() {
+                // The env override would take precedence over the config path.
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let sync = SyncConfig {
+                nats_token_file: Some(dir.path().join("absent-token")),
+                ..SyncConfig::default()
+            };
+            let err = NatsClient::connect_with_config("nats://localhost:9", &sync)
+                .await
+                .err()
+                .expect("missing token file must be refused");
+            assert!(
+                matches!(
+                    err.downcast_ref::<NatsTokenError>(),
+                    Some(NatsTokenError::Missing { .. })
+                ),
+                "{err:#}"
+            );
         }
 
         #[tokio::test]

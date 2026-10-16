@@ -5244,6 +5244,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

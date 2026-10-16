@@ -4608,10 +4608,9 @@ async fn cmd_mount(
         let device_id = load_device_id(config);
         let on_flush: Option<tcfs_vfs::OnFlushCallback> =
             if config.sync.nats_url != "nats://localhost:4222" {
-                match tcfs_sync::nats::NatsClient::connect(
+                match tcfs_sync::nats::NatsClient::connect_with_config(
                     &config.sync.nats_url,
-                    config.sync.nats_tls,
-                    config.sync.nats_token.as_deref(),
+                    &config.sync,
                 )
                 .await
                 {

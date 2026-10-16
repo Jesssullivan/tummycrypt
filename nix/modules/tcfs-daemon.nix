@@ -7,6 +7,7 @@
 #     enable = true;
 #     configFile = "/etc/tcfs/config.toml";
 #     credentialsFile = "/etc/tcfs/age-identity.txt";
+#     natsTokenFile = "/run/secrets/tcfs-nats-token"; # runtime path, never the token
 #     mounts = [
 #       { remote = "seaweedfs+https://seaweedfs.example.com/bucket"; local = "/mnt/tcfs"; }
 #     ];
@@ -89,6 +90,23 @@ in {
       description = "NATS server URL for real-time state sync (e.g., nats://localhost:4222)";
     };
 
+    natsTokenFile = lib.mkOption {
+      # A runtime path *string*, never a Nix path literal or the token value:
+      # a path literal would be copied into the world-readable Nix store, which
+      # is exactly what OI-1003-Q177 forbids.
+      type = lib.types.nullOr (lib.types.strMatching "/.+");
+      default = null;
+      example = "/run/secrets/tcfs-nats-token";
+      description = ''
+        Absolute runtime path of a file holding the NATS auth token (e.g. a
+        sops-nix or agenix secret). It is handed to the unit with systemd
+        LoadCredential (so the DynamicUser service can read it) and exposed to
+        tcfsd as TCFS_NATS_TOKEN_FILE=%d/nats-token, which takes precedence
+        over sync.nats_token_file in configFile. tcfsd refuses an inline
+        sync.nats_token.
+      '';
+    };
+
     syncRoot = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -125,6 +143,14 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.natsTokenFile == null
+          || !(lib.hasPrefix "${builtins.storeDir}/" cfg.natsTokenFile);
+        message = "services.tcfsd.natsTokenFile must not point into the world-readable Nix store (OI-1003-Q177).";
+      }
+    ];
+
     systemd.services.tcfsd = {
       description = "TummyCrypt filesystem daemon (tcfsd)";
       after = [ "network.target" ];
@@ -153,6 +179,8 @@ in {
         # Credentials
         LoadCredentialEncrypted = lib.mkIf (cfg.credentialsFile != null)
           "age-identity:${cfg.credentialsFile}";
+        LoadCredential = lib.mkIf (cfg.natsTokenFile != null)
+          [ "nats-token:${cfg.natsTokenFile}" ];
       } // lib.optionalAttrs cfg.remoteJuggler.enable {
         # Inject credentials from RemoteJuggler KDBX before daemon starts
         ExecStartPre = let
@@ -178,6 +206,8 @@ in {
         TCFS_GIT_SYNC_MODE = cfg.gitSyncMode;
       } // lib.optionalAttrs (cfg.natsUrl != null) {
         TCFS_NATS_URL = cfg.natsUrl;
+      } // lib.optionalAttrs (cfg.natsTokenFile != null) {
+        TCFS_NATS_TOKEN_FILE = "%d/nats-token";
       } // lib.optionalAttrs (cfg.excludePatterns != []) {
         TCFS_EXCLUDE_PATTERNS = lib.concatStringsSep "," cfg.excludePatterns;
       } // lib.optionalAttrs (cfg.credentialsFile != null) {

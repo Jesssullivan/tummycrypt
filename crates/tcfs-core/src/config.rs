@@ -85,6 +85,7 @@ struct RedactedSyncConfig<'a> {
     nats_url: String,
     nats_tls: bool,
     nats_token_configured: bool,
+    nats_token_file: &'a Option<PathBuf>,
     nats_ca_cert: &'a Option<PathBuf>,
     state_db: &'a PathBuf,
     workers: usize,
@@ -330,6 +331,7 @@ impl TcfsConfig {
             nats_url,
             nats_tls,
             nats_token,
+            nats_token_file,
             nats_ca_cert,
             state_db,
             workers,
@@ -506,6 +508,7 @@ impl TcfsConfig {
                 nats_url: sanitize_nats_endpoint_for_display(nats_url),
                 nats_tls: *nats_tls,
                 nats_token_configured: nats_token.is_some(),
+                nats_token_file,
                 nats_ca_cert,
                 state_db,
                 workers: *workers,
@@ -806,8 +809,14 @@ pub struct SyncConfig {
     pub nats_url: String,
     /// Enforce TLS for NATS connections
     pub nats_tls: bool,
-    /// NATS authentication token (optional)
+    /// REFUSED: inline NATS token. Still parsed so existing configs load and
+    /// `config show` can report it, but every NATS connect refuses it
+    /// (OI-1003-Q177): an inline token is rendered into the world-readable
+    /// Nix store. Use `nats_token_file` instead.
     pub nats_token: Option<String>,
+    /// Path to a file holding the NATS auth token (read at connect time).
+    /// Overridden by `TCFS_NATS_TOKEN_FILE`. See `tcfs_core::nats_token`.
+    pub nats_token_file: Option<PathBuf>,
     /// Path to a custom CA certificate for NATS TLS verification
     pub nats_ca_cert: Option<PathBuf>,
     /// State cache path. The key is named `state_db` for the (future) RocksDB
@@ -1485,6 +1494,7 @@ impl Default for SyncConfig {
             nats_url: "nats://localhost:4222".into(),
             nats_tls: true,
             nats_token: None,
+            nats_token_file: None,
             nats_ca_cert: None,
             state_db: PathBuf::from("~/.local/share/tcfsd/state.db"),
             workers: 0,
@@ -2144,6 +2154,35 @@ resolution_policy = "inspect-only"
         assert_eq!(
             redacted["sync"]["nats_token_configured"].as_bool(),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn nats_token_file_parses_and_redacted_view_shows_path_only() {
+        let parsed: TcfsConfig = toml::from_str(
+            r#"
+[sync]
+nats_url = "nats://nats.example.invalid:4222"
+nats_token_file = "/run/credentials/tcfsd.service/nats-token"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.sync.nats_token_file.as_deref(),
+            Some(Path::new("/run/credentials/tcfsd.service/nats-token"))
+        );
+        assert!(parsed.sync.nats_token.is_none());
+        assert!(TcfsConfig::default().sync.nats_token_file.is_none());
+
+        let redacted: toml::Value =
+            toml::from_str(&toml::to_string(&parsed.redacted()).unwrap()).unwrap();
+        assert_eq!(
+            redacted["sync"]["nats_token_file"].as_str(),
+            Some("/run/credentials/tcfsd.service/nats-token")
+        );
+        assert_eq!(
+            redacted["sync"]["nats_token_configured"].as_bool(),
+            Some(false)
         );
     }
 
