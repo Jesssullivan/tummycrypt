@@ -3,6 +3,13 @@
 //! Bulkload owns capture and Git reconstruction. TCFS consumes the reviewed
 //! logical topology and working-file identities only; device-local Git admin
 //! paths are deliberately private and never returned as transport inputs.
+//!
+//! **No current producer.** Bulkload retired the code that emitted
+//! `agent-capture.v4` / `git-workspace.v2` (bulkload commit `14384f40`,
+//! "retire Python bulkload ceremony and stale contracts"); current Bulkload
+//! carries Git with its v1 engine and does not write these records. This
+//! adapter only decodes previously captured documents. Retiring or replacing
+//! it is tracked in TIN-6596; see `docs/ops/tcfs-bulkload-boundary.md`.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
