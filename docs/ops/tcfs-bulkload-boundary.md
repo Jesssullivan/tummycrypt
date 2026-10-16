@@ -1,8 +1,11 @@
 # tcfs / bulkload boundary (2026-10-15)
 
-Status: operator-ruled positioning (TIN-4543: Q153, Q155, Q156). The
-engineering boundary below follows from the evidence as of 2026-10-15.
-Live state is in [current.md](current.md#status-2026-10-15).
+Status: operator-ruled positioning (TIN-4543: Q153, Q155, Q156; narrowed by
+bulkload ruling C1, OI-1003-Q194, 2026-10-16). The engineering boundary below
+follows from the evidence as of 2026-10-15. Live state is in
+[current.md](current.md#status-2026-10-15). tcfs's purpose and requirements are
+in [../SPEC.md](../SPEC.md); bulkload's are in `docs/SPEC.md` in the bulkload
+repository.
 
 ## Positioning
 
@@ -12,9 +15,12 @@ Live state is in [current.md](current.md#status-2026-10-15).
 - **bulkload is a publishable migration tool** (Q155). It moves an estate
   once: a bounded capture, a transfer and a verification. It does not need
   to become a filesystem, and tcfs does not need to become a migration tool.
-- **The first real tcfs user is a Mac-only cohort on neo** (Q156). That
-  cohort is left out of bulkload's full run. tcfs mounts it and does not
-  copy it.
+- **The first real tcfs user is a Mac-only cohort on neo** (Q156). As
+  first written, that cohort was left out of bulkload's full run. Bulkload's
+  ruling C1 (2026-10-16) narrows Q156 to placement: bulkload carries the
+  cohort now, and it is still tcfs's first user later. Which copy is
+  authoritative once tcfs passes acceptance is an open decision
+  ([../SPEC.md](../SPEC.md#open-decisions)).
 - **tcfs's home is the blahaj SeaweedFS 4.48 deployment** (Q153). The
   preconditions, all required, are: the P9 identity questions answered,
   `filer_backup` on, the deployment verified to sign with a fresh,

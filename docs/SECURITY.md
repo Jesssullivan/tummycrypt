@@ -15,7 +15,7 @@ task docs:pdf
 
 ## Overview
 
-tcfs encrypts all file content client-side before upload using XChaCha20-Poly1305 with per-file keys derived via HKDF from a master key. The master key is protected by Argon2id key derivation with BIP-39 mnemonic recovery. Credentials are managed through a layered chain: SOPS/age encrypted files, KeePassXC databases, or environment variables. Device identity uses age keypairs with BLAKE3 fingerprints, stored in an S3-backed registry. All chunk data is content-addressed (BLAKE3) ensuring integrity verification on every read.
+tcfs encrypts all file content client-side before upload using XChaCha20-Poly1305 with a random 256-bit key per file, wrapped by the master key (or, in the per-device modes, by each active device's age recipient). The master key is derived with Argon2id and has BIP-39 mnemonic recovery. Metadata is not encrypted today: manifests (relative path, size, plaintext file hash, chunk list) and index keys are plaintext in the bucket, and the HKDF manifest and filename keys exist in `tcfs-crypto` but have no caller. Session tokens use the `keyring` crate, which is built without a platform backend and so falls back to an in-process mock store. See [SPEC.md](SPEC.md#current-status). Credentials are managed through a layered chain: SOPS/age encrypted files, KeePassXC databases, or environment variables. Device identity uses age keypairs with BLAKE3 fingerprints, stored in an S3-backed registry. All chunk data is content-addressed (BLAKE3) ensuring integrity verification on every read.
 
 Credential-bearing S3 clients require an `https://` endpoint by default. The
 daemon/CLI compatibility escape hatch, `storage.enforce_tls = false`, and the
@@ -34,7 +34,8 @@ See the [Security PDF](https://github.com/Jesssullivan/tummycrypt/actions/workfl
 
 - Threat model (storage, network, client, credential threats)
 - Encryption architecture (XChaCha20-Poly1305, Argon2id, HKDF)
-- Key hierarchy (master, file, manifest, name keys)
+- Key hierarchy as built (master and file keys; manifest and name keys are
+  defined but unused)
 - Chunk encryption pipeline
 - Credential management (SOPS/age chain)
 - Credential rotation (automated + manual)

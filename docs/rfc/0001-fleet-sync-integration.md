@@ -89,7 +89,7 @@ backend/on-prem authority is tracked in
    - Recommended: NATS leaf node on local network (lowest latency, works offline)
 
 2. **SeaweedFS S3 accessible from lab machines**
-   - Current: Accessible via `dees-appu-bearts:8333` on local network
+   - Current: Accessible via `<s3-host>:8333` on local network
    - Status: Already reachable from all three machines
 
 3. **Device enrollment**

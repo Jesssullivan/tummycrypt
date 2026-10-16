@@ -21,15 +21,18 @@ successfully?
 
 ## Required environment
 
-Set these before running the lane:
+Set these before running the lane. `TCFS_S3_ENDPOINT` and `TCFS_S3_BUCKET`
+are read only by the test harness (`tests/e2e/tests/fleet_live.rs`); tcfsd
+does not read them and takes `storage.endpoint` and `storage.bucket` from its
+config file.
 
 ```bash
 export TCFS_E2E_LIVE=1
-export TCFS_S3_ENDPOINT=http://seaweedfs-tcfs:8333
+export TCFS_S3_ENDPOINT=http://<s3-host>:8333
 export TCFS_S3_BUCKET=tcfs
 export AWS_ACCESS_KEY_ID=<from seaweedfs-admin secret>
 export AWS_SECRET_ACCESS_KEY=<from seaweedfs-admin secret>
-export TCFS_NATS_URL=nats://nats-tcfs:4222
+export TCFS_NATS_URL=nats://<nats-host>:4222
 ```
 
 ## Canonical operator command

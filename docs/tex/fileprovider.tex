@@ -92,7 +92,7 @@ demand from SeaweedFS via the CAS chunk store.
 [tcfs-fileprovider (Rust static lib)]
        |  uses existing tcfs crates
        +---> tcfs-storage  (OpenDAL S3)
-       +---> tcfs-chunks   (FastCDC + BLAKE3 + zstd)
+       +---> tcfs-chunks   (FastCDC + BLAKE3; no compression)
        +---> tcfs-crypto   (XChaCha20-Poly1305)
        +---> tcfs-sync     (vector clocks, state cache)
        |
@@ -134,17 +134,20 @@ TummyCrypt.app/
         the APFS dataless flag and calls \code{fetchContents(for:version:)}.
         The Swift shim calls \code{tcfs\_fp\_fetch\_contents()}, which:
         \begin{enumerate}[label=\alph*)]
-          \item Fetches the manifest from \code{manifests/\{file\_hash\}}
+          \item Fetches the manifest named by the item's index entry
           \item Fetches chunks in parallel from \code{chunks/\{chunk\_hash\}}
-          \item Decrypts each chunk (XChaCha20-Poly1305 per-chunk encryption)
-          \item Decompresses each chunk (zstd)
+          \item Decrypts each chunk (XChaCha20-Poly1305 per-chunk encryption;
+                chunks are not compressed)
           \item Reassembles and writes to the provided temporary URL
         \end{enumerate}
         The kernel then delivers the content to the requesting application.
 
-  \item \textbf{Upload}: User saves a file. The extension's \code{createItem}
-        or \code{modifyItem} callback receives the new content. The Rust
-        backend chunks, compresses, encrypts, and pushes to S3.
+  \item \textbf{Upload (disabled)}: The FileProvider surface is read-only
+        since commit \code{5bc2175} (TIN-2853). \code{createItem},
+        \code{modifyItem} and \code{deleteItem} fail closed with
+        \code{NSFileProviderError(.cannotSynchronize)} before any I/O, until
+        exact version-token conditional publication lands. When enabled,
+        the Rust backend chunks, encrypts and pushes to S3 (no compression).
 
   \item \textbf{Eviction}: When disk space is low, macOS automatically evicts
         hydrated files back to dataless stubs. The extension's
@@ -303,14 +306,15 @@ int32_t tcfs_fp_get_item_metadata(
     FPItem     *out_item
 );
 
-// Hydration (download + decrypt + decompress)
+// Hydration (download + decrypt; no decompression)
 int32_t tcfs_fp_fetch_contents(
     const char *item_id,
     const char *dest_path,
     void      (*progress_cb)(double)
 );
 
-// Upload (chunk + compress + encrypt + push)
+// Upload (chunk + encrypt + push; not reachable while the
+// extension is read-only)
 int32_t tcfs_fp_upload_file(
     const char *local_path,
     const char *remote_path,

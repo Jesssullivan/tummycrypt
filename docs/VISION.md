@@ -6,6 +6,10 @@ Selected state should be enrollable once, encrypted before it leaves the
 device, present as browsable names on every authorized host, hydrated when
 needed, and safely unsynced when local space is better used elsewhere.
 
+Since 2026-09-29 the backend is paused. "Proven live" below means proven
+while the backend ran. Purpose, requirements and acceptance are in
+[`SPEC.md`](SPEC.md).
+
 This is the direction, not a blanket capability claim. Read
 [`ops/current.md`](ops/current.md) for the current proof boundary and
 [`PRODUCT.md`](PRODUCT.md) for the approved delivery sequence.

@@ -10,17 +10,25 @@ defaults); escape hatches and the receipt format live in lab
 `docs/operations/HOOK_ADVISORY.md`. Ratified operator rulings from
 2026-10-04 on outrank this file.
 
-- **R-N11:** Own recorded tasks and named services are permitted after
-  checking ownership and live sessions. Cross-session actions require explicit
-  user authorization. Publish the target and authorization in the receipt.
-- **R-N12:** Every Lab hook is advisory, including credential checks.
-  Findings, scanner errors and dark hooks may warn but never deny, fail a
-  commit or demand an extra approval. Documentation and searches are data.
-  Use a receipted alternative within existing authorization; ask only when
-  the action itself needs a new decision.
-- **R-N13:** Cite the ruling in mutation receipts. Preserve durable working
-  notes in `docs/agent-notes/` and facts in Linear. Explicit user answers and
-  instructions are authority; a reminder is advisory.
+- **R-N11 — Ownership before action.** Your own recorded tasks and named
+  services are permitted after checking ownership and live sessions.
+  Cross-session actions (another agent's processes, tmux servers or sessions,
+  an operator's live session) require explicit user authorization. Publish
+  the target and the authorization in the receipt.
+  Incident behind the original rule: an agent walked process ancestry to
+  PID 1, found the operator's tmux server, and killed it with a literal PID;
+  critical work was lost.
+- **R-N12 — Hooks are advisory.** Every lab hook, including credential
+  checks, may warn but never denies, fails a commit or demands an extra
+  approval. Documentation and searches are data. Use a receipted alternative
+  within existing authorization; ask only when the action itself needs a new
+  decision.
+- **R-N13 — Ratification.** Every mutating step cites a ruling ID in its
+  receipt; a receipt without one is an unratified act. Explicit operator
+  answers and instructions are authority; a reminder is advisory. Every
+  session writes a `docs/agent-notes/` entry before ending, and distilled
+  facts go to Linear. Ticket descriptions are never rewritten, only
+  superseded by dated comments.
 - **Force push is allowed** (operator, 2026-10-16: "force push is totally
   allowe[d]"). `--force` and `--force-with-lease` need no extra confirmation;
   server-side branch protection is the only gate. Do not restate bans the
@@ -32,6 +40,8 @@ This file covers build/test/navigation and the machines that run them. For what
 is true and what ships next, read these in order (each owns a distinct layer;
 none is duplicated here):
 
+0. [docs/SPEC.md](docs/SPEC.md) — what tcfs is for, requirements,
+   acceptance, and the single-source map (which file is canonical for what).
 1. [docs/VISION.md](docs/VISION.md) — north star + the claim-tier legend.
 2. [docs/PRODUCT.md](docs/PRODUCT.md) — the accepted A→B→C delivery sequence,
    stable-root design, repository ownership.
@@ -127,10 +137,10 @@ task dev
   entry to `.cargo/config.toml`.
 - **PATH ordering**: the devShell and `.envrc` both put `target/debug` and
   `target/release` ahead of installed packages, so a stale workspace build can
-  shadow the deployed `tcfs`/`tcfsd`. Separately, on `neo` an unmanaged
-  `v0.12.12` install currently shadows the managed build in the effective
-  interactive `PATH` (`docs/ops/current.md`, Fleet row; an attended cleanup is
-  queued). Smoke harnesses print the resolved binary path — check it before
+  shadow the deployed `tcfs`/`tcfsd`. Separately, as of the 2026-08-22
+  snapshot (not re-verified during the backend pause), an unmanaged `v0.12.12`
+  install on `neo` shadowed the managed build in the effective interactive
+  `PATH` (`docs/ops/current.md`, historical Fleet row). Smoke harnesses print the resolved binary path — check it before
   believing a version string.
 
 ### Machines that run this repo
@@ -178,7 +188,8 @@ with this table.
   dev-seat ratification and correcting it is an operator call, not a
   docs-hygiene one.
 - **Live-work freezes outrank convenience.** `docs/ops/current.md` records
-  which live resolver, enrollment, deploy, and crypto ceremonies are frozen.
+  which live resolver, enrollment, deploy, and crypto ceremonies are frozen
+  (today: the backend pause; TIN-2856 is Done and is not a freeze).
   Source review, tests, and landing continue during a freeze; new fleet claims
   do not.
 
@@ -193,7 +204,7 @@ with this table.
 | `tcfs-secrets` | lib | SOPS/age decryption, KeePassXC, device identity/registry |
 | `tcfs-sops` | lib | SOPS+age fleet secret propagation |
 | `tcfs-storage` | lib | OpenDAL S3/SeaweedFS operator + health checks |
-| `tcfs-chunks` | lib | FastCDC chunking, BLAKE3 hashing, zstd compression |
+| `tcfs-chunks` | lib | FastCDC chunking, BLAKE3 hashing; ships a `seekable_zstd` module that nothing in the data path calls (no compression today) |
 | `tcfs-sync` | lib | Sync engine, vector clocks, state cache, NATS JetStream |
 | `tcfs-fuse` | lib | Linux FUSE driver (fuse3) |
 | `tcfs-nfs` | lib | NFS loopback server (NFSv3, FUSE-free mount) |
@@ -211,9 +222,9 @@ with this table.
 - **Proto source of truth**: `crates/tcfs-core/src/proto/tcfs.proto` — all crates import via `tcfs_core::proto`
 - **Error handling**: `thiserror` for libraries, `anyhow` for binaries
 - **Async**: tokio full features, `tracing` for structured logging
-- **State cache**: JSON-backed at `{config.sync.state_db}.json`
-- **CAS layout**: chunks at `{prefix}/chunks/{hash}`, manifests at `{prefix}/manifests/{file_hash}`
-- **Feature gates**: `fuse` feature on tcfs-cli (default on), `nats` feature on tcfs-sync
+- **State cache**: JSON-backed at `config.sync.state_db` with its extension replaced by `.json` (`state.db` → `state.json`)
+- **CAS layout**: chunks at `{prefix}/chunks/{hash}` (ciphertext BLAKE3 when encrypted); path-indexed uploads (the normal sync path) put manifests at `{prefix}/manifests/{manifest_object_id}` with an index entry at `{prefix}/index/{rel_path}`; only direct, non-indexed uploads use `{prefix}/manifests/{file_hash}`. Manifests and index keys are plaintext (see `docs/SPEC.md`, Current status)
+- **Feature gates**: `fuse` feature on `tcfs-fuse` (tcfs-cli has no features of its own and always enables `tcfs-fuse/fuse`); `nats` and `crypto` features on tcfs-sync
 
 ## Testing
 
@@ -266,7 +277,11 @@ than assuming the list above is complete:
 
 Release: `release.yml` has 9 jobs — `plan`, `build-binaries`, `build-image`,
 `nix-build`, `generate-installers`, `build-fileprovider`, `build-pkg`,
-`create-release`, `update-homebrew`. The remaining workflows are
+`create-release`, `update-homebrew`; it runs on push and
+`workflow_dispatch`. `repo-contract.yml` and `runs-on-contract.yml` also run
+on push and pull request. The smoke, canary and macOS proof workflows
+(`*-smoke.yml` except the path-scoped `linux-package-container-smoke.yml`
+above, `storage-*-canary.yml`, `macos-fileprovider-*.yml`) are
 `workflow_dispatch`-only.
 
 ## Agent Coordination

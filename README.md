@@ -6,22 +6,19 @@ once, then SSH to another enrolled machine and continue with the same bytes,
 including in-progress Git and agent state. Hydration and local unsync should be
 ordinary verbs, not a migration project.
 
-> **Status (2026-10-15): the backend is paused.** The lab's SeaweedFS/NATS
-> backend has been scaled to zero since 2026-09-29 (TIN-5136). Installed
-> clients have nothing to sync with. It will come back on a new SeaweedFS
-> deployment once the hardening steps in
-> [docs/ops/current.md](docs/ops/current.md#status-2026-10-15) are done.
-> `main` builds and its tests pass; cargo-deny (pending #609) and Nix CI are
-> red.
-> Encrypted chunked upload and download, Linux FUSE hydration, and
-> single-repository roam have been demonstrated (see below). The latest
-> release is still `v0.12.17` (2026-07-09). Do not use TCFS yet for a whole
-> home directory, Git linked worktrees, or live SQLite databases: the sync
-> blacklist deliberately refuses the last two.
-> Content is not compressed before encryption today.
+> **Status (2026-10-16): the backend is paused** (since 2026-09-29), so
+> installed clients have nothing to sync with. The latest release is
+> `v0.12.17`. Live state and the path back are in
+> [docs/ops/current.md](docs/ops/current.md#status-2026-10-15); what tcfs must
+> do, and the gaps between the documented security model and the code, are in
+> [docs/SPEC.md](docs/SPEC.md#current-status). Do not use TCFS yet for a
+> whole home directory, Git linked worktrees, or live SQLite databases: the
+> sync blacklist deliberately refuses the last two.
 
 ## Start here
 
+- [Spec](docs/SPEC.md) — what TCFS is for, its requirements and acceptance,
+  and which file is canonical for what.
 - [Vision](docs/VISION.md) — the north star and TCFS's place in Cordillera and
   Rockies.
 - [Product sequence](docs/PRODUCT.md) — the approved A → B → C strategy and
@@ -88,7 +85,8 @@ nix profile install \
 
 Other artifacts exist, but their proof tiers differ:
 
-- Homebrew is stale at `0.12.12` and its formula skips symlinks.
+- The Homebrew tap formula is at `0.12.17` (published 2026-07-09); its
+  install and symlink behavior has no smoke evidence.
 - Fedora 42 daemon-only RPM installation is proven; Rocky 10/FUSE is pending.
 - Debian/Ubuntu packages, tarballs, containers, and the macOS package have
   lane-specific evidence and gaps.

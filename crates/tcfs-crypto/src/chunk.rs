@@ -23,7 +23,7 @@ use crate::NONCE_SIZE;
 /// - `file_key`: The per-file encryption key
 /// - `chunk_index`: Zero-based index of this chunk within the file
 /// - `file_id`: 32-byte file identifier (e.g., BLAKE3 hash of plaintext)
-/// - `plaintext`: The (potentially compressed) chunk data
+/// - `plaintext`: The chunk data (chunks are not compressed before encryption)
 ///
 /// Returns: `[24-byte nonce][ciphertext][16-byte tag]`
 pub fn encrypt_chunk(

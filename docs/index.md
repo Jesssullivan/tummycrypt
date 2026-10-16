@@ -8,6 +8,8 @@ userspace client surfaces. Linux is the strongest runtime today.
 
 Read these in order:
 
+0. [Spec](SPEC.md) — what TCFS is for, requirements, acceptance, and which
+   file is canonical for what.
 1. [README](../README.md) — concise capability and development entry point.
 2. [Vision](VISION.md) — hydratable-anywhere north star and program fit.
 3. [Product](PRODUCT.md) — accepted A → B → C sequence, root identity, and

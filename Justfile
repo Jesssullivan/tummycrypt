@@ -71,7 +71,7 @@ onprem-tofu-validate:
 onprem-tofu-candidate-test:
     bash scripts/test-tcfs-onprem-tofu-candidate-workloads.sh
 
-# Regression test the TIN-5136 honey pause: chart replicas 0 plus restore render
+# Regression test the TIN-5136 honey pause: chart replicas 0, no revival commands or retired manifests
 tcfs-backend-paused-test:
     bash scripts/test-tcfs-backend-paused-replicas.sh
 
