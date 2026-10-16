@@ -45,7 +45,7 @@ size 94371840
   \endhead
   \code{version}    & string & Stub format URI \\
   \code{chunks}     & usize  & Number of chunks in the remote manifest \\
-  \code{compressed} & bool   & Whether content is seekable-zstd compressed \\
+  \code{compressed} & bool   & Reserved for seekable-zstd; always \code{0} today (no compression in the data path) \\
   \code{fetched}    & bool   & \code{0} for dehydrated, \code{1} for hydrated \\
   \code{oid}        & string & Content OID, normally \code{blake3:\{hex\}} \\
   \code{origin}     & string & Remote origin URL \\
@@ -67,57 +67,73 @@ Content-addressed storage using BLAKE3 hashes as keys:
 \begin{lstlisting}
 {prefix}/
   chunks/
-    {blake3_hash_1}     # Compressed+encrypted chunk
+    {blake3_hash_1}     # Encrypted chunk (BLAKE3 of ciphertext; not compressed)
     {blake3_hash_2}
     ...
   manifests/
-    {file_blake3_hash}  # Chunk manifest (JSON)
+    {manifest_object_id}  # Manifest (plaintext JSON), path-indexed uploads
+    {file_blake3_hash}    # Manifest for direct (non-indexed) uploads
+  index/
+    {rel_path}            # Index entry naming the current manifest
 \end{lstlisting}
 
 \subsection{Chunk Manifest Format}
 
+The current regular-file manifest is \code{SyncManifest} version 2
+(\code{crates/tcfs-sync/src/manifest.rs}), serialized as plaintext pretty
+JSON:
+
 \begin{lstlisting}[language=json]
 {
-  "version": 1,
-  "file_hash": "<BLAKE3 hex of original file>",
+  "version": 2,
+  "file_hash": "<BLAKE3 hex of the plaintext file>",
   "file_size": 4194304,
-  "chunk_count": 3,
-  "chunks": [
-    {
-      "hash": "<BLAKE3 hex of chunk ciphertext>",
-      "offset": 0,
-      "length": 1398101,
-      "compressed_length": 1205432
-    }
-  ]
+  "chunks": ["<BLAKE3 hex of chunk ciphertext>", "..."],
+  "vclock": { "...": 1 },
+  "written_by": "<device id>",
+  "written_at": 1760000000,
+  "rel_path": "path/relative/to/root",
+  "mode": 420,
+  "mtime": [1760000000, 0],
+  "encrypted_file_key": "<base64 wrapped file key>",
+  "wrapped_file_keys": []
 }
 \end{lstlisting}
 
-Each chunk entry records the BLAKE3 hash of the \emph{ciphertext} (used as the
-CAS key in S3), the byte offset and length within the original file, and the
-compressed length of the stored chunk.
+\code{chunks} is an ordered list of chunk keys only. Manifests do not record
+chunk offsets or lengths, and nothing is compressed. The manifest itself is
+not encrypted: the relative path, size and plaintext file hash are readable
+by anyone who can read the bucket. \code{mode}, \code{mtime},
+\code{encrypted\_file\_key} and \code{wrapped\_file\_keys} are optional.
+Symlinks use a separate version-3 \code{SymlinkManifest}.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Chunking Algorithm}
 
 \tcfs{} uses \textbf{FastCDC} (Fast Content-Defined Chunking) for splitting
-files into variable-size chunks:
+files into variable-size chunks. The default profile (most files) is:
 
 \begin{longtable}{ll}
   \toprule
   \textbf{Parameter} & \textbf{Value} \\
   \midrule
   Minimum chunk size & 2\,KiB \\
-  Average chunk size & 8\,KiB \\
+  Average chunk size & 4\,KiB \\
   Maximum chunk size & 16\,KiB \\
   Hash function      & BLAKE3 \\
-  Compression        & zstd (level 3) \\
+  Compression        & none \\
   \bottomrule
 \end{longtable}
 
+Two larger profiles are selected by path (\code{ChunkSizes::for\_path} in
+\code{crates/tcfs-chunks/src/fastcdc.rs}): 32/64/256\,KiB for Git index,
+\code{.idx} and \code{.bin} files, and 1/4/16\,MiB for Git packs and
+\code{.rev}, \code{.iso} and \code{.img} files.
+
 Content-defined chunking ensures that inserting or modifying bytes in a file
-only affects the chunks near the edit point. Unmodified regions produce
-identical chunks, enabling efficient delta sync and deduplication.
+only affects the chunks near the edit point. With encryption on, each file
+has its own random key and every chunk a random nonce, so identical plaintext
+in two files does not produce identical stored chunks.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Hydration Flow}
@@ -126,10 +142,13 @@ When a remote-backed file is opened through the mounted VFS:
 
 \begin{enumerate}
   \item The mount backend's \code{open()} handler intercepts the request.
-  \item Manifest is fetched from \filepath{\{prefix\}/manifests/\{file\_hash\}}.
+  \item The index entry at \filepath{\{prefix\}/index/\{rel\_path\}} names the
+        manifest, which is fetched from
+        \filepath{\{prefix\}/manifests/\{manifest\_object\_id\}}.
   \item Chunks are fetched in parallel from
         \filepath{\{prefix\}/chunks/\{chunk\_hash\}}.
-  \item Each chunk is decompressed (zstd) and decrypted (XChaCha20-Poly1305).
+  \item Each chunk is decrypted (XChaCha20-Poly1305). There is no
+        decompression step.
   \item BLAKE3 hash of the reassembled file is verified against \code{file\_hash}.
   \item The file is cached and served to the calling process via \code{read()}.
 \end{enumerate}

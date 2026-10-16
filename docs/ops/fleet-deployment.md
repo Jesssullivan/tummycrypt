@@ -6,6 +6,14 @@ Companion to [RFC 0001: Fleet Sync Integration](../rfc/0001-fleet-sync-integrati
 For the named live acceptance lane built on this fleet, see
 [Neo-Honey Live Acceptance](neo-honey-acceptance.md).
 
+> **Historical (2026-10-16).** The tcfs backend has been paused since
+> 2026-09-29 and will return on a new SeaweedFS deployment, not on the paths
+> below. Live state is in [current.md](current.md#status-2026-10-15). Private
+> host and tailnet names in this guide are replaced by placeholders such as
+> `<s3-host>` and `<nats-host>`; the lab's private inventory has the real
+> values. The NATS token-file rules are canonical in
+> `crates/tcfs-core/src/nats_token.rs`.
+
 Current authority note: this guide still contains the Civo-era deployment path.
 Treat those commands as legacy/standby unless an operator explicitly targets the
 Civo environment. The active on-prem authority path is honey/on-prem and is
@@ -14,7 +22,7 @@ tracked in [On-Prem Authority Recovery](onprem-authority-recovery.md).
 ## Prerequisites
 
 - tcfs v0.3.0+ installed on all machines
-- SeaweedFS S3 reachable from all machines (verified: `dees-appu-bearts:8333`)
+- SeaweedFS S3 reachable from all machines (verified: `<s3-host>:8333`)
 - Each machine enrolled with a real age key and storage-backed registry merge:
   `tcfs device enroll --name $(hostname) --sync-remote`
   - If a host already has a legacy `age1-device-*` placeholder entry, repair it
@@ -47,7 +55,7 @@ cd infra/tofu/environments/civo && tofu apply
 ```
 
 This creates a `LoadBalancer` service with `loadBalancerClass: tailscale` and
-the legacy Civo hostname annotation `nats-tcfs`. The Tailscale operator picks it
+the legacy Civo hostname annotation `<nats-host>`. The Tailscale operator picks it
 up and exposes NATS as a tailnet device.
 
 Legacy Civo standby machines may connect via the IaC-managed FQDN:
@@ -57,7 +65,7 @@ nats://nats.tcfs.tummycrypt.dev:4222
 
 Current honey/on-prem lab acceptance should prefer the MagicDNS/tailnet name:
 ```
-nats://nats-tcfs:4222
+nats://<nats-host>:4222
 ```
 
 #### Two-Apply Pattern (First Deployment)
@@ -89,7 +97,7 @@ just dns-status
 just nats-status
 
 # Or manually against the active tailnet path
-nats server info --server nats://nats-tcfs:4222
+nats server info --server nats://<nats-host>:4222
 
 # Check JetStream streams
 just nats-streams
@@ -118,11 +126,11 @@ Run it with:
 
 ```bash
 export TCFS_E2E_LIVE=1
-export TCFS_S3_ENDPOINT=http://seaweedfs-tcfs:8333
+export TCFS_S3_ENDPOINT=http://<s3-host>:8333
 export TCFS_S3_BUCKET=tcfs
 export AWS_ACCESS_KEY_ID=<from seaweedfs-admin secret>
 export AWS_SECRET_ACCESS_KEY=<from seaweedfs-admin secret>
-export TCFS_NATS_URL=nats://nats-tcfs:4222
+export TCFS_NATS_URL=nats://<nats-host>:4222
 cargo test -p tcfs-e2e --test fleet_live neo_honey_two_device_sync_smoke -- --nocapture
 ```
 
@@ -272,8 +280,8 @@ creation_rules:
 # secrets/hosts/yoga.yaml (before encryption)
 s3_access: "<access-credential>"
 s3_secret: "<secret-credential>"
-s3_endpoint: "http://dees-appu-bearts:8333"
-nats_url: "nats://nats-tcfs:4222"
+s3_endpoint: "http://<s3-host>:8333"
+nats_url: "nats://<nats-host>:4222"
 ```
 
 ```bash
@@ -303,15 +311,15 @@ For non-NixOS machines:
 # ~/.config/tcfs/env (sourced by systemd/launchd)
 TCFS_S3_ACCESS=<your-access-credential>
 TCFS_S3_SECRET=<your-secret-credential>
-TCFS_S3_ENDPOINT=http://dees-appu-bearts:8333
-TCFS_NATS_URL=nats://nats-tcfs:4222
+TCFS_S3_ENDPOINT=http://<s3-host>:8333
+TCFS_NATS_URL=nats://<nats-host>:4222
 ```
 
 ### Credential Rotation
 
 ```bash
 # 1. Generate new S3 credentials in SeaweedFS
-curl -X POST http://dees-appu-bearts:8333/admin/keys \
+curl -X POST http://<s3-host>:8333/admin/keys \
   -d '{"accessKey":"new-key","secretKey":"new-secret"}'
 
 # 2. Update SOPS secrets on each host
@@ -342,10 +350,10 @@ programs.tcfs = {
   identity = "~/.config/sops/age/keys.txt";
   deviceName = "yoga";
   conflictMode = "interactive";
-  natsUrl = "nats://nats-tcfs:4222";
+  natsUrl = "nats://<nats-host>:4222";
   syncRoot = "~/tcfs";
   mounts = [
-    { remote = "seaweedfs://dees-appu-bearts:8333/tcfs"; local = "~/tcfs"; }
+    { remote = "seaweedfs://<s3-host>:8333/tcfs"; local = "~/tcfs"; }
   ];
 };
 ```
@@ -364,7 +372,7 @@ services.tcfsd = {
   enable = true;
   deviceName = "yoga";
   conflictMode = "interactive";
-  natsUrl = "nats://nats-tcfs:4222";
+  natsUrl = "nats://<nats-host>:4222";
   syncRoot = "/srv/tcfs";
 };
 ```

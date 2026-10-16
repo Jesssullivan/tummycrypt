@@ -172,7 +172,7 @@ Archived host evidence:
   ran on `honey` through
   `nix develop --accept-flake-config --command task lazy:linux-lifecycle-demo`
   against
-  `seaweedfs://100.64.48.53:8333/tcfs/lazy-linux-20260508T170825Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/lazy-linux-20260508T170825Z`.
 - The run passed with `status=0`, mounted through FUSE3, listed the nested
   remote tree before content hydration, hydrated exact 77-byte content with
   `cat`, wrote and edited through the mounted view, pulled the edited file
@@ -182,7 +182,7 @@ Archived host evidence:
   `sync state: not_synced`.
 - [lazy-linux-20260508T151858Z](../release/evidence/lazy-linux-20260508T151858Z/)
   ran on `honey` through `nix develop --command task lazy:linux-demo` against
-  `seaweedfs://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/lazy-linux-20260508T151858Z`.
 - The run passed with `status=0`, mounted through FUSE3, listed the nested
   remote tree before content hydration, hydrated exact 77-byte content with
   `cat`, cleared the cache to 0 entries, then rehydrated the same file.
@@ -250,7 +250,7 @@ Archived host evidence:
 
 - [neo-honey-unsynced-rehydrate-20260510T015644Z](../release/evidence/neo-honey-unsynced-rehydrate-20260510T015644Z/)
   ran against
-  `seaweedfs://100.64.48.53:8333/tcfs/neo-honey-unsynced-rehydrate-20260510T015644Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/neo-honey-unsynced-rehydrate-20260510T015644Z`.
 - The run passed with `status=0`: neo unsynced the fixture to a `.tc` stub,
   honey listed/cat-hydrated/mutated the clean mounted path, neo pulled exact
   honey bytes, `sync-status` returned `sync state: synced`, and
@@ -273,7 +273,7 @@ Archived reverse evidence:
 
 - [neo-honey-reverse-unsynced-rehydrate-20260510T022858Z](../release/evidence/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/)
   ran against
-  `seaweedfs://100.64.48.53:8333/tcfs/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z`.
 - The run passed with `status=0`: honey pulled the initial fixture, unsynced it
   to a `.tc` stub, neo pushed the mutation, honey pulled exact 107-byte neo
   content, `sync-status` returned `sync state: synced`, and
@@ -329,7 +329,7 @@ Current live M4 evidence:
 
 - [honey-mounted-reverse-read-20260510T042203Z](../release/evidence/honey-mounted-reverse-read-20260510T042203Z/)
   ran against
-  `seaweedfs://100.64.48.53:8333/tcfs/honey-mounted-reverse-read-20260510T042203Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/honey-mounted-reverse-read-20260510T042203Z`.
 - The Linux-equivalent row passed with
   `proof=linux-mounted-reverse-read-current-behavior`: honey pulled and
   unsynced a physical copy, neo pushed the mutation, honey mounted
@@ -337,7 +337,7 @@ Current live M4 evidence:
   `honey_physical_after_mounted_read=stub_present`.
 - [neo-mounted-reverse-read-20260510T035826Z](../release/evidence/neo-mounted-reverse-read-20260510T035826Z/)
   ran against
-  `seaweedfs://100.64.48.53:8333/tcfs/neo-mounted-reverse-read-20260510T035826Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/neo-mounted-reverse-read-20260510T035826Z`.
 - The pre-mount stages passed: honey initial push, neo physical pull, neo
   `tcfs unsync`, `sync state: not_synced`, and honey mutated push are archived.
 - The row remains blocked before mounted `cat`: neo/macOS has no macFUSE
@@ -375,7 +375,7 @@ Archived M8 evidence:
 
 - [neo-honey-delete-rename-unsynced-20260510T040456Z](../release/evidence/neo-honey-delete-rename-unsynced-20260510T040456Z/)
   ran against
-  `seaweedfs://100.64.48.53:8333/tcfs/neo-honey-delete-rename-unsynced-20260510T040456Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/neo-honey-delete-rename-unsynced-20260510T040456Z`.
 - The run passed with `status=0`: honey pulled and unsynced both fixtures, neo
   deleted one path and renamed another, honey old-path pulls failed as expected,
   the renamed new path hydrated exact bytes, and `rename_new_pull=synced`.
@@ -411,7 +411,7 @@ Archived scoped canary evidence:
 
 - [home-canary-linux-xr-shadow-20260510T023938Z](../release/evidence/home-canary-linux-xr-shadow-20260510T023938Z/)
   completed a 92,969-file / 7.7 GB shadow push to
-  `seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z`.
+  `seaweedfs://<s3-host>:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z`.
 - Honey mounted the prefix, listed clean names including `.git`, ran bounded
   traversal at `max-depth=3`, and `cat` hydrated `.clang-format` with exact
   24,291-byte content.

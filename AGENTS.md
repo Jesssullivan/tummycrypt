@@ -3,43 +3,30 @@
 ## Ratified rulings (read first)
 
 Operator interview 2026-09-20, Linear TIN-3692; placement per R-N14
-(2026-09-21). These three rulings outrank everything else in this file. The
-fuller text with enforcement paths, tests, and history lives in lab
-`AGENTS.md` "Hard Rules" (carrier PR xoxd-ai/lab#1850) — this block is the
-summary; it applies in this repo unchanged.
+(2026-09-21). R-N11 and R-N12 were superseded on 2026-10-04 by
+**R-HOOK-CONVERGENCE-20261004** (explicit operator interview, TIN-3692 comment
+`98cf680c`), which replaced the former blanket process ban and hook-stop
+mechanics. The operator's machine-level rulings and lab `AGENTS.md` carry the
+fuller text; this block is the summary and applies in this repo unchanged.
 
-- **R-N11 — Agents never kill agents, tmux or live sessions** (amended
-  2026-09-24, TIN-3692). Operator-only on any host: signalling another
-  agent's processes (codex, claude, pi, pi-*, kimi, junie, opencode and their
-  parent sessions) by PID, pattern or name; killing a tmux server, session,
-  pane or window (`tmux kill-*` in any spelling, `respawn-* -k`); killing any
-  live operator or interactive session "and similar" (stopping sshd or a
-  session transport, `loginctl terminate`/`kill`, a whole-domain
-  `launchctl bootout`, `systemctl isolate`, `launchctl reboot logout`/`apps`).
-  Raw `kill`/`pkill`/`killall` and the other kill-family tools stay refused in
-  every form, as do `systemctl kill`, `launchctl kill` and `systemctl freeze`,
-  because a literal PID cannot be proven not to be an agent or tmux process.
-  Permitted when ruled work needs it: service lifecycle on a NAMED job or
-  unit (`launchctl bootout`/`bootstrap`/`kickstart <domain>/<label>`,
-  `systemctl [--user] stop`/`start`/`restart <unit>`), except a stop,
-  restart, reload, disable or mask of an agent, tmux, cmux, sshd or
-  login-session surface; and host reboots, power-off and halt. Before any
-  of them the agent states who is logged in, any tmux servers and any agent
-  processes on that host, and asks first if anything is live (operator
-  interviews 2026-09-24). Kexec, suspend, hibernate, a firmware-setup or
-  boot-menu hold, and a reboot, power-off or halt over D-Bus stay
-  operator-only.
-  Incident: an agent walked process ancestry to PID 1, found the operator's
-  tmux server, and killed it with a literal PID after the guard hook had
-  refused twice; critical work was lost.
-- **R-N12 — A guard-hook refusal is a stop.** Quote the refusal verbatim;
-  propose at most ONE materially different alternative; ask before running
-  it. Reformulating a refused command to evade the pattern is itself a
-  violation.
+- **R-N11 — Ownership before action.** Your own recorded tasks and named
+  services are permitted after checking ownership and live sessions.
+  Cross-session actions (another agent's processes, tmux servers or sessions,
+  an operator's live session) require explicit user authorization. Publish
+  the target and the authorization in the receipt.
+  Incident behind the original rule: an agent walked process ancestry to
+  PID 1, found the operator's tmux server, and killed it with a literal PID;
+  critical work was lost.
+- **R-N12 — Hooks are advisory.** Every lab hook, including credential
+  checks, may warn but never denies, fails a commit or demands an extra
+  approval. Documentation and searches are data. Use a receipted alternative
+  within existing authorization; ask only when the action itself needs a new
+  decision.
 - **R-N13 — Ratification.** Every mutating step cites a ruling ID in its
-  receipt; a receipt without one is an unratified act. Operator questions
-  and asides are never rulings. Every session writes a `docs/agent-notes/`
-  entry before ending. Ticket descriptions are never rewritten, only
+  receipt; a receipt without one is an unratified act. Explicit operator
+  answers and instructions are authority; a reminder is advisory. Every
+  session writes a `docs/agent-notes/` entry before ending, and distilled
+  facts go to Linear. Ticket descriptions are never rewritten, only
   superseded by dated comments.
 
 ## Program context — where truth lives
@@ -48,6 +35,8 @@ This file covers build/test/navigation and the machines that run them. For what
 is true and what ships next, read these in order (each owns a distinct layer;
 none is duplicated here):
 
+0. [docs/SPEC.md](docs/SPEC.md) — what tcfs is for, requirements,
+   acceptance, and the single-source map (which file is canonical for what).
 1. [docs/VISION.md](docs/VISION.md) — north star + the claim-tier legend.
 2. [docs/PRODUCT.md](docs/PRODUCT.md) — the accepted A→B→C delivery sequence,
    stable-root design, repository ownership.
@@ -143,10 +132,10 @@ task dev
   entry to `.cargo/config.toml`.
 - **PATH ordering**: the devShell and `.envrc` both put `target/debug` and
   `target/release` ahead of installed packages, so a stale workspace build can
-  shadow the deployed `tcfs`/`tcfsd`. Separately, on `neo` an unmanaged
-  `v0.12.12` install currently shadows the managed build in the effective
-  interactive `PATH` (`docs/ops/current.md`, Fleet row; an attended cleanup is
-  queued). Smoke harnesses print the resolved binary path — check it before
+  shadow the deployed `tcfs`/`tcfsd`. Separately, as of the 2026-08-22
+  snapshot (not re-verified during the backend pause), an unmanaged `v0.12.12`
+  install on `neo` shadowed the managed build in the effective interactive
+  `PATH` (`docs/ops/current.md`, historical Fleet row). Smoke harnesses print the resolved binary path — check it before
   believing a version string.
 
 ### Machines that run this repo
@@ -194,7 +183,8 @@ with this table.
   dev-seat ratification and correcting it is an operator call, not a
   docs-hygiene one.
 - **Live-work freezes outrank convenience.** `docs/ops/current.md` records
-  which live resolver, enrollment, deploy, and crypto ceremonies are frozen.
+  which live resolver, enrollment, deploy, and crypto ceremonies are frozen
+  (today: the backend pause; TIN-2856 is Done and is not a freeze).
   Source review, tests, and landing continue during a freeze; new fleet claims
   do not.
 
@@ -209,7 +199,7 @@ with this table.
 | `tcfs-secrets` | lib | SOPS/age decryption, KeePassXC, device identity/registry |
 | `tcfs-sops` | lib | SOPS+age fleet secret propagation |
 | `tcfs-storage` | lib | OpenDAL S3/SeaweedFS operator + health checks |
-| `tcfs-chunks` | lib | FastCDC chunking, BLAKE3 hashing, zstd compression |
+| `tcfs-chunks` | lib | FastCDC chunking, BLAKE3 hashing; ships a `seekable_zstd` module that nothing in the data path calls (no compression today) |
 | `tcfs-sync` | lib | Sync engine, vector clocks, state cache, NATS JetStream |
 | `tcfs-fuse` | lib | Linux FUSE driver (fuse3) |
 | `tcfs-nfs` | lib | NFS loopback server (NFSv3, FUSE-free mount) |
@@ -227,9 +217,9 @@ with this table.
 - **Proto source of truth**: `crates/tcfs-core/src/proto/tcfs.proto` — all crates import via `tcfs_core::proto`
 - **Error handling**: `thiserror` for libraries, `anyhow` for binaries
 - **Async**: tokio full features, `tracing` for structured logging
-- **State cache**: JSON-backed at `{config.sync.state_db}.json`
-- **CAS layout**: chunks at `{prefix}/chunks/{hash}`, manifests at `{prefix}/manifests/{file_hash}`
-- **Feature gates**: `fuse` feature on tcfs-cli (default on), `nats` feature on tcfs-sync
+- **State cache**: JSON-backed at `config.sync.state_db` with its extension replaced by `.json` (`state.db` → `state.json`)
+- **CAS layout**: chunks at `{prefix}/chunks/{hash}` (ciphertext BLAKE3 when encrypted); path-indexed uploads (the normal sync path) put manifests at `{prefix}/manifests/{manifest_object_id}` with an index entry at `{prefix}/index/{rel_path}`; only direct, non-indexed uploads use `{prefix}/manifests/{file_hash}`. Manifests and index keys are plaintext (see `docs/SPEC.md`, Current status)
+- **Feature gates**: `fuse` feature on `tcfs-fuse` (tcfs-cli has no features of its own and always enables `tcfs-fuse/fuse`); `nats` and `crypto` features on tcfs-sync
 
 ## Testing
 
@@ -282,7 +272,11 @@ than assuming the list above is complete:
 
 Release: `release.yml` has 9 jobs — `plan`, `build-binaries`, `build-image`,
 `nix-build`, `generate-installers`, `build-fileprovider`, `build-pkg`,
-`create-release`, `update-homebrew`. The remaining workflows are
+`create-release`, `update-homebrew`; it runs on push and
+`workflow_dispatch`. `repo-contract.yml` and `runs-on-contract.yml` also run
+on push and pull request. The smoke, canary and macOS proof workflows
+(`*-smoke.yml` except the path-scoped `linux-package-container-smoke.yml`
+above, `storage-*-canary.yml`, `macos-fileprovider-*.yml`) are
 `workflow_dispatch`-only.
 
 ## Agent Coordination
@@ -312,13 +306,14 @@ concurrently. Adapted from the GFTB multi-agent orchestration pattern
   tracks deliberate user-content conflicts on these two paths for the TIN-2658
   production resolver gate. Editing them in a PR is fine; do not "resolve" the
   live host-side divergence as a side effect of a docs change.
-- **Durable notes over scratchpad.** Findings that matter beyond the current
-  session go in dated files under `docs/ops/` (the existing ~30-file
-  convention), never only in an ephemeral scratchpad or chat context a
-  compaction/rotation sweep can wipe. This repo rule outranks a harness
-  default that says to park working files in `/tmp` or a scratchpad dir —
-  that default covers genuinely transient scratch only (lab's `TIN-2520`
-  clause is the canonical statement of this precedence).
+- **Durable notes over scratchpad.** Session working notes go in
+  `docs/agent-notes/` (R-N13); product and operations records that matter
+  beyond the session go in dated files under `docs/ops/`. Neither lives
+  only in an ephemeral scratchpad or chat context a compaction/rotation
+  sweep can wipe. This repo rule outranks a harness default that says to
+  park working files in `/tmp` or a scratchpad dir — that default covers
+  genuinely transient scratch only (lab's `TIN-2520` clause is the canonical
+  statement of this precedence).
 - **Instruction precedence.** Repo-root `AGENTS.md` (this file) > the
   nearest in-repo `.claude/CLAUDE.md` overlay > named `docs/ops/` facet docs
   referenced from here or a task > machine-level / home-manager defaults.

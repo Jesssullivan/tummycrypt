@@ -5,7 +5,10 @@ paused (see [current.md](current.md#status-2026-10-15)), so no step below
 can run end to end yet.
 
 Rulings (Linear TIN-4543): **Q156** makes the Mac-only cohort on `neo` tcfs's
-first real user, and says it is mounted, not copied. **Q155** makes tcfs the
+first real user. ("Mounted, not copied" below is this page's reading of Q156,
+not the ruling's text. Bulkload's ruling C1, OI-1003-Q194 on 2026-10-16,
+narrows Q156 to placement: bulkload carries the cohort to the new seat now,
+and it is still tcfs's first user later.) **Q155** makes tcfs the
 long-run product and bulkload the migration tool; the boundary is in
 [tcfs-bulkload-boundary.md](tcfs-bulkload-boundary.md). **Q153** names
 tcfs's home: the blahaj SeaweedFS 4.48 deployment, once its preconditions
@@ -13,8 +16,8 @@ hold. The cohort itself is named in Q156; this public page does not list it.
 
 ## What "mounted, not copied" means
 
-Bulkload leaves the cohort out of its full run. tcfs does three things
-instead:
+Bulkload's copy (C1) is a migration copy. tcfs does three things on top of
+it:
 
 1. It ingests the cohort's files once, from `neo`, into the tcfs backend
    (chunked, encrypted, content-addressed).

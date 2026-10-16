@@ -60,20 +60,34 @@ are:
   \item[User Master Key] 256-bit, derived via Argon2id from user passphrase.
     Root of all derived keys.
   \item[File Encryption Key] Per-file, 256-bit random. Wrapped by master key
-    using XChaCha20-Poly1305. Used for chunk encryption.
-  \item[Manifest Encryption Key] Derived via HKDF-SHA256 from master key.
-    Encrypts file manifests (chunk lists, metadata).
-  \item[Name Encryption Key] Derived via HKDF-SHA256 from master key.
-    AES-SIV deterministic filename encryption.
+    using XChaCha20-Poly1305 (\code{wrap\_mode = master}, the fleet setting
+    today), or wrapped for each active device's age recipient in the
+    per-device modes. Used for chunk encryption.
+  \item[Manifest Encryption Key] Derivable via HKDF-SHA256 from the master
+    key (\code{derive\_manifest\_key}), but \textbf{not used}: nothing outside
+    \code{tcfs-crypto} calls it.
+  \item[Name Encryption Key] Derivable via HKDF-SHA256 from the master key,
+    with AES-SIV filename encryption in \code{tcfs-crypto/src/names.rs}, but
+    \textbf{not used}: nothing outside \code{tcfs-crypto} calls it.
 \end{description}
+
+\subsection{What Is Not Encrypted}
+
+Only chunk content is encrypted. Manifests are stored as plaintext JSON that
+holds the relative path, file size, the BLAKE3 hash of the plaintext file,
+the chunk list, the vector clock and the writing device ID. Index entries are
+stored under \filepath{\{prefix\}/index/\{rel\_path\}}, so relative paths are
+visible as object keys. Anyone who can list or read the bucket learns file
+names, sizes and content hashes, but not content.
 
 \subsection{Chunk Encryption}
 
-Each file chunk is independently encrypted:
+Each file chunk is independently encrypted. Chunks are not compressed: the
+\code{seekable\_zstd} module in \code{tcfs-chunks} has no caller in the data
+path.
 
 \begin{enumerate}
-  \item Plaintext chunk is compressed with zstd (level 3).
-  \item Compressed data is encrypted with XChaCha20-Poly1305:
+  \item The plaintext chunk is encrypted with XChaCha20-Poly1305:
     \begin{itemize}
       \item Key: file encryption key (256-bit)
       \item Nonce: 192-bit random (no nonce management required)
@@ -107,6 +121,7 @@ Credentials are discovered in order of precedence:
         \code{LoadCredentialEncrypted}
   \item \code{\$SOPS\_AGE\_KEY\_FILE} --- path to an age key file
   \item \code{\$SOPS\_AGE\_KEY} --- literal age key content
+  \item \code{secrets.age\_identity} --- path from the config file
   \item \filepath{\textasciitilde/.config/sops/age/keys.txt} --- default fallback
 \end{enumerate}
 
@@ -152,8 +167,9 @@ tcfs rotate-credentials
 tcfs rotate-credentials --non-interactive
 \end{lstlisting}
 
-The non-interactive mode reads \code{AWS\_ACCESS\_KEY\_ID} and
-\code{AWS\_SECRET\_ACCESS\_KEY} from the environment.
+The non-interactive mode reads the new key pair from the environment:
+\code{AWS\_ACCESS\_KEY\_ID} and \code{AWS\_SECRET\_ACCESS\_KEY}, or
+\code{TCFS\_NEW\_ACCESS\_KEY} and \code{TCFS\_NEW\_SECRET\_KEY}.
 
 Each rotation creates a timestamped SOPS-encrypted backup:
 \code{credentials.sops.yaml.bak.<epoch>}.
@@ -194,13 +210,11 @@ nats_token_file = "/run/secrets/tcfs-nats-token"
 \end{lstlisting}
 
 NATS token auth reads the token from \code{nats\_token\_file} (overridden by
-\code{TCFS\_NATS\_TOKEN\_FILE}) at connect time. The file must be a regular
-file outside \code{/nix/store}, owned by the service user or root, with no
-group or world permission bits; symlinks are followed and the target is
-checked, and the open is non-blocking and re-verified against the earlier
-stat. An inline
-\code{nats\_token} value is refused, because Nix-rendered configuration lands
-in the world-readable store. See \code{docs/ops/fleet-deployment.md}.
+\code{TCFS\_NATS\_TOKEN\_FILE}) at connect time; an inline \code{nats\_token}
+value is refused, because Nix-rendered configuration lands in the
+world-readable store. The full file rules (path, ownership, permission bits,
+size, symlink handling) are canonical in the module documentation of
+\code{crates/tcfs-core/src/nats\_token.rs}.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Device Identity}
@@ -209,9 +223,15 @@ Each enrolled device has:
 
 \begin{itemize}
   \item An age X25519 keypair (generated during \code{tcfs init}).
-  \item A device registry entry (\filepath{\textasciitilde/.local/share/tcfs/devices.json}).
-  \item Platform keychain storage for session keys (macOS Keychain,
-        GNOME Keyring, Windows Credential Manager).
+  \item A device registry entry in
+        \filepath{\$XDG\_CONFIG\_HOME/tcfs/devices.json} (default
+        \filepath{\textasciitilde/.config/tcfs/devices.json}), with a remote
+        copy at \filepath{\{meta\_prefix\}/tcfs-meta/devices.json}.
+  \item Session tokens are written through the \code{keyring} crate. It is
+        built without a platform backend feature, so it falls back to its
+        in-process mock store: tokens do not reach the macOS Keychain, GNOME
+        Keyring or Windows Credential Manager and do not persist across
+        processes. Wiring a platform backend is open work.
 \end{itemize}
 
 \subsection{Revoking a Device}
@@ -220,8 +240,12 @@ Each enrolled device has:
 tcfs device revoke <device-name>
 \end{lstlisting}
 
-Marks the device as revoked in the registry. Future versions will implement
-key re-encryption to exclude revoked devices from new file keys.
+Marks the device as revoked in the registry. In the per-device wrap modes,
+new file keys are wrapped only for active (non-revoked) devices. Under
+\code{wrap\_mode = master}, the fleet setting today, every device holds the
+shared master key, so revocation alone does not cut a device off from new
+content.
+Re-encrypting existing file keys is not implemented.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Config File Security}

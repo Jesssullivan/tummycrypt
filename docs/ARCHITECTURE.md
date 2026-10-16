@@ -31,10 +31,14 @@ sync, VFS, FUSE, FileProvider or `tcfsd` code calls it. The stub format's
 `compressed` field (`crates/tcfs-vfs/src/stub.rs`) and the `compressed` and
 `compressed_length` fields in `crates/tcfs-core/src/types.rs` are reserved
 for it. The only zstd use in production code is compacting enrollment
-payloads (`crates/tcfs-auth/src/enrollment.rs`). The LaTeX source
-(`docs/tex/architecture.tex`, the crate table and the hydration sequence)
-still describes a zstd step. Where it disagrees with this paragraph, the
-LaTeX is out of date.
+payloads (`crates/tcfs-auth/src/enrollment.rs`). The LaTeX sources were
+corrected to match on 2026-10-16.
+
+Manifests and the remote index are plaintext. A manifest is JSON holding the
+relative path, file size, plaintext file BLAKE3, chunk list and vector clock;
+index keys are `{prefix}/index/{rel_path}`. Only chunk content is encrypted.
+See [SPEC.md](SPEC.md#current-status) for this and the other gaps between the
+documented security model and the code.
 
 ## Quick Reference
 
@@ -46,4 +50,5 @@ See the [Architecture PDF](https://github.com/Jesssullivan/tummycrypt/actions/wo
 - Hydration sequence
 - Credential chain
 - Phase roadmap
-- Infrastructure layout
+- Legacy deployment shape (live backend state is in
+  [ops/current.md](ops/current.md))

@@ -68,7 +68,7 @@ green; none of them are loadbearing on a single commit, and all of them are
 worth recording because the same classes will recur:
 
 1. Backend endpoint moved from the temporary Cloudflare quick tunnel to the
-   tailnet hostname `http://seaweedfs-tcfs:8333` so the self-hosted runner
+   tailnet hostname `http://<s3-host>:8333` so the self-hosted runner
    could actually reach SeaweedFS without a public ingress.
 2. The `gh secret set` invocation syntax was corrected so the new endpoint
    actually landed on the `tcfs-macos-smoke` environment.

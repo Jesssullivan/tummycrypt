@@ -7,7 +7,7 @@
 #     enable = true;
 #     identity = "~/.config/sops/age/keys.txt";
 #     syncRoot = "~/tcfs";
-#     natsUrl = "nats://nats-tcfs:4222";
+#     natsUrl = "nats://<nats-host>:4222";
 #     natsTokenFile = "~/.config/sops-nix/secrets/tcfs-nats-token"; # path, never the token
 #     mounts = [
 #       { remote = "seaweedfs+https://seaweedfs.example.com/bucket"; local = "~/tcfs"; }

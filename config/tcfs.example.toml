@@ -1,7 +1,10 @@
 # tcfs.example.toml
 # Full annotated configuration reference for tcfsd
 # Copy to /etc/tcfs/config.toml or ~/.config/tcfs/config.toml and customize.
-# Environment variables override file settings (prefix: TCFS_).
+# There is no generic TCFS_* environment overlay. Only specific variables are
+# read (for example TCFS_CONFIG, TCFS_NATS_URL, TCFS_NATS_TOKEN_FILE,
+# TCFS_S3_ACCESS/TCFS_S3_SECRET). No variable overrides storage.endpoint or
+# storage.bucket: change them here. Canonical key list: crates/tcfs-core/src/config.rs.
 
 [daemon]
 # Unix domain socket for gRPC (CLI <-> daemon communication)
@@ -26,11 +29,13 @@ region = "us-east-1"
 bucket = "tcfs"
 # Path to SOPS-encrypted credential file (loaded at startup)
 credentials_file = "/etc/tcfs/credentials.yaml"
-# Alternatively: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars
+# Credential chain: SOPS file, then KDBX, then TCFS_S3_ACCESS/TCFS_S3_SECRET.
+# AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are still accepted, with a warning.
 
 [secrets]
 # Age identity file for SOPS decryption
-# Defaults to: $CREDENTIALS_DIRECTORY/age-identity → $SOPS_AGE_KEY_FILE → $SOPS_AGE_KEY → ~/.config/sops/age/keys.txt
+# Search order: $CREDENTIALS_DIRECTORY/age-identity → $SOPS_AGE_KEY_FILE →
+# $SOPS_AGE_KEY → this age_identity path → ~/.config/sops/age/keys.txt
 # age_identity = "/etc/tcfs/age-identity.txt"
 # Optional KDBX database for credential lookup (RemoteJuggler integration)
 # kdbx_path = "/home/user/.passwords.kdbx"
@@ -48,15 +53,17 @@ nats_url = "nats://localhost:4222"
 # Precedence: TCFS_NATS_TOKEN_FILE env > nats_token_file > no token.
 # An inline `nats_token = "..."` is REFUSED at connect time.
 # nats_token_file = "/run/secrets/tcfs-nats-token"
-# RocksDB local state cache (tracks file hashes + sync state)
+# Local state cache (file hashes + sync state). The live cache is the JSON
+# sibling of this path (state.db -> state.json); RocksDB is only compiled
+# under the tcfs-sync "full" feature.
 state_db = "/var/lib/tcfsd/state.db"
 # Trusted parent for daemon-enrolled, isolated root caches. Set this for system
 # daemons because the socket parent (/run/tcfsd) is not persistent. The same
 # applies to systemd user sockets under %t.
 root_state_dir = "/var/lib/tcfsd/reconcile"
-# Sync worker threads (0 = auto-detect CPU count)
+# Parsed but currently unused: tcfsd builds its scheduler from defaults, and
+# there is no dead-letter queue. Kept so existing configs still parse.
 workers = 0
-# Retry limit for failed tasks before moving to DLQ
 max_retries = 3
 
 # Strategy-A stable-root routing (optional). Clients send only the table ID;

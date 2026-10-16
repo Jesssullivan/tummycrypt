@@ -8,7 +8,7 @@ clean names before hydration, and `cat` a remote-backed file successfully.
 
 - Local source fixture: `/Users/jess/Desktop/TCFS Demo`
 - Honey mountpoint: `/home/jess/tcfs-demo/Desktop`
-- Remote prefix: `seaweedfs://100.64.48.53:8333/tcfs/desktop-demo-jess-20260430T011603Z`
+- Remote prefix: `seaweedfs://<s3-host>:8333/tcfs/desktop-demo-jess-20260430T011603Z`
 - Expected file: `Projects/tcfs-odrive-parity/honey-readme.txt`
 - Evidence directory: `/tmp/tcfs-desktop-honey-evidence-20260430T011603Z`
 - Honey binary: `/tmp/tummycrypt-desktop-demo-current/target/debug/tcfs`
@@ -19,7 +19,7 @@ physical Desktop.
 ## Command Shape
 
 ```bash
-TCFS_DESKTOP_DEMO_REMOTE=seaweedfs://100.64.48.53:8333/tcfs/desktop-demo-jess-20260430T011603Z \
+TCFS_DESKTOP_DEMO_REMOTE=seaweedfs://<s3-host>:8333/tcfs/desktop-demo-jess-20260430T011603Z \
 TCFS_DESKTOP_DEMO_PUSH=1 \
 TCFS_DESKTOP_DEMO_RUN_HONEY=1 \
 TCFS_HONEY_START_MOUNT=1 \

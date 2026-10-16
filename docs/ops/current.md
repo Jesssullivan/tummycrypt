@@ -17,8 +17,8 @@ What still runs:
   cannot push, pull or hydrate anything new.
 - The estate check (not re-verified here) found the yoga FUSE mount returning
   EIO, because there is no backend to read from.
-- No release since `v0.12.17` (2026-07-09); `main` carries 161 unreleased
-  commits. A rotate-key-only `v0.12.18` release is ratified and deferred: see
+- No release since `v0.12.17` (2026-07-09); `main` carries 177 unreleased
+  commits as of `11fc85e` (2026-10-16). A rotate-key-only `v0.12.18` release is ratified and deferred: see
   [v0.12.18-release-exception-ruling-2026-07-28.md](v0.12.18-release-exception-ruling-2026-07-28.md).
   The fleet versions in the 2026-08-22 table below were not re-verified
   during the pause.
@@ -41,9 +41,14 @@ fresh deployment with `sync_always` and auth (Q177).
 Positioning (rulings Q155 and Q156, TIN-4543): tcfs is the long-run product.
 Bulkload is the migration tool. Their boundary is in
 [tcfs-bulkload-boundary.md](tcfs-bulkload-boundary.md). The Mac-only cohort on
-neo will be tcfs's first real use case: it will be mounted, not copied. The
-end-to-end path, remaining gaps and acceptance test are in
-[first-user-mac-cohort.md](first-user-mac-cohort.md).
+neo will be tcfs's first real use case. Bulkload's 2026-10-16 ruling C1
+(OI-1003-Q194) narrows Q156 to placement: bulkload carries the cohort now, and
+it is still tcfs's first user later. The end-to-end path, remaining gaps and
+acceptance test are in [first-user-mac-cohort.md](first-user-mac-cohort.md).
+
+What tcfs must do, the acceptance stages, the gaps between the documented
+security model and the code, and the single-source map are in
+[../SPEC.md](../SPEC.md).
 
 Everything below this block is the **2026-08-22 snapshot and is historical**.
 It predates the pause. Its "proven now" rows describe what was true while the
@@ -112,14 +117,14 @@ Current evidence:
   does the stale `roam-canary-wip` ref pair.
 - PR #551/TIN-2853 has landed; no post-freeze live action was used to make that
   source claim.
-- TIN-2856 freezes every further live resolver, enrollment/TOTP, deploy, and
-  crypto ceremony. Source review, tests, and landing may continue without a
-  new fleet claim.
+- TIN-2856 froze every further live resolver, enrollment/TOTP, deploy, and
+  crypto ceremony. (Historical: TIN-2856 has been Done since 2026-07-22 and is
+  not an open freeze. The live block today is the backend pause above.)
 
 The residual closeout is:
 
 ```text
-wait for TIN-2856 live-work clearance
+backend back (Q153 preconditions; TIN-2856 is Done, not a freeze)
   → adjudicate README.md and AGENTS.md
   → handle the stale roam-canary-wip ref pair
   → git/content/state evidence
@@ -150,7 +155,8 @@ The full evidence boundary and root invariants are in
    emitted SHA-256. Git-workspace roots require a complete Bulkload
    GitWorkspaceV2 capture and use bundle/ref transport; raw `.git` admin paths
    are never transported.
-6. **TIN-2658 residual closure.** After TIN-2856 clears live work, adjudicate
+6. **TIN-2658 residual closure.** Once the backend is back (TIN-2856 is
+   already Done), adjudicate
    the two user-content conflicts and stale ref pair, then capture final
    Git/content/state convergence evidence. Do not repeat the already completed
    pre-freeze dry-run/execute sequence merely to recreate evidence.

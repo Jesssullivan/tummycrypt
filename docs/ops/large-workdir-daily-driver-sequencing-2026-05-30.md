@@ -52,7 +52,7 @@ the original `inventory → shadow → live-repo` sequence:
 ## Live Reality Anchor (neo, 2026-05-30)
 
 - `tcfsd` 0.12.2 running; device `03d8a0bd… / neo.local`; `active_mounts: 0`.
-- `storage_ok: true` (`seaweedfs-tcfs:8333`); **`nats_ok: false`** — the
+- `storage_ok: true` (`<s3-host>:8333`); **`nats_ok: false`** — the
   cross-device bus is down. This is the literal G2 blocker.
 - `~/.config/tcfs/sync-policy.toml` (home-manager generated) encodes the old
   tiered model, but it is not read by `tcfsd`. It is a migration hint only.
@@ -74,7 +74,7 @@ The first live audit changed the shape of the blocker:
 - `honey` is SSH-reachable and reports storage OK, but `tcfs status` reports
   NATS not connected.
 - The two hosts are pointed at different reachable NATS paths: `neo` reaches
-  `nats-tcfs`; `honey` reaches `10.245.131.232`; each times out against the
+  `<nats-host>`; `honey` reaches `<nats-cluster-ip>`; each times out against the
   other's endpoint.
 - Device registries are not converged: `neo` does not list `honey`; `honey`
   lists only itself, and its current public key is placeholder-shaped
