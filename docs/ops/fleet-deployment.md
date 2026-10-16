@@ -122,7 +122,10 @@ What it covers:
 - `nats_connect_and_jetstream`
 - `neo_honey_two_device_sync_smoke` using the canonical `neo` -> `honey` identities
 
-Run it with:
+Run it with the variables below. `TCFS_S3_ENDPOINT` and `TCFS_S3_BUCKET` are
+read only by the test harness (`tests/e2e/tests/fleet_live.rs`); tcfsd does
+not read them and takes `storage.endpoint` and `storage.bucket` from its
+config file.
 
 ```bash
 export TCFS_E2E_LIVE=1
@@ -311,9 +314,12 @@ For non-NixOS machines:
 # ~/.config/tcfs/env (sourced by systemd/launchd)
 TCFS_S3_ACCESS=<your-access-credential>
 TCFS_S3_SECRET=<your-secret-credential>
-TCFS_S3_ENDPOINT=http://<s3-host>:8333
 TCFS_NATS_URL=nats://<nats-host>:4222
 ```
+
+No environment variable sets the S3 endpoint for tcfsd. Set
+`storage.endpoint` (and `storage.bucket`) in `~/.config/tcfs/config.toml`;
+see [`config/tcfs.example.toml`](../../config/tcfs.example.toml).
 
 ### Credential Rotation
 

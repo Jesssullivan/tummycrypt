@@ -28,8 +28,8 @@ The operator, 2026-10-15 (PUR-01, operator-typed):
 > the real intent of tcfs (files anywhere, no need to copy whillyneilly, the
 > real antidote to what bulkload provides asa interm soution [...]
 
-The operator, 2026-07-14 (PUR-02, operator-typed), first sentence and the
-line later quoted as the canonical statement:
+The operator, 2026-07-14 (PUR-02, operator-typed). A 2026-07-15 synthesis
+quoted this whole prompt as the canonical operator statement; excerpts:
 
 > Eventually, tummycrypt will be the univeral filesystem- allow user a
 > unified FS and hydrate on demand / unsync / integrated / auto traversable
@@ -61,13 +61,13 @@ development and posibbly yeasr out" (BND-03, operator interview text).
 | T1 | **No pre-copy.** Work on an enrolled tree can continue from any enrolled machine with no manual copy step: "without needing to pre-copy over dots, dirs and worktrees" | PUR-01, PUR-05, PUR-06 (operator-typed) |
 | T2 | **The same state, including work in progress.** Tracked and untracked files, worktrees, and agent sessions and prompts arrive intact, "just magically available wherever I go" | PUR-03, PUR-05 (operator-typed) |
 | T3 | **Hydrate on demand and unsync.** Remote names are browsable before download; opening a file hydrates verified plaintext; unsync releases the local body and keeps the remote copy | PUR-02, PUR-08 (operator-typed) |
-| T4 | **Disk size stops mattering.** Large directories expand and contract as cloud offload, so "no machine needs to deal with FS preassure" | PUR-02, PUR-04 (operator-typed). Bounded by T10 |
+| T4 | **Disk size stops mattering.** Large directories expand and contract as cloud offload, so "no machine needs to deal with FS preassure" | PUR-02, PUR-04 (operator-typed). Bounded by T10 for the first-user cohort |
 | T5 | **Heterogeneous clients.** macOS, Linux and iOS; Finder and odrive-style parity on macOS | PUR-08, PUR-10 (operator-typed) |
 | T6 | **Scope grows to the home directory.** Dot files, home directory and `.local` are the eventual scope, starting from canaries | PUR-07, PUR-06, PUR-09 (operator-typed) |
-| T7 | **S3-first storage.** The backend is an S3 object store. The store itself is replaceable | BCK-06 (operator-typed). The current choice of store is a ruling (Q153), not a product property |
-| T8 | **Encrypted before it leaves the device, with safe enrollment.** Content is end-to-end encrypted. A new machine enrolls without leaking credentials | KEY-01, PUR-09 (operator-typed) |
+| T7 | **S3-first storage.** The backend is an S3 object store. The store itself is replaceable | BCK-06 (operator-typed). "Replaceable" rests on BCK-07 (operator-typed) and BCK-02 (operator-selection, Q153): the operator's chosen S3 store has already changed once. The current store is a ruling, not a product property |
+| T8 | **Encrypted before it leaves the device, with safe enrollment.** Content is end-to-end encrypted, and machine enrollment is part of the security model: "encryption, enrollment, security, e2ee" | KEY-01, PUR-09 (operator-typed). The stronger "self-enrollment without leaking credentials" wording is REC-02 (agent paraphrase) |
 | T9 | **Never lose or silently drop data.** Refuse with a typed reason instead of skipping; fail closed instead of showing ciphertext; never mirror-delete without evidence | **Design, not an operator requirement.** It is consistent with the operator's "drop nothign. ever." for bulkload |
-| T10 | **Keep local copies until there is a second copy.** Until the backend replicates to a second failure domain or an off-site restore drill passes, enrolled data stays pinned locally. Nothing is evicted to cloud-only | USR-04 (agent paraphrase, approved by selection 2026-10-15) |
+| T10 | **The first-user cohort keeps its local copies pinned until there is a second copy.** As approved: "until 010 replication or a verified off-site restore exists, the first-user cohort keeps its local copies pinned. Nothing is evicted to cloud-only." (`010`: a second replica on another rack.) This covers the first-user cohort only, not all enrolled data. **Open: not yet confirmed as a gate (open decision 9)** | USR-04 (agent paraphrase, approved by selection 2026-10-15) |
 | T11 | **No builds on the maintainer's Mac workstation.** macOS builds run on CI or the remote build host | PRC-06 (operator-typed) |
 | T12 | **Stay in its lane.** tcfs work is not introduced into unrelated lanes, and migration tooling does not live in this repository | PRC-01, PRC-02, SUP-01 (operator-typed); tummycrypt #601 removed the bulkload crates |
 
@@ -206,3 +206,13 @@ These are recorded for the operator. Agents do not resolve them.
    the pause.
 7. **Roam-root path.** The canonical mount prefix (`/tcfs/<root_id>` or
    `~/tcfs/<root_id>`): the ruling is recorded in an unmerged draft.
+8. **tcfsd `master.key`: carried or re-derived. Decided, not open.**
+   bulkload rulings OI-1003-Q185 and OI-1003-Q194 (C7): nothing is excluded
+   by content, credentials are carried, and re-authentication happens only
+   for a host-bound credential. The tcfsd `master.key` is carried like any
+   other file; it is re-derived only if it proves host-bound. Recorded here
+   because the ledger raised it.
+9. **Pinning gate (T10).** The rule that the first-user cohort keeps its
+   local copies pinned was agent-drafted and approved by selection (USR-04).
+   Confirm it as an explicit gate on eviction, or withdraw it. It limits the
+   cloud offload in T4.

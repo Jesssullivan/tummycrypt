@@ -29,8 +29,16 @@ region = "us-east-1"
 bucket = "tcfs"
 # Path to SOPS-encrypted credential file (loaded at startup)
 credentials_file = "/etc/tcfs/credentials.yaml"
-# Credential chain: SOPS file, then KDBX, then TCFS_S3_ACCESS/TCFS_S3_SECRET.
-# AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are still accepted, with a warning.
+# Credential chain (crates/tcfs-secrets/src/lib.rs), first match wins:
+#   1. this SOPS file
+#   2. RemoteJuggler KDBX, only when REMOTE_JUGGLER_IDENTITY is set
+#   3. TCFS_S3_ACCESS/TCFS_S3_SECRET
+#   4. AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (accepted, with a warning)
+#   5. SEAWEED_ACCESS_KEY/SEAWEED_SECRET_KEY (legacy)
+#   6. *_FILE variants: TCFS_S3_ACCESS_FILE, TCFS_S3_ACCESS_KEY_FILE,
+#      AWS_ACCESS_KEY_ID_FILE and TCFS_S3_SECRET_FILE,
+#      TCFS_S3_SECRET_KEY_FILE, AWS_SECRET_ACCESS_KEY_FILE
+#   7. ~/.aws/credentials (or $AWS_SHARED_CREDENTIALS_FILE)
 
 [secrets]
 # Age identity file for SOPS decryption

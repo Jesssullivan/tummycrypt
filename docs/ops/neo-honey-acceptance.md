@@ -21,7 +21,10 @@ successfully?
 
 ## Required environment
 
-Set these before running the lane:
+Set these before running the lane. `TCFS_S3_ENDPOINT` and `TCFS_S3_BUCKET`
+are read only by the test harness (`tests/e2e/tests/fleet_live.rs`); tcfsd
+does not read them and takes `storage.endpoint` and `storage.bucket` from its
+config file.
 
 ```bash
 export TCFS_E2E_LIVE=1

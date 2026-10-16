@@ -95,16 +95,18 @@ JSON:
   "rel_path": "path/relative/to/root",
   "mode": 420,
   "mtime": [1760000000, 0],
-  "encrypted_file_key": "<base64 wrapped file key>",
-  "wrapped_file_keys": []
+  "encrypted_file_key": "<base64 wrapped file key>"
 }
 \end{lstlisting}
 
 \code{chunks} is an ordered list of chunk keys only. Manifests do not record
 chunk offsets or lengths, and nothing is compressed. The manifest itself is
 not encrypted: the relative path, size and plaintext file hash are readable
-by anyone who can read the bucket. \code{mode}, \code{mtime},
-\code{encrypted\_file\_key} and \code{wrapped\_file\_keys} are optional.
+by anyone who can read the bucket. \code{rel\_path} is optional and is
+written as \code{null} when absent. \code{mode}, \code{mtime} and
+\code{encrypted\_file\_key} are optional and omitted when absent.
+\code{wrapped\_file\_keys} (per-device wraps) is omitted when empty, which
+is the case under \code{wrap\_mode = master}.
 Symlinks use a separate version-3 \code{SymlinkManifest}.
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -126,9 +128,11 @@ files into variable-size chunks. The default profile (most files) is:
 \end{longtable}
 
 Two larger profiles are selected by path (\code{ChunkSizes::for\_path} in
-\code{crates/tcfs-chunks/src/fastcdc.rs}): 32/64/256\,KiB for Git index,
-\code{.idx} and \code{.bin} files, and 1/4/16\,MiB for Git packs and
-\code{.rev}, \code{.iso} and \code{.img} files.
+\code{crates/tcfs-chunks/src/fastcdc.rs}): 32/64/256\,KiB for the Git
+index and for \code{.idx} and \code{.bin} files outside a Git pack
+directory, and 1/4/16\,MiB for \code{.pack}, \code{.rev}, \code{.iso} and
+\code{.img} files and, inside \code{.git/objects/pack/}, for \code{.idx}
+files and extensionless \code{tmp\_pack\_*} files.
 
 Content-defined chunking ensures that inserting or modifying bytes in a file
 only affects the chunks near the edit point. With encryption on, each file

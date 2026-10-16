@@ -2,20 +2,22 @@
 //!
 //! S3 credential discovery chain (in order of precedence):
 //!   1. SOPS-encrypted file (`storage.credentials_file`)
-//!   2. RemoteJuggler KDBX store (`$REMOTE_JUGGLER_IDENTITY`)
+//!   2. RemoteJuggler KDBX store (only when `$REMOTE_JUGGLER_IDENTITY` is set)
 //!   3. TCFS-specific env: `TCFS_S3_ACCESS` / `TCFS_S3_SECRET`
 //!   4. AWS env: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (warns)
 //!   5. Legacy env: `SEAWEED_ACCESS_KEY` / `SEAWEED_SECRET_KEY`
 //!   6. File variants: `TCFS_S3_ACCESS_FILE`, `TCFS_S3_ACCESS_KEY_FILE`,
 //!      `TCFS_S3_SECRET_FILE`, `TCFS_S3_SECRET_KEY_FILE`,
 //!      `AWS_ACCESS_KEY_ID_FILE`, `AWS_SECRET_ACCESS_KEY_FILE`
-//!   7. AWS shared credentials file: `~/.aws/credentials`
+//!   7. AWS shared credentials file: `$AWS_SHARED_CREDENTIALS_FILE` or
+//!      `~/.aws/credentials`
 //!
 //! Age identity discovery chain (in order of precedence):
 //!   1. $CREDENTIALS_DIRECTORY/age-identity  (systemd LoadCredentialEncrypted)
 //!   2. $SOPS_AGE_KEY_FILE env var (path to key file)
 //!   3. $SOPS_AGE_KEY env var (literal key content)
-//!   4. ~/.config/sops/age/keys.txt (default fallback)
+//!   4. `secrets.age_identity` config path
+//!   5. ~/.config/sops/age/keys.txt (default fallback)
 
 pub mod age;
 pub mod device;
