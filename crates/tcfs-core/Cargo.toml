@@ -10,6 +10,7 @@ description = "tcfs shared types, config schema, error types, and proto definiti
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
@@ -17,6 +18,9 @@ blake3 = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

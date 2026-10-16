@@ -1245,13 +1245,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             }
             nats_url.clone()
         };
-        match tcfs_sync::NatsClient::connect(
-            &url,
-            config.sync.nats_tls,
-            config.sync.nats_token.as_deref(),
-        )
-        .await
-        {
+        match tcfs_sync::NatsClient::connect_with_config(&url, &config.sync).await {
             Ok(nats) => {
                 if let Err(e) = nats.ensure_streams().await {
                     warn!("NATS stream setup failed: {e}");
@@ -1300,7 +1294,13 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 }
             }
             Err(e) => {
-                warn!("NATS connection failed: {e} (fleet sync disabled)");
+                // A token-policy refusal (OI-1003-Q177) is a config error the
+                // operator must fix, not a transient network failure.
+                if let Some(token_err) = e.downcast_ref::<tcfs_core::nats_token::NatsTokenError>() {
+                    error!("NATS token refused: {token_err} (fleet sync disabled)");
+                } else {
+                    warn!("NATS connection failed: {e} (fleet sync disabled)");
+                }
             }
         }
     }

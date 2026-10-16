@@ -25,7 +25,8 @@ mod inner {
     use tracing::{debug, error, info, warn};
 
     use crate::conflict::VectorClock;
-    use tcfs_core::config::sanitize_nats_endpoint_for_display;
+    use tcfs_core::config::{sanitize_nats_endpoint_for_display, SyncConfig};
+    use tcfs_core::nats_token::{resolve_nats_token, NatsToken};
 
     // ── Stream / consumer names ───────────────────────────────────────────────
 
@@ -231,13 +232,20 @@ mod inner {
         /// Connect to NATS and return a client with JetStream enabled.
         ///
         /// If `require_tls` is true and the URL uses `nats://`, it is upgraded to `tls://`.
-        pub async fn connect(url: &str, require_tls: bool, token: Option<&str>) -> Result<Self> {
+        ///
+        /// `token` comes from [`tcfs_core::nats_token`] (a token file); there is
+        /// no way to pass an inline string. Prefer [`NatsClient::connect_with_config`].
+        pub async fn connect(
+            url: &str,
+            require_tls: bool,
+            token: Option<&NatsToken>,
+        ) -> Result<Self> {
             let effective_url = resolve_nats_url(url, require_tls);
             let effective_url_display = sanitize_nats_endpoint_for_display(&effective_url);
 
             let client = if let Some(tok) = token {
                 info!("NATS: connecting with token auth");
-                async_nats::ConnectOptions::with_token(tok.to_string())
+                async_nats::ConnectOptions::with_token(tok.expose_secret().to_owned())
                     .connect(&effective_url)
                     .await
                     .map_err(|_| {
@@ -258,6 +266,18 @@ mod inner {
             info!("NATS: connected to {effective_url_display}");
             let js = jetstream::new(client);
             Ok(NatsClient { js })
+        }
+
+        /// Resolve the NATS token from `sync` (`TCFS_NATS_TOKEN_FILE` or
+        /// `sync.nats_token_file`; inline `sync.nats_token` is refused) at
+        /// connect time, then connect to `url`.
+        ///
+        /// A token-policy refusal is returned as a
+        /// [`tcfs_core::nats_token::NatsTokenError`] inside the `anyhow` error,
+        /// so callers can `downcast_ref` it. The token is never logged.
+        pub async fn connect_with_config(url: &str, sync: &SyncConfig) -> Result<Self> {
+            let token = resolve_nats_token(sync)?;
+            Self::connect(url, sync.nats_tls, token.as_ref()).await
         }
 
         /// Ensure all required JetStream streams exist.
@@ -868,6 +888,158 @@ mod inner {
                     "leaked {forbidden}: {display}"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn connect_with_config_refuses_inline_token_before_dialing() {
+            use tcfs_core::nats_token::NatsTokenError;
+            const TOKEN: &str = "OI1003-inline-token-sentinel";
+            let sync = SyncConfig {
+                nats_token: Some(TOKEN.into()),
+                ..SyncConfig::default()
+            };
+            // Port 9 (discard) is never a NATS server; a refusal must come from
+            // token policy, not from a failed dial.
+            let err = NatsClient::connect_with_config("nats://localhost:9", &sync)
+                .await
+                .err()
+                .expect("inline token must be refused");
+            assert!(
+                matches!(
+                    err.downcast_ref::<NatsTokenError>(),
+                    Some(NatsTokenError::InlineTokenRefused)
+                ),
+                "{err:#}"
+            );
+            assert!(!format!("{err:#}").contains(TOKEN));
+            assert!(!format!("{err:?}").contains(TOKEN));
+        }
+
+        #[tokio::test]
+        async fn connect_with_config_refuses_missing_token_file_before_dialing() {
+            use tcfs_core::nats_token::{NatsTokenError, NATS_TOKEN_FILE_ENV};
+            if std::env::var_os(NATS_TOKEN_FILE_ENV).is_some() {
+                // The env override would take precedence over the config path.
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let sync = SyncConfig {
+                nats_token_file: Some(dir.path().join("absent-token")),
+                ..SyncConfig::default()
+            };
+            let err = NatsClient::connect_with_config("nats://localhost:9", &sync)
+                .await
+                .err()
+                .expect("missing token file must be refused");
+            assert!(
+                matches!(
+                    err.downcast_ref::<NatsTokenError>(),
+                    Some(NatsTokenError::Missing { .. })
+                ),
+                "{err:#}"
+            );
+        }
+
+        /// Minimal NATS server: sends INFO, captures the client's CONNECT
+        /// `auth_token`, and answers PING with PONG only when it matches
+        /// `expected` (else `-ERR 'Authorization Violation'`, like nats-server).
+        async fn mock_token_nats_server(
+            expected: &'static str,
+        ) -> (String, tokio::sync::oneshot::Receiver<Option<String>>) {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let (read, mut write) = socket.into_split();
+                let info = format!(
+                    "INFO {{\"server_id\":\"mock\",\"server_name\":\"mock\",\"version\":\"2.10.0\",\
+                     \"go\":\"go1.22\",\"host\":\"127.0.0.1\",\"port\":{port},\"headers\":true,\
+                     \"max_payload\":1048576,\"proto\":1,\"auth_required\":true}}\r\n"
+                );
+                write.write_all(info.as_bytes()).await.unwrap();
+                let mut lines = BufReader::new(read).lines();
+                let mut tx = Some(tx);
+                let mut authorized = false;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(json) = line.strip_prefix("CONNECT ") {
+                        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+                        let token = value
+                            .get("auth_token")
+                            .and_then(|t| t.as_str())
+                            .map(str::to_string);
+                        authorized = token.as_deref() == Some(expected);
+                        if let Some(tx) = tx.take() {
+                            let _ = tx.send(token);
+                        }
+                    } else if line == "PING" {
+                        if authorized {
+                            let _ = write.write_all(b"PONG\r\n").await;
+                        } else {
+                            let _ = write.write_all(b"-ERR 'Authorization Violation'\r\n").await;
+                            break;
+                        }
+                    }
+                }
+            });
+            (format!("nats://127.0.0.1:{port}"), rx)
+        }
+
+        #[cfg(unix)]
+        fn private_token_file(dir: &std::path::Path, token: &str) -> std::path::PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("nats-token");
+            std::fs::write(&path, format!("{token}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            path
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn connect_with_config_sends_the_file_token_in_connect() {
+            use tcfs_core::nats_token::NATS_TOKEN_FILE_ENV;
+            if std::env::var_os(NATS_TOKEN_FILE_ENV).is_some() {
+                return;
+            }
+            const TOKEN: &str = "OI1003-wire-token-sentinel";
+            let dir = tempfile::tempdir().unwrap();
+            let sync = SyncConfig {
+                nats_tls: false,
+                nats_token_file: Some(private_token_file(dir.path(), TOKEN)),
+                ..SyncConfig::default()
+            };
+            let (url, seen) = mock_token_nats_server(TOKEN).await;
+            let connected = tokio::time::timeout(
+                Duration::from_secs(10),
+                NatsClient::connect_with_config(&url, &sync),
+            )
+            .await
+            .expect("connect timed out");
+            let seen = seen.await.expect("mock server saw no CONNECT");
+            assert_eq!(seen.as_deref(), Some(TOKEN), "token not sent in CONNECT");
+            assert!(connected.is_ok(), "{:#}", connected.err().unwrap());
+        }
+
+        #[tokio::test]
+        async fn connect_with_config_without_token_is_rejected_by_token_server() {
+            use tcfs_core::nats_token::NATS_TOKEN_FILE_ENV;
+            if std::env::var_os(NATS_TOKEN_FILE_ENV).is_some() {
+                return;
+            }
+            let sync = SyncConfig {
+                nats_tls: false,
+                ..SyncConfig::default()
+            };
+            let (url, seen) = mock_token_nats_server("OI1003-expected").await;
+            let connected = tokio::time::timeout(
+                Duration::from_secs(10),
+                NatsClient::connect_with_config(&url, &sync),
+            )
+            .await
+            .expect("connect timed out");
+            assert_eq!(seen.await.expect("no CONNECT"), None);
+            assert!(connected.is_err());
         }
 
         #[tokio::test]

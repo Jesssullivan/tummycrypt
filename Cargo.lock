@@ -5232,6 +5232,7 @@ version = "0.12.17"
 dependencies = [
  "anyhow",
  "blake3",
+ "libc",
  "prost",
  "protoc-bin-vendored",
  "serde",
@@ -5244,6 +5245,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod error;
+pub mod nats_token;
 pub mod slug;
 pub mod types;
 

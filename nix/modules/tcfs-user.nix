@@ -8,6 +8,7 @@
 #     identity = "~/.config/sops/age/keys.txt";
 #     syncRoot = "~/tcfs";
 #     natsUrl = "nats://nats-tcfs:4222";
+#     natsTokenFile = "~/.config/sops-nix/secrets/tcfs-nats-token"; # path, never the token
 #     mounts = [
 #       { remote = "seaweedfs+https://seaweedfs.example.com/bucket"; local = "~/tcfs"; }
 #     ];
@@ -109,6 +110,23 @@ in {
       description = "NATS server URL for real-time state sync";
     };
 
+    natsTokenFile = lib.mkOption {
+      # A runtime path *string*, never a Nix path literal or the token value:
+      # a path literal would be copied into the world-readable Nix store, which
+      # is exactly what OI-1003-Q177 forbids. Only the path is rendered into
+      # config.toml.
+      type = lib.types.nullOr (lib.types.strMatching "(/|~/).+");
+      default = null;
+      example = "~/.config/sops-nix/secrets/tcfs-nats-token";
+      description = ''
+        Path of a file holding the NATS auth token (e.g. a sops-nix Home
+        Manager secret). Rendered as sync.nats_token_file; the file must be
+        mode 0600/0400 and outside /nix/store. TCFS_NATS_TOKEN_FILE in the
+        service environment takes precedence. tcfsd refuses an inline
+        sync.nats_token, so do not set it through `settings`.
+      '';
+    };
+
     natsTls = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -163,22 +181,24 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.natsTokenFile == null
+          || !(lib.hasPrefix "${builtins.storeDir}/" cfg.natsTokenFile);
+        message = "programs.tcfs.natsTokenFile must not point into the world-readable Nix store (OI-1003-Q177).";
+      }
+      {
+        assertion = !((cfg.settings.sync or {}) ? nats_token);
+        message = "programs.tcfs.settings.sync.nats_token would render the NATS token into the Nix store and is refused by tcfsd; use programs.tcfs.natsTokenFile (OI-1003-Q177).";
+      }
+    ];
+
     home.packages = [ cfg.package ];
 
-    xdg.configFile."tcfs/config.toml".source = toml.generate "tcfs-config" (
-      lib.recursiveUpdate {
-        daemon.socket = "%t/tcfsd/tcfsd.sock";
-        secrets.age_identity = cfg.identity;
-        # Emit nats_tls explicitly — the Rust default is true, but lab NATS is
-        # plaintext (tailnet-encrypted). Consumer `settings` can override.
-        sync.nats_tls = cfg.natsTls;
-      } (lib.recursiveUpdate
-        (lib.optionalAttrs (cfg.syncRoot != null) {
-          sync.sync_root = cfg.syncRoot;
-        })
-        cfg.settings
-      )
-    );
+    # Rendered by a pure helper so nix/tests/tcfs-user-config-render.nix can
+    # check it (both syncRoot and natsTokenFile must survive the merge).
+    xdg.configFile."tcfs/config.toml".source = toml.generate "tcfs-config"
+      (import ./tcfs-user-config.nix { inherit lib; } cfg);
 
     # ── Linux: systemd user service ─────────────────────────────────────────
     systemd.user.services.tcfsd = lib.mkIf pkgs.stdenv.isLinux {

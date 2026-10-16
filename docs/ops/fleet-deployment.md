@@ -141,6 +141,89 @@ tcfs works without NATS. If NATS is unreachable:
 - Other machines must manually `tcfs pull` to see updates
 - When NATS reconnects, the daemon automatically resumes event publishing
 
+### NATS Token Auth (token file only)
+
+Operator ruling OI-1003-Q177: the NATS server uses token auth, and tcfs reads
+the token **from a file at connect time**. The token value never appears in
+`config.toml`, a Nix option, or an environment variable, because Home Manager
+and NixOS render config into the world-readable Nix store.
+
+Resolution order (every NATS client: `tcfsd` daemon, `tcfsd --mode worker`,
+and the `tcfs mount` flush callback):
+
+1. `sync.nats_token = "..."` (inline) present: **refused** with
+   `NatsTokenError::InlineTokenRefused`, even if a token file is also set. The
+   key still parses so `tcfs config show` can report `nats_token_configured`.
+2. `TCFS_NATS_TOKEN_FILE` (non-empty) wins. This is how the NixOS module
+   hands over a systemd credential (`%d/nats-token`).
+3. `sync.nats_token_file` in `config.toml`.
+4. Neither: connect without a token (unchanged behavior for open servers).
+
+The file is refused, with a typed error that never contains token bytes, when:
+
+| Condition | Error |
+|-----------|-------|
+| path is relative (the value itself is not echoed: it may be a pasted token) | `RelativePath` |
+| path starts with `~/` but HOME is unset, empty, relative or `/` | `HomeUnusable` |
+| missing, or a dangling symlink | `Missing` |
+| path or symlink target is under `/nix/store` | `InNixStore` |
+| target is not a regular file (directory, device, FIFO) | `NotRegularFile` |
+| target swapped (different inode, FIFO or symlink) between stat and open | `Changed` |
+| target owned by neither the service user nor root | `NotOwned` |
+| `mode & 0o077 != 0` on the target (`chmod 600`/`400`) | `InsecurePermissions` |
+| larger than 4096 bytes | `TooLarge` |
+| empty after trimming one trailing `\n` / `\r\n` | `Empty` |
+| non-UTF-8, or whitespace/control characters remain | `Malformed` |
+
+Symlinks are followed on purpose: sops-nix, agenix and Home Manager secrets are
+symlinks into a generation directory. Every check applies to the resolved
+target. One narrow exception: a direct child of systemd's
+`$CREDENTIALS_DIRECTORY` may show a group read bit, because systemd grants a
+non-root unit access through a POSIX ACL whose mask surfaces as group bits;
+world bits are still refused there.
+
+The target is opened `O_NONBLOCK | O_NOFOLLOW` and the opened handle's `fstat`
+is authoritative, so a FIFO renamed over the path cannot hang daemon startup.
+The path is logged only after it validates.
+
+Token auth over `nats://` sends the token in the clear inside the CONNECT
+frame; it relies on the transport (the tailnet) for confidentiality, and tcfs
+already warns when it connects without TLS. If the NATS URL ever points at a
+host outside the tailnet, use `tls://` / `nats_tls = true`.
+
+The daemon treats NATS as best-effort, so a token refusal logs at `error`
+(`NATS token refused: ...`) and fleet sync stays disabled until fixed. The
+worker exits non-zero. `tcfs mount` warns and mounts without the flush
+callback.
+
+NixOS (system daemon, `DynamicUser`):
+
+```nix
+services.tcfsd = {
+  enable = true;
+  natsUrl = "nats://nats.example.internal:4222";
+  # runtime path string, never the token and never a ./path literal
+  natsTokenFile = config.sops.secrets."tcfs/nats-token".path;
+};
+# -> LoadCredential=nats-token:<path>, TCFS_NATS_TOKEN_FILE=%d/nats-token
+```
+
+Home Manager:
+
+```nix
+programs.tcfs = {
+  enable = true;
+  natsUrl = "nats://nats.example.internal:4222";
+  natsTokenFile = config.sops.secrets."tcfs/nats-token".path; # rendered as sync.nats_token_file
+};
+```
+
+Both modules assert that the path is not under the Nix store; the Home
+Manager module also rejects `settings.sync.nats_token`.
+
+Non-Nix hosts: put the token in a `0600` file owned by the service user and
+set `nats_token_file` (or `TCFS_NATS_TOKEN_FILE`) to its absolute path.
+
 ---
 
 ## 2. Credential Distribution

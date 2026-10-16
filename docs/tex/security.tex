@@ -190,7 +190,17 @@ sandbox-safe private-CA/PEM propagation remains open.
 nats_url = "tls://nats.example.com:4222"
 nats_tls = true
 nats_ca_cert = "/etc/tcfs/certs/nats-ca.pem"
+nats_token_file = "/run/secrets/tcfs-nats-token"
 \end{lstlisting}
+
+NATS token auth reads the token from \code{nats\_token\_file} (overridden by
+\code{TCFS\_NATS\_TOKEN\_FILE}) at connect time. The file must be a regular
+file outside \code{/nix/store}, owned by the service user or root, with no
+group or world permission bits; symlinks are followed and the target is
+checked, and the open is non-blocking and re-verified against the earlier
+stat. An inline
+\code{nats\_token} value is refused, because Nix-rendered configuration lands
+in the world-readable store. See \code{docs/ops/fleet-deployment.md}.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Device Identity}
