@@ -107,9 +107,9 @@ time of writing) which is triaged separately and tracked under the
   runs) are permitted during active work but must be closed or merged
   within the week they were opened. Stale codex branches past 14 days
   should be audited for supersession.
-- **No force-push to `main`** on any remote. Force-push on feature branches
-  is acceptable only by the branch author and only before review is
-  requested.
+- **Force push is allowed** (operator, 2026-10-16), on feature branches
+  before or after review. `main` on each remote is governed by its
+  server-side branch protection, which is the authority there.
 
 ## Sync Policy
 
