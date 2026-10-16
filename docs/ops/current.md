@@ -33,9 +33,10 @@ Ansible templates from 2026-02-21 until PR #608 (#608 made those templates
 fail closed: `seaweedfs_jwt_signing_key` and `seaweedfs_jwt_filer_signing_key`
 are now mandatory); and NATS `sync_always` is on. Then flip `s3_hold`.
 
-The old honey pod is not revived. The Restore section of the pause document
-describes reviving it on honey; Q153 rules that path out, so do not follow it
-to bring tcfs back.
+The old honey pod is not revived. The pause document's Restore section is
+superseded (Q153, Q175): rollback for the cutover is re-pausing or restoring
+from the new stack's own backups, the worker is not restored, and NATS is a
+fresh deployment with `sync_always` and auth (Q177).
 
 Positioning (rulings Q155 and Q156, TIN-4543): tcfs is the long-run product.
 Bulkload is the migration tool. Their boundary is in
