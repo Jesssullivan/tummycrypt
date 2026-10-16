@@ -3,7 +3,8 @@
 # Regression test for the honey tcfs cluster pause (operator ruling 2026-09-29
 # "Close the tcfs source drift", TIN-5136). The live tcfs workloads were
 # scaled to 0 on 2026-09-29T16:45Z; the tcfs-backend chart defaults must keep a
-# reconcile from restarting the worker, and the restore path must still render.
+# reconcile from restarting the worker. Since 2026-10-15 the old stack is never
+# restored (OI-1003-Q153, OI-1003-Q175).
 # Renders only; never talks to a cluster.
 #
 set -euo pipefail
@@ -21,7 +22,7 @@ command -v helm >/dev/null 2>&1 || fail "helm is required"
 
 render() {
     helm template tcfs-backend "${CHART_DIR}" --namespace tcfs \
-        -f "${CHART_DIR}/values.yaml" "$@"
+        -f "${CHART_DIR}/values.yaml"
 }
 
 field_values() {
@@ -35,34 +36,36 @@ paused="$(render)"
 [[ "$(printf '%s\n' "${paused}" | field_values minReplicaCount)" == "0" ]] \
     || fail "default render must keep the KEDA floor at minReplicaCount: 0"
 
-restored="$(render --set replicaCount=1 --set autoscaling.minReplicas=1)"
-[[ "$(printf '%s\n' "${restored}" | field_values replicas)" == "1" ]] \
-    || fail "restore render must declare replicas: 1"
-[[ "$(printf '%s\n' "${restored}" | field_values minReplicaCount)" == "1" ]] \
-    || fail "restore render must declare minReplicaCount: 1"
-
 [[ -f "${PAUSE_DOC}" ]] || fail "missing pause record ${PAUSE_DOC}"
 for needle in TIN-5136 "Close the tcfs source drift" data-seaweedfs-0 data-nats-0 \
     tcfs-s3-posture-gateway tcfs-s3-smoke-tunnel; do
     grep -Fq -- "${needle}" "${PAUSE_DOC}" || fail "pause record must mention ${needle}"
 done
 
-# Restore order: seaweedfs first, then nats, then the Deployments.
-order="$(grep -n -E '^[0-9]+\. ' "${PAUSE_DOC}" | grep -E 'statefulset/(seaweedfs|nats)|tcfs-backend-worker' | cut -d: -f1 | tr '\n' ' ')"
-sw="$(grep -n -E '^[0-9]+\. .*statefulset/seaweedfs' "${PAUSE_DOC}" | head -1 | cut -d: -f1)"
-nt="$(grep -n -E '^[0-9]+\. .*statefulset/nats' "${PAUSE_DOC}" | head -1 | cut -d: -f1)"
-wk="$(grep -n -E '^[0-9]+\. .*tcfs-backend-worker' "${PAUSE_DOC}" | head -1 | cut -d: -f1)"
-[[ -n "${sw}" && -n "${nt}" && -n "${wk}" ]] || fail "pause record must list restore steps (found lines: ${order})"
-(( sw < nt && nt < wk )) || fail "restore order must be seaweedfs, then nats, then the Deployments"
+# The old stack is never restored (OI-1003-Q153, OI-1003-Q175): the record
+# must say so and must not carry revival commands.
+grep -Fq "## Restore: superseded" "${PAUSE_DOC}" || fail "pause record must mark the restore superseded"
+for needle in OI-1003-Q153 OI-1003-Q175 TIN-5268; do
+    grep -Fq -- "${needle}" "${PAUSE_DOC}" || fail "pause record must cite ${needle}"
+done
+if grep -Eq 'apply -f infra/k8s/honey/tcfs-paused|scale deployment/|--replicas=1|replicaCount=1' "${PAUSE_DOC}"; then
+    fail "pause record must not carry revival commands"
+fi
 
 # Captured manifests for the workloads that had no source declaration.
 MANIFEST_DIR="${ROOT}/infra/k8s/honey/tcfs-paused"
 expected=(
     "01-seaweedfs-statefulset.yaml:StatefulSet:seaweedfs"
     "02-nats-statefulset.yaml:StatefulSet:nats"
-    "03-tcfs-s3-posture-gateway-deployment.yaml:Deployment:tcfs-s3-posture-gateway"
-    "04-tcfs-s3-smoke-tunnel-deployment.yaml:Deployment:tcfs-s3-smoke-tunnel"
 )
+# Retired 2026-10-15 (OI-1003-Q178): an unauthenticated public tunnel and a
+# write-enabled gateway to the old S3 must not come back into source.
+for retired in 03-tcfs-s3-posture-gateway-deployment.yaml 04-tcfs-s3-smoke-tunnel-deployment.yaml; do
+    [[ ! -e "${MANIFEST_DIR}/${retired}" ]] || fail "${retired} is retired and must stay out of source"
+done
+if grep -rEq 'cloudflared|trycloudflare' "${MANIFEST_DIR}"; then
+    fail "${MANIFEST_DIR} must not declare a tunnel"
+fi
 [[ "$(find "${MANIFEST_DIR}" -name '*.yaml' | wc -l | tr -d ' ')" == "${#expected[@]}" ]] \
     || fail "${MANIFEST_DIR} must hold exactly the ${#expected[@]} captured manifests"
 for entry in "${expected[@]}"; do
@@ -86,5 +89,5 @@ for entry in "${expected[@]}"; do
     grep -Fq "${file}" "${PAUSE_DOC}" || fail "pause record must reference ${file}"
 done
 
-printf '[OK] tcfs-backend chart declares the TIN-5136 pause and a renderable restore\n'
+printf '[OK] tcfs-backend chart declares the TIN-5136 pause; the old-stack restore is superseded\n'
 printf '[OK] captured tcfs manifests declare replicas 0 without server-set fields\n'
