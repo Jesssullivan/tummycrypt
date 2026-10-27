@@ -259,7 +259,29 @@ fn resolve_device_identity(
     device_id: &str,
     requested: tcfs_core::config::WrapMode,
 ) -> Option<tcfs_sync::engine::DeviceUnwrapIdentity> {
+    use secrecy::ExposeSecret;
     use tcfs_sync::engine::DeviceUnwrapIdentity;
+
+    // BL2-Q10: the device key file may be encrypted at rest. The wrap identity
+    // comes from TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE or the config's
+    // `device_key_wrap_identity_file`. A sandboxed extension usually has
+    // neither, so the host must inline a plaintext `device_secret`.
+    let wrap = match tcfs_secrets::device::DeviceKeyWrap::resolve(
+        config
+            .get("device_key_wrap_identity_file")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::Path::new),
+    ) {
+        Ok(wrap) => wrap,
+        Err(e) => {
+            tracing::warn!(
+                "wrap_mode={requested:?}: device key wrap identity unavailable ({e:#}); \
+                 encrypted device keys cannot be read"
+            );
+            None
+        }
+    };
 
     // Inlined-first: prefer the Keychain-provided secret over the fs read.
     if let Some(secret) = config
@@ -267,10 +289,26 @@ fn resolve_device_identity(
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.trim().is_empty())
     {
-        return Some(DeviceUnwrapIdentity {
-            device_id: device_id.to_string(),
-            secret: secret.trim().to_string(),
-        });
+        return match tcfs_secrets::device::decode_device_secret(secret.trim(), wrap.as_ref()) {
+            Ok(Some(secret)) => Some(DeviceUnwrapIdentity {
+                device_id: device_id.to_string(),
+                secret: secret.expose_secret().to_string(),
+            }),
+            Ok(None) => {
+                tracing::warn!(
+                    "wrap_mode={requested:?}: inlined device_secret is encrypted at rest and no \
+                     wrap identity is available; using master wrap"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "wrap_mode={requested:?}: inlined device_secret unusable ({e:#}); using \
+                     master wrap"
+                );
+                None
+            }
+        };
     }
 
     // FS fallback: read device-<id>.age relative to the registry path.
@@ -280,10 +318,10 @@ fn resolve_device_identity(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(tcfs_secrets::device::default_registry_path);
     let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
-    match std::fs::read_to_string(&secret_path) {
-        Ok(s) => Some(DeviceUnwrapIdentity {
+    match tcfs_secrets::device::load_device_secret_key(&secret_path, wrap.as_ref()) {
+        Ok((secret, _)) => Some(DeviceUnwrapIdentity {
             device_id: device_id.to_string(),
-            secret: s.trim().to_string(),
+            secret: secret.expose_secret().to_string(),
         }),
         Err(e) => {
             tracing::warn!(
@@ -410,7 +448,7 @@ mod tests {
             .expect("save signed registry");
 
         let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
-        tcfs_secrets::device::save_device_secret_key(&secret_path, &key.secret_key, true)
+        tcfs_secrets::device::save_device_secret_key(&secret_path, &key.secret_key, true, None)
             .expect("save device secret");
 
         key.public_key
@@ -488,6 +526,63 @@ mod tests {
             .expect("enabled config with secret must attach a device identity");
         assert_eq!(identity.device_id, "device-a");
         assert!(identity.secret.starts_with("AGE-SECRET-KEY-"));
+    }
+
+    /// BL2-Q10: a device key encrypted at rest is decrypted with the wrap
+    /// identity named in the config, and is unusable without it.
+    #[test]
+    fn encrypted_device_key_needs_the_wrap_identity() {
+        if std::env::var_os(tcfs_secrets::device::DEVICE_KEY_WRAP_IDENTITY_ENV).is_some() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _pub = provision_device(tmp.path(), "device-a");
+        let wrap_path = tmp.path().join("wrap.txt");
+        let wrap_identity = tcfs_secrets::device::generate_local_device_key();
+        std::fs::write(
+            &wrap_path,
+            format!("{}\n", wrap_identity.secret_key.expose_secret()),
+        )
+        .unwrap();
+        let wrap = tcfs_secrets::device::DeviceKeyWrap::from_identity_file(&wrap_path).unwrap();
+        let registry_path = tmp.path().join("devices.json");
+        let key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, "device-a");
+        assert_eq!(
+            tcfs_secrets::device::protect_device_secret_key(&key_path, &wrap, false).unwrap(),
+            tcfs_secrets::device::ProtectOutcome::Encrypted
+        );
+
+        let with_wrap = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_registry_path": registry_path.to_str().unwrap(),
+            "device_key_wrap_identity_file": wrap_path.to_str().unwrap(),
+        });
+        let ctx = build_encryption_context(&with_wrap, "device-a", &master());
+        let identity = ctx
+            .device_identity
+            .as_ref()
+            .expect("an encrypted key with its wrap identity must attach");
+        assert!(identity.secret.starts_with("AGE-SECRET-KEY-"));
+
+        let without_wrap = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_registry_path": registry_path.to_str().unwrap(),
+        });
+        let ctx = build_encryption_context(&without_wrap, "device-a", &master());
+        assert!(
+            ctx.device_identity.is_none(),
+            "an encrypted key without its wrap identity must not attach"
+        );
+
+        // An inlined encrypted secret behaves the same way.
+        let armored = std::fs::read_to_string(&key_path).unwrap();
+        let inlined = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_registry_path": registry_path.to_str().unwrap(),
+            "device_secret": armored,
+        });
+        let ctx = build_encryption_context(&inlined, "device-a", &master());
+        assert!(ctx.device_identity.is_none());
     }
 
     /// Enabled but no local secret on disk -> falls back to master-only (never

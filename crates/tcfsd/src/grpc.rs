@@ -1708,10 +1708,14 @@ pub(crate) fn build_encryption_context(
     }
 
     let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
-    let identity = match std::fs::read_to_string(&secret_path) {
-        Ok(s) => DeviceUnwrapIdentity {
+    let identity = match tcfs_secrets::device::DeviceKeyWrap::resolve(
+        config.crypto.device_key_wrap_identity_file.as_deref(),
+    )
+    .and_then(|wrap| tcfs_secrets::device::load_device_secret_key(&secret_path, wrap.as_ref()))
+    {
+        Ok((secret, _)) => DeviceUnwrapIdentity {
             device_id: device_id.to_string(),
-            secret: s.trim().to_string(),
+            secret: secret.expose_secret().to_string(),
         },
         Err(e) => {
             tracing::warn!(

@@ -1,11 +1,17 @@
 //! Device identity management for multi-device E2E encryption.
 //!
-//! Each device gets its own age X25519 keypair. Device secret keys are stored as
-//! the plaintext age identity in an owner-only (mode 0600) file,
-//! `device-<id>.age` beside the registry ([`save_device_secret_key`]). The `.age`
-//! suffix names the key type. The file is not age-encrypted, and no platform
-//! keychain is used. Encryption at rest is ruled for the next release (BL2-Q10,
-//! Linear TIN-3692 comment `36925e2d`).
+//! Each device gets its own age X25519 keypair. Each device secret key lives in
+//! an owner-only (mode 0600) file, `device-<id>.age`, beside the registry.
+//!
+//! ## Device keys at rest (BL2-Q10, Linear TIN-3692 comment `36925e2d`)
+//!
+//! When a wrap identity is configured (`crypto.device_key_wrap_identity_file`,
+//! or `TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE`), the file is an armored age file
+//! encrypted to that identity ([`DeviceKeyWrap`], [`save_device_secret_key`]).
+//! Without one, the file holds the plaintext identity and a warning is logged.
+//! [`load_device_secret_key`] reads both forms. [`protect_device_secret_key`]
+//! migrates a plaintext file in place, and `tcfs device protect-keys` runs it
+//! for every key beside the registry. No platform keychain is used.
 //!
 //! ## Registry integrity (TIN-1417 B4)
 //!
@@ -637,12 +643,185 @@ pub fn device_secret_key_path(registry_path: &Path, device_id: &str) -> PathBuf 
         .join(format!("device-{device_id}.age"))
 }
 
-/// Persist a local device identity secret key with owner-only permissions.
-pub fn save_device_secret_key(
-    path: &Path,
-    secret_key: &SecretString,
-    overwrite: bool,
-) -> Result<()> {
+/// Environment variable that names the device-key wrap identity file. It
+/// overrides `crypto.device_key_wrap_identity_file`.
+pub const DEVICE_KEY_WRAP_IDENTITY_ENV: &str = "TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE";
+
+/// First line of an armored age file. Encrypted device key files start with it.
+const AGE_ARMOR_BEGIN: &str = "-----BEGIN AGE ENCRYPTED FILE-----";
+/// First line of a binary (unarmored) age file.
+const AGE_BINARY_MAGIC: &[u8] = b"age-encryption.org/v1";
+/// Prefix of a plaintext age X25519 identity.
+const AGE_SECRET_KEY_PREFIX: &str = "AGE-SECRET-KEY-1";
+
+/// How a device secret key file is stored on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKeyAtRest {
+    /// The raw age identity (legacy, and the fallback with no wrap identity).
+    Plaintext,
+    /// An age file encrypted to the wrap identity's recipient.
+    Encrypted,
+}
+
+impl std::fmt::Display for DeviceKeyAtRest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviceKeyAtRest::Plaintext => write!(f, "plaintext"),
+            DeviceKeyAtRest::Encrypted => write!(f, "encrypted"),
+        }
+    }
+}
+
+/// Result of [`protect_device_secret_key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectOutcome {
+    /// The file was already encrypted and decrypts with the wrap identity.
+    AlreadyEncrypted,
+    /// A plaintext file was replaced by its encrypted form.
+    Encrypted,
+    /// Dry run: the file is plaintext and would be encrypted.
+    WouldEncrypt,
+}
+
+/// Key-encryption key for device secret key files at rest (BL2-Q10).
+///
+/// It is the set of age X25519 identities in an age identity file, such as a
+/// host's existing sops age key file. New files are encrypted to the FIRST
+/// identity's recipient. Decryption tries every identity in the file. Lines
+/// that are blank, comments (`#`) or not X25519 identities are ignored.
+///
+/// The wrap identity must live outside the directory that holds the device
+/// keys, or encryption at rest protects nothing.
+pub struct DeviceKeyWrap {
+    identities: Vec<age::x25519::Identity>,
+    source: PathBuf,
+}
+
+impl std::fmt::Debug for DeviceKeyWrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print identity material.
+        f.debug_struct("DeviceKeyWrap")
+            .field("source", &self.source)
+            .field("identities", &self.identities.len())
+            .finish()
+    }
+}
+
+impl DeviceKeyWrap {
+    /// Load the wrap identities from an age identity file.
+    pub fn from_identity_file(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).with_context(|| {
+            format!("reading device key wrap identity file: {}", path.display())
+        })?;
+        let identities: Vec<age::x25519::Identity> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(AGE_SECRET_KEY_PREFIX))
+            .filter_map(|line| line.parse().ok())
+            .collect();
+        if identities.is_empty() {
+            // Do not echo file content: it may hold other secrets.
+            anyhow::bail!(
+                "device key wrap identity file {} holds no age X25519 identity",
+                path.display()
+            );
+        }
+        Ok(Self {
+            identities,
+            source: path.to_path_buf(),
+        })
+    }
+
+    /// Resolve the wrap identity: `TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE` first,
+    /// then the configured path. `Ok(None)` when neither is set. A set path that
+    /// cannot be loaded is an error, never a silent plaintext fallback.
+    pub fn resolve(configured: Option<&Path>) -> Result<Option<Self>> {
+        let from_env = std::env::var_os(DEVICE_KEY_WRAP_IDENTITY_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        match from_env.or_else(|| configured.map(Path::to_path_buf)) {
+            Some(path) => Self::from_identity_file(&expand_home(&path)).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The recipient new device key files are encrypted to.
+    pub fn recipient(&self) -> age::x25519::Recipient {
+        self.identities[0].to_public()
+    }
+
+    /// The identity file this wrap was loaded from.
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Result<String> {
+        age::encrypt_and_armor(&self.recipient(), plaintext)
+            .map_err(|e| anyhow::anyhow!("encrypting device secret key: {e}"))
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        use age::armor::ArmoredReader;
+        use std::io::Read;
+
+        let decryptor = age::Decryptor::new(ArmoredReader::new(ciphertext))
+            .map_err(|e| anyhow::anyhow!("reading encrypted device secret key: {e}"))?;
+        if decryptor.is_scrypt() {
+            anyhow::bail!("encrypted device secret key uses a passphrase, not the wrap identity");
+        }
+        let mut reader = decryptor
+            .decrypt(self.identities.iter().map(|i| i as &dyn age::Identity))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "decrypting device secret key with wrap identity {}: {e}",
+                    self.source.display()
+                )
+            })?;
+        let mut plaintext = zeroize::Zeroizing::new(Vec::new());
+        reader
+            .read_to_end(&mut plaintext)
+            .context("reading decrypted device secret key")?;
+        Ok(plaintext)
+    }
+}
+
+/// Expand a leading `~/` with `$HOME`.
+fn expand_home(path: &Path) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix("~/")) {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(rest))
+            .unwrap_or_else(|| path.to_path_buf()),
+        None => path.to_path_buf(),
+    }
+}
+
+/// Classify device key file bytes by their first line. Never returns content.
+fn classify_device_key_bytes(bytes: &[u8]) -> Result<DeviceKeyAtRest> {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let body = &bytes[start..];
+    if body.starts_with(AGE_ARMOR_BEGIN.as_bytes()) || body.starts_with(AGE_BINARY_MAGIC) {
+        Ok(DeviceKeyAtRest::Encrypted)
+    } else if body.starts_with(AGE_SECRET_KEY_PREFIX.as_bytes()) {
+        Ok(DeviceKeyAtRest::Plaintext)
+    } else {
+        anyhow::bail!("unrecognized device secret key format")
+    }
+}
+
+/// Report how a device secret key file is stored, without decrypting it.
+pub fn device_key_at_rest(path: &Path) -> Result<DeviceKeyAtRest> {
+    let bytes = zeroize::Zeroizing::new(
+        std::fs::read(path)
+            .with_context(|| format!("reading device secret key: {}", path.display()))?,
+    );
+    classify_device_key_bytes(&bytes).with_context(|| format!("{}", path.display()))
+}
+
+/// Write `contents` to a new owner-only file at `path`.
+fn write_owner_only(path: &Path, contents: &[u8], overwrite: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating device key dir: {}", parent.display()))?;
@@ -655,14 +834,17 @@ pub fn save_device_secret_key(
     } else {
         options.create_new(true);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
 
     let mut file = options
         .open(path)
         .with_context(|| format!("creating device secret key: {}", path.display()))?;
-    file.write_all(secret_key.expose_secret().as_bytes())
+    file.write_all(contents)
         .with_context(|| format!("writing device secret key: {}", path.display()))?;
-    file.write_all(b"\n")
-        .with_context(|| format!("writing device secret key newline: {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("syncing device secret key: {}", path.display()))?;
 
@@ -672,8 +854,199 @@ pub fn save_device_secret_key(
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod device secret key: {}", path.display()))?;
     }
-
     Ok(())
+}
+
+/// Bytes stored for a device secret key: encrypted when `wrap` is given.
+fn device_key_file_bytes(
+    secret_key: &SecretString,
+    wrap: Option<&DeviceKeyWrap>,
+) -> Result<(zeroize::Zeroizing<Vec<u8>>, DeviceKeyAtRest)> {
+    let mut plaintext = zeroize::Zeroizing::new(secret_key.expose_secret().as_bytes().to_vec());
+    plaintext.push(b'\n');
+    match wrap {
+        Some(wrap) => Ok((
+            zeroize::Zeroizing::new(wrap.encrypt(&plaintext)?.into_bytes()),
+            DeviceKeyAtRest::Encrypted,
+        )),
+        None => Ok((plaintext, DeviceKeyAtRest::Plaintext)),
+    }
+}
+
+/// Persist a local device identity secret key in an owner-only file.
+///
+/// With a `wrap` identity the file is age-encrypted to it (BL2-Q10). Without
+/// one the raw identity is written, as before, and a warning names the
+/// setting that turns encryption on. Returns how the key was stored.
+pub fn save_device_secret_key(
+    path: &Path,
+    secret_key: &SecretString,
+    overwrite: bool,
+    wrap: Option<&DeviceKeyWrap>,
+) -> Result<DeviceKeyAtRest> {
+    let (bytes, at_rest) = device_key_file_bytes(secret_key, wrap)?;
+    if at_rest == DeviceKeyAtRest::Plaintext {
+        tracing::warn!(
+            path = %path.display(),
+            "device secret key stored PLAINTEXT at rest; set crypto.device_key_wrap_identity_file \
+             or {DEVICE_KEY_WRAP_IDENTITY_ENV} to encrypt it"
+        );
+    }
+    write_owner_only(path, &bytes, overwrite)?;
+    Ok(at_rest)
+}
+
+/// Load a device secret key, decrypting it when it is encrypted at rest.
+///
+/// A plaintext file still loads (legacy). An encrypted file without a `wrap`
+/// identity is an error. Returns the identity string, trimmed, and how the
+/// file was stored. The identity is checked to parse as an age X25519 key.
+pub fn load_device_secret_key(
+    path: &Path,
+    wrap: Option<&DeviceKeyWrap>,
+) -> Result<(SecretString, DeviceKeyAtRest)> {
+    let bytes = zeroize::Zeroizing::new(
+        std::fs::read(path)
+            .with_context(|| format!("reading device secret key: {}", path.display()))?,
+    );
+    let at_rest =
+        classify_device_key_bytes(&bytes).with_context(|| format!("{}", path.display()))?;
+    let secret = match at_rest {
+        DeviceKeyAtRest::Plaintext => decode_identity_text(&bytes)?,
+        DeviceKeyAtRest::Encrypted => {
+            let wrap = wrap.with_context(|| {
+                format!(
+                    "device secret key {} is encrypted at rest; set \
+                     crypto.device_key_wrap_identity_file or {DEVICE_KEY_WRAP_IDENTITY_ENV}",
+                    path.display()
+                )
+            })?;
+            decode_identity_text(&wrap.decrypt(&bytes)?)?
+        }
+    };
+    Ok((secret, at_rest))
+}
+
+/// Decode an inline device secret, such as a FileProvider config's
+/// `device_secret`: a plaintext identity, or an armored age file that `wrap`
+/// decrypts. Returns `None` when it is encrypted and no wrap identity is given.
+pub fn decode_device_secret(
+    text: &str,
+    wrap: Option<&DeviceKeyWrap>,
+) -> Result<Option<SecretString>> {
+    match classify_device_key_bytes(text.as_bytes())? {
+        DeviceKeyAtRest::Plaintext => decode_identity_text(text.as_bytes()).map(Some),
+        DeviceKeyAtRest::Encrypted => match wrap {
+            Some(wrap) => decode_identity_text(&wrap.decrypt(text.as_bytes())?).map(Some),
+            None => Ok(None),
+        },
+    }
+}
+
+fn decode_identity_text(bytes: &[u8]) -> Result<SecretString> {
+    let text = std::str::from_utf8(bytes).context("device secret key is not UTF-8")?;
+    let trimmed = text.trim();
+    if trimmed.parse::<age::x25519::Identity>().is_err() {
+        anyhow::bail!("device secret key is not an age X25519 identity");
+    }
+    Ok(SecretString::from(trimmed.to_string()))
+}
+
+/// Encrypt one device secret key file in place (the BL2-Q10 migration).
+///
+/// A plaintext file is encrypted to a temporary sibling, read back and
+/// checked against the original, then renamed over it. The final path never
+/// holds a partial file. An encrypted file is only checked to decrypt.
+pub fn protect_device_secret_key(
+    path: &Path,
+    wrap: &DeviceKeyWrap,
+    dry_run: bool,
+) -> Result<ProtectOutcome> {
+    let (secret, at_rest) = load_device_secret_key(path, Some(wrap))?;
+    if at_rest == DeviceKeyAtRest::Encrypted {
+        return Ok(ProtectOutcome::AlreadyEncrypted);
+    }
+    if dry_run {
+        return Ok(ProtectOutcome::WouldEncrypt);
+    }
+
+    let file_name = path.file_name().and_then(|n| n.to_str()).with_context(|| {
+        format!(
+            "device secret key path has no file name: {}",
+            path.display()
+        )
+    })?;
+    let tmp = path.with_file_name(format!(".{file_name}.protect-{}", std::process::id()));
+    let result = (|| -> Result<()> {
+        save_device_secret_key(&tmp, &secret, false, Some(wrap))?;
+        let (check, check_at_rest) = load_device_secret_key(&tmp, Some(wrap))?;
+        if check_at_rest != DeviceKeyAtRest::Encrypted
+            || check.expose_secret() != secret.expose_secret()
+        {
+            anyhow::bail!("encrypted device secret key did not round-trip");
+        }
+        std::fs::rename(&tmp, path).with_context(|| {
+            format!(
+                "replacing device secret key with encrypted form: {}",
+                path.display()
+            )
+        })?;
+        sync_parent_dir(path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map(|()| ProtectOutcome::Encrypted)
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .with_context(|| format!("syncing device key dir: {}", parent.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Every `device-<id>.age` file beside the registry, sorted.
+pub fn device_secret_key_files(registry_path: &Path) -> Result<Vec<PathBuf>> {
+    let dir = registry_path.parent().unwrap_or_else(|| Path::new("."));
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("listing {}", dir.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("device-") && name.ends_with(".age") && entry.file_type()?.is_file() {
+            files.push(entry.path());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Encrypt every plaintext `device-<id>.age` file beside the registry.
+///
+/// Each file gets its own result, so one bad file does not stop the others.
+pub fn protect_device_secret_keys(
+    registry_path: &Path,
+    wrap: &DeviceKeyWrap,
+    dry_run: bool,
+) -> Result<Vec<(PathBuf, Result<ProtectOutcome>)>> {
+    Ok(device_secret_key_files(registry_path)?
+        .into_iter()
+        .map(|path| {
+            let outcome = protect_device_secret_key(&path, wrap, dry_run);
+            (path, outcome)
+        })
+        .collect())
 }
 
 /// Return true when `public_key` is a parseable age X25519 recipient.
@@ -863,7 +1236,8 @@ mod tests {
         let path = dir.path().join("device-test.age");
         let key = generate_local_device_key();
 
-        save_device_secret_key(&path, &key.secret_key, false).unwrap();
+        let at_rest = save_device_secret_key(&path, &key.secret_key, false, None).unwrap();
+        assert_eq!(at_rest, DeviceKeyAtRest::Plaintext);
         let persisted = std::fs::read_to_string(&path).unwrap();
         let identity: age::x25519::Identity =
             persisted.trim().parse().expect("persisted age secret key");
@@ -876,11 +1250,295 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
 
-        let err = save_device_secret_key(&path, &key.secret_key, false).unwrap_err();
+        let err = save_device_secret_key(&path, &key.secret_key, false, None).unwrap_err();
         assert!(
             err.to_string().contains("creating device secret key"),
             "unexpected error: {err:#}"
         );
+    }
+
+    // ── BL2-Q10: device keys at rest ──────────────────────────────────────
+
+    /// Write an age identity file shaped like a sops `keys.txt`: comments,
+    /// then one identity per line. Returns the path and the identities.
+    fn write_wrap_identity_file(
+        dir: &Path,
+        name: &str,
+        count: usize,
+    ) -> (PathBuf, Vec<age::x25519::Identity>) {
+        let identities: Vec<age::x25519::Identity> = (0..count)
+            .map(|_| age::x25519::Identity::generate())
+            .collect();
+        let mut text = String::new();
+        for identity in &identities {
+            text.push_str("# created: 2026-10-27T00:00:00Z\n");
+            text.push_str(&format!("# public key: {}\n", identity.to_public()));
+            text.push_str(identity.to_string().expose_secret());
+            text.push_str("\n\n");
+        }
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        (path, identities)
+    }
+
+    fn assert_owner_only(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} must be mode 0600", path.display());
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
+    #[test]
+    fn test_save_with_wrap_encrypts_and_load_decrypts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_path, _) = write_wrap_identity_file(dir.path(), "wrap.txt", 1);
+        let wrap = DeviceKeyWrap::from_identity_file(&wrap_path).unwrap();
+        let path = dir.path().join("keys").join("device-a.age");
+        let key = generate_local_device_key();
+
+        let at_rest = save_device_secret_key(&path, &key.secret_key, false, Some(&wrap)).unwrap();
+        assert_eq!(at_rest, DeviceKeyAtRest::Encrypted);
+        assert_owner_only(&path);
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.starts_with(AGE_ARMOR_BEGIN));
+        assert!(
+            !on_disk.contains(key.secret_key.expose_secret()),
+            "the plaintext identity must not be on disk"
+        );
+        assert!(!on_disk.contains(AGE_SECRET_KEY_PREFIX));
+        assert_eq!(
+            device_key_at_rest(&path).unwrap(),
+            DeviceKeyAtRest::Encrypted
+        );
+
+        let (loaded, loaded_at_rest) = load_device_secret_key(&path, Some(&wrap)).unwrap();
+        assert_eq!(loaded.expose_secret(), key.secret_key.expose_secret());
+        assert_eq!(loaded_at_rest, DeviceKeyAtRest::Encrypted);
+
+        let err = load_device_secret_key(&path, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("device_key_wrap_identity_file"),
+            "an encrypted key without a wrap must name the setting: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_plaintext_key_still_loads_without_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-a.age");
+        let key = generate_local_device_key();
+        save_device_secret_key(&path, &key.secret_key, false, None).unwrap();
+
+        let (loaded, at_rest) = load_device_secret_key(&path, None).unwrap();
+        assert_eq!(loaded.expose_secret(), key.secret_key.expose_secret());
+        assert_eq!(at_rest, DeviceKeyAtRest::Plaintext);
+    }
+
+    #[test]
+    fn test_wrap_encrypts_to_first_identity_and_decrypts_with_any() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_path, identities) = write_wrap_identity_file(dir.path(), "keys.txt", 2);
+        let wrap = DeviceKeyWrap::from_identity_file(&wrap_path).unwrap();
+        assert_eq!(
+            wrap.recipient().to_string(),
+            identities[0].to_public().to_string()
+        );
+
+        let path = dir.path().join("device-a.age");
+        let key = generate_local_device_key();
+        save_device_secret_key(&path, &key.secret_key, false, Some(&wrap)).unwrap();
+
+        // A wrap file that holds only the SECOND identity cannot decrypt.
+        let second_only = dir.path().join("second.txt");
+        std::fs::write(
+            &second_only,
+            format!("{}\n", identities[1].to_string().expose_secret()),
+        )
+        .unwrap();
+        let second = DeviceKeyWrap::from_identity_file(&second_only).unwrap();
+        assert!(load_device_secret_key(&path, Some(&second)).is_err());
+
+        // A wrap file that holds only the FIRST identity can.
+        let first_only = dir.path().join("first.txt");
+        std::fs::write(
+            &first_only,
+            format!("{}\n", identities[0].to_string().expose_secret()),
+        )
+        .unwrap();
+        let first = DeviceKeyWrap::from_identity_file(&first_only).unwrap();
+        let (loaded, _) = load_device_secret_key(&path, Some(&first)).unwrap();
+        assert_eq!(loaded.expose_secret(), key.secret_key.expose_secret());
+    }
+
+    #[test]
+    fn test_wrap_file_without_identity_errors_without_echoing_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-keys.txt");
+        std::fs::write(&path, "# comment\ntoken=hunter2-not-an-identity\n").unwrap();
+        let err = DeviceKeyWrap::from_identity_file(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("no age X25519 identity"), "{text}");
+        assert!(
+            !text.contains("hunter2"),
+            "error must not echo file content: {text}"
+        );
+        assert!(!format!("{:?}", err).contains("hunter2"));
+    }
+
+    #[test]
+    fn test_wrap_debug_never_prints_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_path, identities) = write_wrap_identity_file(dir.path(), "keys.txt", 1);
+        let wrap = DeviceKeyWrap::from_identity_file(&wrap_path).unwrap();
+        let debug = format!("{wrap:?}");
+        assert!(!debug.contains(identities[0].to_string().expose_secret()));
+        assert!(!debug.contains(AGE_SECRET_KEY_PREFIX));
+    }
+
+    #[test]
+    fn test_resolve_with_configured_path_loads_and_missing_path_errors() {
+        // Skip when the operator environment already selects a wrap file.
+        if std::env::var_os(DEVICE_KEY_WRAP_IDENTITY_ENV).is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_path, _) = write_wrap_identity_file(dir.path(), "keys.txt", 1);
+        assert!(DeviceKeyWrap::resolve(None).unwrap().is_none());
+        assert!(DeviceKeyWrap::resolve(Some(&wrap_path)).unwrap().is_some());
+        // A configured path that does not load is an error, never a silent
+        // plaintext fallback.
+        assert!(DeviceKeyWrap::resolve(Some(&dir.path().join("absent.txt"))).is_err());
+    }
+
+    #[test]
+    fn test_protect_migrates_plaintext_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_path, _) = write_wrap_identity_file(dir.path(), "wrap.txt", 1);
+        let wrap = DeviceKeyWrap::from_identity_file(&wrap_path).unwrap();
+        let keys = dir.path().join("cfg");
+        let path = keys.join("device-a.age");
+        let key = generate_local_device_key();
+        save_device_secret_key(&path, &key.secret_key, false, None).unwrap();
+
+        // Dry run writes nothing.
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            protect_device_secret_key(&path, &wrap, true).unwrap(),
+            ProtectOutcome::WouldEncrypt
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        assert_eq!(
+            protect_device_secret_key(&path, &wrap, false).unwrap(),
+            ProtectOutcome::Encrypted
+        );
+        assert_eq!(
+            device_key_at_rest(&path).unwrap(),
+            DeviceKeyAtRest::Encrypted
+        );
+        assert_owner_only(&path);
+        let (loaded, _) = load_device_secret_key(&path, Some(&wrap)).unwrap();
+        assert_eq!(loaded.expose_secret(), key.secret_key.expose_secret());
+
+        // Idempotent, and no temporary sibling is left behind.
+        assert_eq!(
+            protect_device_secret_key(&path, &wrap, false).unwrap(),
+            ProtectOutcome::AlreadyEncrypted
+        );
+        let names: Vec<String> = std::fs::read_dir(&keys)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec!["device-a.age".to_string()]);
+    }
+
+    #[test]
+    fn test_protect_with_wrong_wrap_leaves_file_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_a_path, _) = write_wrap_identity_file(dir.path(), "a.txt", 1);
+        let (wrap_b_path, _) = write_wrap_identity_file(dir.path(), "b.txt", 1);
+        let wrap_a = DeviceKeyWrap::from_identity_file(&wrap_a_path).unwrap();
+        let wrap_b = DeviceKeyWrap::from_identity_file(&wrap_b_path).unwrap();
+        let path = dir.path().join("device-a.age");
+        let key = generate_local_device_key();
+        save_device_secret_key(&path, &key.secret_key, false, Some(&wrap_a)).unwrap();
+
+        let before = std::fs::read(&path).unwrap();
+        assert!(protect_device_secret_key(&path, &wrap_b, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn test_protect_keys_reports_each_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_path, _) = write_wrap_identity_file(dir.path(), "wrap.txt", 1);
+        let wrap = DeviceKeyWrap::from_identity_file(&wrap_path).unwrap();
+        let cfg = dir.path().join("cfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let registry_path = cfg.join("devices.json");
+
+        let a = generate_local_device_key();
+        let b = generate_local_device_key();
+        save_device_secret_key(&cfg.join("device-a.age"), &a.secret_key, false, None).unwrap();
+        save_device_secret_key(&cfg.join("device-b.age"), &b.secret_key, false, Some(&wrap))
+            .unwrap();
+        std::fs::write(cfg.join("device-bad.age"), "not a key\n").unwrap();
+        std::fs::write(cfg.join("devices.json"), "{}").unwrap();
+        std::fs::write(cfg.join("other.age"), "ignored\n").unwrap();
+
+        let results = protect_device_secret_keys(&registry_path, &wrap, false).unwrap();
+        let summary: Vec<(String, bool)> = results
+            .iter()
+            .map(|(p, r)| {
+                (
+                    p.file_name().unwrap().to_str().unwrap().to_string(),
+                    r.is_ok(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("device-a.age".to_string(), true),
+                ("device-b.age".to_string(), true),
+                ("device-bad.age".to_string(), false),
+            ]
+        );
+        assert!(matches!(results[0].1, Ok(ProtectOutcome::Encrypted)));
+        assert!(matches!(results[1].1, Ok(ProtectOutcome::AlreadyEncrypted)));
+        assert_eq!(
+            std::fs::read_to_string(cfg.join("device-bad.age")).unwrap(),
+            "not a key\n"
+        );
+    }
+
+    #[test]
+    fn test_decode_device_secret_handles_both_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrap_path, _) = write_wrap_identity_file(dir.path(), "wrap.txt", 1);
+        let wrap = DeviceKeyWrap::from_identity_file(&wrap_path).unwrap();
+        let key = generate_local_device_key();
+
+        let plain = decode_device_secret(key.secret_key.expose_secret(), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.expose_secret(), key.secret_key.expose_secret());
+
+        let path = dir.path().join("device-a.age");
+        save_device_secret_key(&path, &key.secret_key, false, Some(&wrap)).unwrap();
+        let armored = std::fs::read_to_string(&path).unwrap();
+        assert!(decode_device_secret(&armored, None).unwrap().is_none());
+        let decoded = decode_device_secret(&armored, Some(&wrap))
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.expose_secret(), key.secret_key.expose_secret());
+
+        assert!(decode_device_secret("garbage", None).is_err());
     }
 
     #[test]

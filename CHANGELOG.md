@@ -13,6 +13,14 @@ intent rather than the current supported/proven surface.
 
 ### Added
 
+- Device secret keys can be encrypted at rest (BL2-Q10). Set
+  `crypto.device_key_wrap_identity_file` (or
+  `TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE`) to an age identity file kept outside
+  the tcfs config directory. New `device-<id>.age` files are then age-encrypted
+  to its first identity. `tcfs device protect-keys [--dry-run]` and tcfsd at
+  startup encrypt existing plaintext key files in place, each only after a
+  read-back check. `tcfs device status` prints `key_at_rest`. Without the
+  setting, keys stay plaintext at mode 0600 and a warning is logged.
 - `tcfs health` prints one verdict and exits `0` (`UP`), `2` (`DAEMON_DOWN`),
   `3` (`BACKEND_DOWN`) or `4` (`DAEMON_BUSY`, no answer within 10 s).
   `scripts/tcfsd-health-check.sh` is a reference supervisor check that

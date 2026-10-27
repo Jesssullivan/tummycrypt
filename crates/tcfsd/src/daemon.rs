@@ -378,6 +378,22 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             tcfs_secrets::device::DeviceRegistry::default()
         });
 
+    // BL2-Q10: device secret keys at rest. With a wrap identity configured,
+    // encrypt any plaintext `device-<id>.age` beside the registry before use.
+    // A failure here is logged and never stops startup.
+    let device_key_wrap = match tcfs_secrets::device::DeviceKeyWrap::resolve(
+        config.crypto.device_key_wrap_identity_file.as_deref(),
+    ) {
+        Ok(wrap) => wrap,
+        Err(e) => {
+            warn!("device key wrap identity unavailable: {e:#}; device keys stay as they are");
+            None
+        }
+    };
+    if let Some(wrap) = device_key_wrap.as_ref() {
+        migrate_device_keys_at_rest(&registry_path, wrap);
+    }
+
     // Auto-enroll this device on first run (with real age X25519 keypair)
     let device_id = if let Some(dev) = registry.find(&device_name) {
         if dev.device_id.is_empty() {
@@ -401,6 +417,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             &secret_key_path,
             &device_key.secret_key,
             false,
+            device_key_wrap.as_ref(),
         ) {
             warn!("failed to write device secret key: {e}");
         } else {
@@ -4425,6 +4442,33 @@ fn absorb_legacy_state_db(state_db: &std::path::Path) -> Result<std::path::PathB
         info!("migrated legacy state.db → state.json");
     }
     Ok(state_json_path)
+}
+
+/// Encrypt every plaintext device secret key beside the registry (BL2-Q10).
+/// Logs one line per file. Never fails: a key that cannot be migrated stays
+/// as it was.
+fn migrate_device_keys_at_rest(
+    registry_path: &std::path::Path,
+    wrap: &tcfs_secrets::device::DeviceKeyWrap,
+) {
+    use tcfs_secrets::device::ProtectOutcome;
+    match tcfs_secrets::device::protect_device_secret_keys(registry_path, wrap, false) {
+        Ok(results) => {
+            for (path, outcome) in results {
+                match outcome {
+                    Ok(ProtectOutcome::Encrypted) => {
+                        info!(path = %path.display(), "device secret key encrypted at rest")
+                    }
+                    Ok(ProtectOutcome::AlreadyEncrypted) | Ok(ProtectOutcome::WouldEncrypt) => {}
+                    Err(e) => warn!(
+                        path = %path.display(),
+                        "device secret key not migrated: {e:#}"
+                    ),
+                }
+            }
+        }
+        Err(e) => warn!("listing device secret keys failed: {e:#}"),
+    }
 }
 
 #[cfg(test)]

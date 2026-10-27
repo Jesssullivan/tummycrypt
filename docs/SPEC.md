@@ -243,10 +243,12 @@ As of 2026-10-16, origin/main `11fc85e`. Each claim carries its tier from
     `tcfs-chunks::seekable_zstd` has no caller.
   - **Data-key escrow is not named.** If the content passphrase is lost, the
     bucket is unreadable.
-  - **Device secret keys are plaintext on disk.** `save_device_secret_key`
-    writes each `device-<id>.age` file as the raw age identity, mode 0600.
-    Older text that called the file "age-encrypted" was wrong. Encryption at
-    rest is ruled for the next release (BL2-Q10, TIN-3692 `36925e2d`).
+  - **Device secret keys are plaintext on disk unless a wrap identity is
+    set.** Released clients write each `device-<id>.age` file as the raw age
+    identity, mode 0600. Older text that called the file "age-encrypted" was
+    wrong. `main` encrypts it at rest when
+    `crypto.device_key_wrap_identity_file` is set, and migrates existing
+    files (BL2-Q10, TIN-3692 `36925e2d`). No host sets it yet.
 - **NixOS and Home Manager options that do nothing:** `deviceName`,
   `conflictMode`, `syncGitDirs`, `gitSyncMode` and `excludePatterns` render
   `TCFS_*` variables that no code reads. The NixOS `syncRoot` and `mounts`
