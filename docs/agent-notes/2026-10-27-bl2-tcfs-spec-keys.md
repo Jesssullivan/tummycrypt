@@ -21,7 +21,31 @@ R-N13.
   or an owner-only age-encrypted file", which the code never did
   (`save_device_secret_key` writes the raw identity).
 
-## Not done here
+## Device keys at rest (second PR, branch `feat/device-key-at-rest-20261027`)
 
-- The at-rest encryption code is a separate PR.
-- No host, daemon, key or registry was touched.
+- `tcfs-secrets::device`: `DeviceKeyWrap` (the first X25519 identity of an
+  age identity file, such as a host's sops age key file),
+  `save_device_secret_key(.., wrap)`, `load_device_secret_key`,
+  `decode_device_secret`, `protect_device_secret_key(s)` and
+  `device_key_at_rest`. Encrypted files are armored age. The migration
+  writes a temporary sibling, reads it back, compares, then renames.
+- Config: `crypto.device_key_wrap_identity_file`, overridden by
+  `TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE`. A set path that does not load is an
+  error, never a plaintext fallback.
+- Readers: CLI and tcfsd `build_encryption_context`, and the FileProvider
+  `resolve_device_identity` (file and inlined `device_secret`).
+- Writers: `tcfs init`, `device enroll`, placeholder repair, tcfsd
+  auto-enroll. tcfsd encrypts plaintext keys at startup when a wrap is set.
+- CLI: `tcfs device protect-keys [--dry-run]`; `tcfs device status` prints
+  `key_at_rest`.
+
+Follow-ups, not in this PR:
+
+- The macOS host app inlines the raw `device-<id>.age` bytes as
+  `device_secret`. Once a key is encrypted, the sandboxed extension cannot
+  decrypt it and falls back to the master wrap. The host must inline the
+  decrypted identity. Inert today: every host runs `wrap_mode = master`.
+- lab sets `crypto.device_key_wrap_identity_file` per host when it bumps to
+  a release with this code. Each host delivery needs its own GO (R-C754).
+
+No host, daemon, key or registry was touched.

@@ -167,6 +167,7 @@ struct RedactedCryptoConfig<'a> {
     passphrase_file: &'a Option<PathBuf>,
     kdf_salt: &'a Option<String>,
     wrap_mode: &'a WrapMode,
+    device_key_wrap_identity_file: &'a Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +376,7 @@ impl TcfsConfig {
             passphrase_file,
             kdf_salt,
             wrap_mode,
+            device_key_wrap_identity_file,
         } = crypto;
         let SopsConfig {
             enabled: sops_enabled,
@@ -552,6 +554,7 @@ impl TcfsConfig {
                 passphrase_file,
                 kdf_salt,
                 wrap_mode,
+                device_key_wrap_identity_file,
             },
             sops: RedactedSopsConfig {
                 enabled: *sops_enabled,
@@ -1328,6 +1331,12 @@ pub struct CryptoConfig {
     /// legacy `per_device_wrapping = true` config deserializes to
     /// [`WrapMode::Dual`]; `false`/absent to [`WrapMode::Master`].
     pub wrap_mode: WrapMode,
+    /// age identity file whose FIRST X25519 identity encrypts device secret
+    /// key files (`device-<id>.age`) at rest (BL2-Q10). When unset, device keys
+    /// are written as the plaintext identity (mode 0600) with a warning. The
+    /// `TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE` environment variable overrides it.
+    /// See `tcfs_secrets::device::DeviceKeyWrap`.
+    pub device_key_wrap_identity_file: Option<PathBuf>,
 }
 
 impl Default for CryptoConfig {
@@ -1342,6 +1351,7 @@ impl Default for CryptoConfig {
             passphrase_file: None,
             kdf_salt: None,
             wrap_mode: WrapMode::Master,
+            device_key_wrap_identity_file: None,
         }
     }
 }
@@ -1368,6 +1378,7 @@ impl<'de> Deserialize<'de> for CryptoConfig {
             wrap_mode: Option<WrapMode>,
             /// Legacy back-compat key (TIN-1417). `true` -> Dual, `false`/absent -> Master.
             per_device_wrapping: Option<bool>,
+            device_key_wrap_identity_file: Option<PathBuf>,
         }
 
         impl Default for CryptoConfigShadow {
@@ -1384,6 +1395,7 @@ impl<'de> Deserialize<'de> for CryptoConfig {
                     kdf_salt: base.kdf_salt,
                     wrap_mode: None,
                     per_device_wrapping: None,
+                    device_key_wrap_identity_file: base.device_key_wrap_identity_file,
                 }
             }
         }
@@ -1411,6 +1423,7 @@ impl<'de> Deserialize<'de> for CryptoConfig {
             passphrase_file: shadow.passphrase_file,
             kdf_salt: shadow.kdf_salt,
             wrap_mode,
+            device_key_wrap_identity_file: shadow.device_key_wrap_identity_file,
         })
     }
 }
@@ -2537,6 +2550,21 @@ require_session = false
         let toml_str = "[crypto]\nwrap_mode = \"master\"\nper_device_wrapping = true\n";
         let config: TcfsConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.crypto.wrap_mode, WrapMode::Master);
+    }
+
+    #[test]
+    fn device_key_wrap_identity_file_parses_and_defaults_to_none() {
+        assert!(CryptoConfig::default()
+            .device_key_wrap_identity_file
+            .is_none());
+        let config: CryptoConfig =
+            toml::from_str("device_key_wrap_identity_file = \"/run/keys/wrap.txt\"\n").unwrap();
+        assert_eq!(
+            config.device_key_wrap_identity_file.as_deref(),
+            Some(std::path::Path::new("/run/keys/wrap.txt"))
+        );
+        let legacy: CryptoConfig = toml::from_str("per_device_wrapping = true\n").unwrap();
+        assert!(legacy.device_key_wrap_identity_file.is_none());
     }
 
     #[test]

@@ -634,6 +634,17 @@ enum DeviceAction {
     },
     /// Show this device's identity and status
     Status,
+    /// Encrypt plaintext device secret keys at rest (BL2-Q10)
+    ///
+    /// Encrypts every plaintext `device-<id>.age` beside the registry to the
+    /// wrap identity from `crypto.device_key_wrap_identity_file` or
+    /// `TCFS_DEVICE_KEY_WRAP_IDENTITY_FILE`. Each file is replaced only after
+    /// its encrypted form decrypts to the same key.
+    ProtectKeys {
+        /// Report each key's state and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Generate a device enrollment invite (QR code or deep link)
     Invite {
         /// Expiry in hours (default: 24)
@@ -1033,6 +1044,7 @@ async fn main() -> Result<()> {
                 .await
             }
             DeviceAction::Status => cmd_device_status(),
+            DeviceAction::ProtectKeys { dry_run } => cmd_device_protect_keys(&config, dry_run),
             DeviceAction::Invite { expiry_hours, qr } => {
                 cmd_device_invite(&config, expiry_hours, qr).await
             }
@@ -1544,6 +1556,17 @@ fn resolve_sync_status_lookup_path(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(Into::into)
 }
 
+/// Resolve the device-key wrap identity (BL2-Q10) from the environment or
+/// `crypto.device_key_wrap_identity_file`. `None` keeps the legacy plaintext
+/// form, with a warning at write time.
+fn resolve_device_key_wrap(
+    config: &tcfs_core::config::TcfsConfig,
+) -> Result<Option<tcfs_secrets::device::DeviceKeyWrap>> {
+    tcfs_secrets::device::DeviceKeyWrap::resolve(
+        config.crypto.device_key_wrap_identity_file.as_deref(),
+    )
+}
+
 /// Build an `EncryptionContext` honoring `crypto.wrap_mode` (TIN-1417).
 ///
 /// Mirrors the daemon's `build_encryption_context`:
@@ -1611,10 +1634,14 @@ fn build_encryption_context(
         return base;
     }
     let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
-    let identity = match std::fs::read_to_string(&secret_path) {
-        Ok(s) => DeviceUnwrapIdentity {
+    let identity = match tcfs_secrets::device::DeviceKeyWrap::resolve(
+        config.crypto.device_key_wrap_identity_file.as_deref(),
+    )
+    .and_then(|wrap| tcfs_secrets::device::load_device_secret_key(&secret_path, wrap.as_ref()))
+    {
+        Ok((secret, _)) => DeviceUnwrapIdentity {
             device_id: device_id.to_string(),
-            secret: s.trim().to_string(),
+            secret: secret.expose_secret().to_string(),
         },
         Err(e) => {
             tracing::warn!(
@@ -5483,7 +5510,13 @@ async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
     let (device_id, device_key) = registry.enroll_local(&device_name, None);
     let device_key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
-    tcfs_secrets::device::save_device_secret_key(&device_key_path, &device_key.secret_key, false)?;
+    let device_key_wrap = resolve_device_key_wrap(config_for_init)?;
+    tcfs_secrets::device::save_device_secret_key(
+        &device_key_path,
+        &device_key.secret_key,
+        false,
+        device_key_wrap.as_ref(),
+    )?;
     // TIN-1417 B4: sign the registry with the freshly written master key so the
     // very first registry on disk is signed (no migration window for new setups).
     registry.save_signed(&registry_path, master_key.as_bytes())?;
@@ -6476,8 +6509,12 @@ async fn cmd_device_enroll(
                     device_name
                 );
             }
-            let key_path =
-                repair_placeholder_device_key(&mut registry, &registry_path, &device_name)?;
+            let key_path = repair_placeholder_device_key(
+                &mut registry,
+                &registry_path,
+                &device_name,
+                resolve_device_key_wrap(config)?.as_ref(),
+            )?;
             device_key_path = Some(key_path);
             enrolled_or_repaired = true;
         } else if !sync_remote {
@@ -6497,7 +6534,13 @@ async fn cmd_device_enroll(
     } else {
         let (new_device_id, device_key) = registry.enroll_local(&device_name, None);
         let key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &new_device_id);
-        tcfs_secrets::device::save_device_secret_key(&key_path, &device_key.secret_key, false)?;
+        let wrap = resolve_device_key_wrap(config)?;
+        tcfs_secrets::device::save_device_secret_key(
+            &key_path,
+            &device_key.secret_key,
+            false,
+            wrap.as_ref(),
+        )?;
         device_id = new_device_id;
         public_key = device_key.public_key;
         device_key_path = Some(key_path);
@@ -6665,6 +6708,7 @@ fn repair_placeholder_device_key(
     registry: &mut tcfs_secrets::device::DeviceRegistry,
     registry_path: &Path,
     device_name: &str,
+    wrap: Option<&tcfs_secrets::device::DeviceKeyWrap>,
 ) -> Result<PathBuf> {
     let needs_device_id = registry
         .find(device_name)
@@ -6691,7 +6735,7 @@ fn repair_placeholder_device_key(
     device.revoked = false;
 
     let key_path = tcfs_secrets::device::device_secret_key_path(registry_path, &device.device_id);
-    tcfs_secrets::device::save_device_secret_key(&key_path, &key.secret_key, false)?;
+    tcfs_secrets::device::save_device_secret_key(&key_path, &key.secret_key, false, wrap)?;
     Ok(key_path)
 }
 
@@ -6884,6 +6928,14 @@ fn cmd_device_status() -> Result<()> {
             println!("  enrolled_at:     {}", device.enrolled_at);
             println!("  revoked:         {}", device.revoked);
             println!("  last_nats_seq:   {}", device.last_nats_seq);
+            let key_path =
+                tcfs_secrets::device::device_secret_key_path(&registry_path, &device.device_id);
+            let at_rest = match tcfs_secrets::device::device_key_at_rest(&key_path) {
+                Ok(state) => state.to_string(),
+                Err(_) if !key_path.exists() => "missing".to_string(),
+                Err(e) => format!("unreadable ({e:#})"),
+            };
+            println!("  key_at_rest:     {}", at_rest);
             if let Some(ref desc) = device.description {
                 println!("  description:     {}", desc);
             }
@@ -6894,6 +6946,65 @@ fn cmd_device_status() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// `tcfs device protect-keys`: encrypt plaintext device secret keys at rest
+/// (BL2-Q10, Linear TIN-3692 comment `36925e2d`).
+fn cmd_device_protect_keys(config: &tcfs_core::config::TcfsConfig, dry_run: bool) -> Result<()> {
+    use tcfs_secrets::device::ProtectOutcome;
+
+    let registry_path = config
+        .sync
+        .device_identity
+        .clone()
+        .unwrap_or_else(tcfs_secrets::device::default_registry_path);
+    let files = tcfs_secrets::device::device_secret_key_files(&registry_path)?;
+    if files.is_empty() {
+        println!("No device secret keys beside {}.", registry_path.display());
+        return Ok(());
+    }
+
+    let Some(wrap) = resolve_device_key_wrap(config)? else {
+        for path in &files {
+            let state = match tcfs_secrets::device::device_key_at_rest(path) {
+                Ok(state) => state.to_string(),
+                Err(e) => format!("unreadable ({e:#})"),
+            };
+            println!("{state:<14} {}", path.display());
+        }
+        anyhow::bail!(
+            "no device key wrap identity: set crypto.device_key_wrap_identity_file or {}",
+            tcfs_secrets::device::DEVICE_KEY_WRAP_IDENTITY_ENV
+        );
+    };
+
+    println!(
+        "Wrap identity: {} (recipient {})",
+        wrap.source().display(),
+        wrap.recipient()
+    );
+    let mut failed = 0usize;
+    for (path, outcome) in
+        tcfs_secrets::device::protect_device_secret_keys(&registry_path, &wrap, dry_run)?
+    {
+        match outcome {
+            Ok(ProtectOutcome::AlreadyEncrypted) => {
+                println!("{:<14} {}", "encrypted", path.display())
+            }
+            Ok(ProtectOutcome::Encrypted) => println!("{:<14} {}", "now-encrypted", path.display()),
+            Ok(ProtectOutcome::WouldEncrypt) => {
+                println!("{:<14} {}", "would-encrypt", path.display())
+            }
+            Err(e) => {
+                failed += 1;
+                println!("{:<14} {}: {e:#}", "FAILED", path.display());
+            }
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} device secret key(s) not protected");
+    }
     Ok(())
 }
 
@@ -12089,7 +12200,8 @@ nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
         let (device_id, key) = registry.enroll_local("laptop", None);
         registry.save(&registry_path).unwrap();
         let key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
-        tcfs_secrets::device::save_device_secret_key(&key_path, &key.secret_key, false).unwrap();
+        tcfs_secrets::device::save_device_secret_key(&key_path, &key.secret_key, false, None)
+            .unwrap();
 
         let paths = InitPaths {
             config_dir: dir.path().to_path_buf(),
@@ -12134,7 +12246,7 @@ nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
         let device_id = registry.enroll("honey", "age1-device-6b746182", None);
 
         let key_path =
-            repair_placeholder_device_key(&mut registry, &registry_path, "honey").unwrap();
+            repair_placeholder_device_key(&mut registry, &registry_path, "honey", None).unwrap();
         let repaired = registry.find("honey").unwrap();
 
         assert_eq!(repaired.device_id, device_id);
