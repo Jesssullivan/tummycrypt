@@ -13,7 +13,8 @@ ordinary verbs, not a migration project.
 > do, and the gaps between the documented security model and the code, are in
 > [docs/SPEC.md](docs/SPEC.md#current-status). Do not use TCFS yet for a
 > whole home directory, Git linked worktrees, or live SQLite databases: the
-> sync blacklist deliberately refuses the last two.
+> sync blacklist deliberately refuses the last two. v1 must cover both
+> ([SPEC T13, T14](docs/SPEC.md#worktrees-and-live-sqlite-t13-t14)).
 
 ## Start here
 

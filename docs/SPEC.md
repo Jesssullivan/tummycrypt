@@ -70,6 +70,8 @@ development and posibbly yeasr out" (BND-03, operator interview text).
 | T10 | **The first-user cohort keeps its local copies pinned until there is a second copy.** As approved: "until 010 replication or a verified off-site restore exists, the first-user cohort keeps its local copies pinned. Nothing is evicted to cloud-only." (`010`: a second replica on another rack.) This covers the first-user cohort only, not all enrolled data. **Open: not yet confirmed as a gate (open decision 9)** | USR-04 (agent paraphrase, approved by selection 2026-10-15) |
 | T11 | **No builds on the maintainer's Mac workstation.** macOS builds run on CI or the remote build host | PRC-06 (operator-typed) |
 | T12 | **Stay in its lane.** tcfs work is not introduced into unrelated lanes, and migration tooling does not live in this repository | PRC-01, PRC-02, SUP-01 (operator-typed); tummycrypt #601 removed the bulkload crates |
+| T13 | **v1 covers Git linked worktrees.** Every linked worktree of an enrolled repository arrives on another enrolled machine with the same HEAD, index and working state, rebuilt from a consistent snapshot. Defined in [Worktrees and live SQLite](#worktrees-and-live-sqlite-t13-t14) | Operator ruling BL2-Q8, 2026-10-27, Linear TIN-3692 comment `36925e2d`: "TCFS v1 must cover them" (operator-selection) |
+| T14 | **v1 covers live SQLite stores.** A SQLite database in use on one machine arrives on another as a transactionally consistent whole file, through a lock-aware snapshot and restore. Defined in [Worktrees and live SQLite](#worktrees-and-live-sqlite-t13-t14) | Operator ruling BL2-Q8, as T13 |
 
 ## Acceptance
 
@@ -92,9 +94,100 @@ tcfs is accepted in stages. Each stage needs a dated evidence packet under
    with no manual copy (T1). bulkload's own spec says it becomes
    maintenance-only "once tcfs launches", so the word needs one agreed
    meaning.
+   Whatever "launch" comes to mean, v1 includes T13 and T14 (ruling BL2-Q8,
+   TIN-3692 `36925e2d`): a release that refuses linked worktrees or live
+   SQLite is not v1.
 5. **Breadth (B, C).** Roam roots, the home directory (T6), writable macOS
    surfaces and the other clients (T5), as sequenced in
    [PRODUCT.md](PRODUCT.md).
+
+## Worktrees and live SQLite (T13, T14)
+
+Ruling: Jess, 2026-10-27, Linear TIN-3692 comment `36925e2d`, BL2-Q8
+("Worktrees and live SQLite"), selected answer: "TCFS v1 must cover them".
+Until v1 ships, the sync blacklist keeps refusing both classes and
+bulkload carries them ([ops/tcfs-bulkload-boundary.md](ops/tcfs-bulkload-boundary.md)).
+The mechanism below is **design, not an operator requirement**. The
+requirement is the ruling. The failure modes and the tests are what make
+"cover" checkable.
+
+### What "cover" means
+
+**Linked worktrees (T13): a consistent snapshot, then a rebuild.**
+
+- tcfs captures each enrolled repository as one snapshot: refs and objects
+  (through the existing bundle/ref transport), plus a logical worktree
+  record. For each linked worktree the record holds its path relative to an
+  enrolled root, HEAD (branch or detached commit), lock state and reason,
+  the index content, and the tracked, untracked and enrolled-ignored files.
+- The capture reads Git state under Git's own lock protocol (`index.lock`,
+  `HEAD.lock`, `packed-refs.lock`, ref locks). If a lock is held, it waits
+  for a bounded time and then refuses that repository with a typed reason.
+- The destination rebuilds each worktree with Git's own worktree machinery
+  at the mapped path, then writes the index and working files from the
+  record. It never copies `.git/worktrees/<name>/` admin files or gitfile
+  pointers as bytes. The blacklist fences for those paths stay in place.
+- Paths are mapped by enrolled-root rules. No rebuilt pointer may name
+  another machine's absolute path.
+
+**Live SQLite (T14): a lock-aware snapshot, then a whole-file restore.**
+
+- tcfs detects a SQLite database by its header (`SQLite format 3` plus a
+  NUL byte), not only by its file name.
+- The capture uses SQLite's online backup API, or `VACUUM INTO`, through
+  SQLite's own locking. The snapshot therefore holds every transaction
+  committed before it started, including any that still live only in the
+  `-wal` file. It uses a bounded busy timeout and yields to writers.
+- The snapshot is stored as one immutable, versioned, encrypted object. The
+  live main file, `-wal` and `-shm` are never synced chunk by chunk or one
+  at a time.
+- A restore replaces the destination file as a whole, by an atomic rename,
+  and only when no process holds the database open. Otherwise it stages the
+  snapshot beside the file and reports a typed conflict.
+- Edits on two machines since a common snapshot are kept as two versions.
+  tcfs never merges pages and never picks a winner silently.
+
+### Failure modes v1 must not have
+
+| ID | Class | Must not |
+| --- | --- | --- |
+| F1 | Worktree | Change, prune or remove any worktree or admin area on the source machine |
+| F2 | Worktree | Leave a rebuilt worktree whose HEAD, branch, index or `git status` differs from the snapshot |
+| F3 | Worktree | Skip a locked, detached, dirty or untracked-only worktree without a typed refusal |
+| F4 | Worktree | Let `git worktree prune` on one machine remove a worktree on another |
+| F5 | Worktree | Copy an index that was being written (a held `index.lock`) |
+| F6 | Worktree | Run `git gc`, `git prune`, `fetch --prune` or any ref deletion as a side effect |
+| F7 | Worktree | Leave a pointer or config value that names another machine's absolute path |
+| F8 | SQLite | Produce a torn copy: a main file without the committed WAL content it depends on |
+| F9 | SQLite | Lose a transaction that committed before the snapshot started |
+| F10 | SQLite | Replace a database that a process holds open |
+| F11 | SQLite | Mix pages from two versions, or overwrite a newer remote version silently |
+| F12 | SQLite | Delete or rewrite the source's `-wal` or `-shm`, or block the source's writers beyond the bounded busy timeout |
+| F13 | Both | Leave a partial result at the final path after a crash or a kill; output is staged and renamed |
+| F14 | Both | Store any of this state in plaintext in the object store (T8) |
+
+### Tests that prove it
+
+A blacklist entry for linked worktrees or SQLite is removed only in the PR
+that adds the matching tests below, and only when they pass. Live rows need
+a dated evidence packet under [release/evidence/](release/evidence/README.md).
+
+| ID | Kind | Test | Proves |
+| --- | --- | --- | --- |
+| W1 | unit | Capture a repository with a main worktree and linked worktrees that are on a branch, detached, locked, dirty and untracked-only. The record round-trips | F3 |
+| W2 | integration | Capture on home A, rebuild on home B over an in-process object store. Per worktree, HEAD, branch, `ls-files -s` and the sha256 of `git status --porcelain=v2 -z` are equal. `git worktree list --porcelain` lists each one, and `git fsck --connectivity-only` exits 0 | F2, F7 |
+| W3 | integration | After W2 and a `git worktree prune` on B, the sha256 of A's `.git/worktrees` tree and of each source worktree is unchanged | F1, F4 |
+| W4 | integration | Hold `index.lock` during capture. The result is a bounded wait or a typed refusal, never the half-written index | F5 |
+| W5 | integration | A command recorder sees no `gc`, `prune`, `fetch --prune` or ref deletion. The ref count after is at least the ref count before | F6 |
+| S1 | integration | A writer commits a counter row in a loop, in WAL mode and in rollback-journal mode. The restored copy passes `PRAGMA integrity_check` and holds a committed prefix at least as long as the count at snapshot start | F8, F9 |
+| S2 | integration | Rows committed only to the WAL, with no checkpoint, are in the snapshot | F8 |
+| S3 | integration | The destination database is held open by another process. The restore stages beside and leaves the open file unchanged | F10 |
+| S4 | integration | Two homes edit the same database after a common snapshot. Both versions are kept | F11 |
+| S5 | integration | The writer's commit latency during a snapshot stays within the busy timeout, and the source's `-wal` and `-shm` are intact afterwards | F12 |
+| S6 | unit | A database with no file extension is detected by its header | detection |
+| K1 | integration | SIGKILL the capture and the restore at random points. A rerun converges, and the final path never holds a partial result | F13 |
+| E1 | unit | The stored snapshot objects decrypt only with the content key. The bucket holds no plaintext of them | F14 |
+| L1 | live | A repository with more than 100 linked worktrees, and an agent-state SQLite store in daily use, roam between two enrolled machines. The application opens the store, and every worktree matches W2's checks | T13, T14 |
 
 ## Boundary with bulkload
 
@@ -150,6 +243,10 @@ As of 2026-10-16, origin/main `11fc85e`. Each claim carries its tier from
     `tcfs-chunks::seekable_zstd` has no caller.
   - **Data-key escrow is not named.** If the content passphrase is lost, the
     bucket is unreadable.
+  - **Device secret keys are plaintext on disk.** `save_device_secret_key`
+    writes each `device-<id>.age` file as the raw age identity, mode 0600.
+    Older text that called the file "age-encrypted" was wrong. Encryption at
+    rest is ruled for the next release (BL2-Q10, TIN-3692 `36925e2d`).
 - **NixOS and Home Manager options that do nothing:** `deviceName`,
   `conflictMode`, `syncGitDirs`, `gitSyncMode` and `excludePatterns` render
   `TCFS_*` variables that no code reads. The NixOS `syncRoot` and `mounts`

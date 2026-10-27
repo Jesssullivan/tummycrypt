@@ -1,7 +1,11 @@
 //! Device identity management for multi-device E2E encryption.
 //!
-//! Each device gets its own age X25519 keypair. Device secret keys are stored in
-//! the platform keychain or an owner-only age-encrypted file.
+//! Each device gets its own age X25519 keypair. Device secret keys are stored as
+//! the plaintext age identity in an owner-only (mode 0600) file,
+//! `device-<id>.age` beside the registry ([`save_device_secret_key`]). The `.age`
+//! suffix names the key type. The file is not age-encrypted, and no platform
+//! keychain is used. Encryption at rest is ruled for the next release (BL2-Q10,
+//! Linear TIN-3692 comment `36925e2d`).
 //!
 //! ## Registry integrity (TIN-1417 B4)
 //!

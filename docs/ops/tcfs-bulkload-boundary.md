@@ -49,6 +49,13 @@ features:
 
 Until both exist, the blacklist entries stay as they are.
 
+**v1 scope (ruling BL2-Q8, 2026-10-27, Linear TIN-3692 comment `36925e2d`):**
+"TCFS v1 must cover them". Both rows above move to tcfs in v1. What "cover"
+means, the failure modes v1 must not have, and the tests that gate removing
+each blacklist entry are in
+[../SPEC.md](../SPEC.md#worktrees-and-live-sqlite-t13-t14) (T13, T14).
+Until then bulkload carries both classes.
+
 ## Reuse bulkload's walker in tcfs
 
 The 2026-10-15 estate check found that tcfs's scan and upload path costs
