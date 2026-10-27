@@ -200,6 +200,23 @@ toolchain-status:
     @if command -v nix >/dev/null 2>&1; then nix --version; else echo "nix: not installed"; fi
     @if command -v direnv >/dev/null 2>&1; then direnv version; else echo "direnv: not installed"; fi
 
+# ── Spec (Dhall) ────────────────────────────────────────────────────────────
+# Pinned nixpkgs, the same revision softconnect's spec uses (nixos-26.05 as
+# lab's flake.lock carried it on 2026-10-26). It gives dhall 1.42.3,
+# dhall-json 1.7.12 and jq 1.8.2; spec/check-dhall.sh refuses other
+# versions. Change them together.
+
+spec_nixpkgs := "github:NixOS/nixpkgs/c508844df6c28fa6dabc1b6af70f3ccbd65c5201"
+
+# Type-check the blob topology spec, compare its goldens, require every mutant to fail
+spec-dhall:
+    nix shell {{spec_nixpkgs}}#dhall {{spec_nixpkgs}}#dhall-json {{spec_nixpkgs}}#jq --command bash spec/check-dhall.sh
+
+# Refresh spec/dhall/generated/ from the Dhall sources, then re-check
+spec-dhall-write:
+    nix shell {{spec_nixpkgs}}#dhall {{spec_nixpkgs}}#dhall-json {{spec_nixpkgs}}#jq --command bash spec/check-dhall.sh --write
+    nix shell {{spec_nixpkgs}}#dhall {{spec_nixpkgs}}#dhall-json {{spec_nixpkgs}}#jq --command bash spec/check-dhall.sh
+
 # ── Cargo ───────────────────────────────────────────────────────────────────
 
 # Build workspace

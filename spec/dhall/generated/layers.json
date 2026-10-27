@@ -1,0 +1,317 @@
+[
+  {
+    "concern": "DiskMedia",
+    "layer": "Media",
+    "name": "neo Glyph ATOM RAID0 USB SSD (4 TB, 3 APFS containers since 2026-10-26)",
+    "product": "Lab",
+    "role": "Leverage",
+    "source": "lab docs/agent-notes/2026-10-25-sess-neo-glyph-rca-recovery-runbook.md (lost writes on a RAID0 USB bridge)",
+    "status": "Live"
+  },
+  {
+    "concern": "DiskMedia",
+    "layer": "Media",
+    "name": "sting NVMe P310 (fast-local), M550 (cache), 860 DCT (data)",
+    "product": "Lab",
+    "role": "Leverage",
+    "source": "BL-2 estate-reality section 2",
+    "status": "Live"
+  },
+  {
+    "concern": "DiskMedia",
+    "layer": "Media",
+    "name": "honey ST4000DM000 HDD /archive (SeaweedFS volume dir)",
+    "product": "Blahaj",
+    "role": "Leverage",
+    "source": "lab vars/knob_register.json fleet.seaweedfs live",
+    "status": "Live"
+  },
+  {
+    "concern": "DiskMedia",
+    "layer": "Media",
+    "name": "bumble ZFS pools tank and bumble-ssd",
+    "product": "Blahaj",
+    "role": "Leverage",
+    "source": "BL-2 estate-reality section 2 (zpools ONLINE)",
+    "status": "Live"
+  },
+  {
+    "concern": "HostVolumes",
+    "layer": "Volume",
+    "name": "XFS with project quotas (sting /srv/fast-local/jess)",
+    "product": "Lab",
+    "role": "Leverage",
+    "source": "lab vars/knob_register.json sting.xfs.fast-local.imaxpct",
+    "status": "Live"
+  },
+  {
+    "concern": "HostVolumes",
+    "layer": "Volume",
+    "name": "APFS volumes (neo Glyph, PZM disk5 quota volumes)",
+    "product": "Apple",
+    "role": "Leverage",
+    "source": "lab AGENTS.md PZM storage; nix/lib/pzm-disk5-volumes.nix",
+    "status": "Live"
+  },
+  {
+    "concern": "NixStoreHold",
+    "layer": "Volume",
+    "name": "softconnect NFS loopback hold for the Darwin Nix store",
+    "product": "Softconnect",
+    "role": "Own",
+    "source": "softconnect build/dhall-spec-20261026 spec/dhall/Mechanism.dhall",
+    "status": "Proposed"
+  },
+  {
+    "concern": "ClusterVolumes",
+    "layer": "Volume",
+    "name": "Cluster volumes: local-path, OpenEBS ZFS on bumble, OpenEBS LVM",
+    "product": "Blahaj",
+    "role": "Leverage",
+    "source": "BL-2 estate-reality section 3.1",
+    "status": "Live"
+  },
+  {
+    "concern": "ClusterVolumes",
+    "layer": "Volume",
+    "name": "Longhorn V2 (0 volumes; Phase 5 pilot ruled)",
+    "product": "Blahaj",
+    "role": "Leverage",
+    "source": "lab vars/knob_register.json fleet.longhorn (R-D15-SATA-20261016)",
+    "status": "Ruled",
+    "version": "1.12.1"
+  },
+  {
+    "concern": "ObjectStorage",
+    "layer": "ObjectStore",
+    "name": "SeaweedFS master, volume, filer and S3 gateway (s3 0/0, s3_hold true, replication 000)",
+    "product": "Upstream",
+    "role": "Leverage",
+    "source": "blahaj tofu/config/seaweedfs-honey.tfvars.json; Q153; R-C760, R-C777, R-C778",
+    "status": "Paused",
+    "version": "4.48 (upstream 4.51, 2026-10-25)"
+  },
+  {
+    "concern": "ObjectStorage",
+    "layer": "ObjectStore",
+    "name": "RustFS (Attic and tofu state only; no TCFS on RustFS)",
+    "product": "Upstream",
+    "role": "Excluded",
+    "source": "BL-2 brief section 5; GHSA-566f-q62r-wcr8, GHSA-7gcx-wg4x-q9x6",
+    "status": "Live",
+    "version": "1.0.0-beta.8 (upstream 1.0.4)"
+  },
+  {
+    "concern": "ObjectStorage",
+    "layer": "ObjectStore",
+    "name": "Garage (documented fallback, WAN multi-site design)",
+    "product": "Upstream",
+    "role": "Fallback",
+    "source": "blahaj 2026-09-28 storage-backend-convergence-design spec :189",
+    "status": "Absent",
+    "version": "v2.5.0 upstream"
+  },
+  {
+    "concern": "ObjectStorage",
+    "layer": "ObjectStore",
+    "name": "MinIO CE (archived) and AIStor",
+    "product": "Vendor",
+    "role": "Excluded",
+    "source": "github.com/minio/minio README; BL-2 brief section 5",
+    "status": "Absent",
+    "version": "RELEASE.2025-10-15T17-29-55Z (last CE tag)"
+  },
+  {
+    "concern": "ObjectStorage",
+    "layer": "ObjectStore",
+    "name": "DreamObjects off-site S3 (CNPG leg live; s3repl leg not seeded)",
+    "product": "Vendor",
+    "role": "Leverage",
+    "source": "lab knob register fleet.seaweedfs target (filer.backup to tinyland-bk-s3repl, R-C777)",
+    "status": "Ruled"
+  },
+  {
+    "concern": "ObjectStorage",
+    "layer": "ObjectStore",
+    "name": "Tigris, Cloudflare R2, S3 Express One Zone (edge or off-site candidates)",
+    "product": "Vendor",
+    "role": "Aspirational",
+    "source": "BL-3 section 1 (vendor consistency pages)",
+    "status": "Absent"
+  },
+  {
+    "commitPoint": "ObjectConditionalWrite",
+    "concern": "FileNamespace",
+    "layer": "Namespace",
+    "name": "TCFS index and manifests (path-index publication by conditional write)",
+    "product": "Tcfs",
+    "role": "Own",
+    "source": "crates/tcfs-storage/src/operator.rs verify_conditional_write_semantics; crates/tcfs-sync/src/index_entry.rs",
+    "status": "Paused",
+    "version": "0.12.17 deployed; main 185 commits ahead"
+  },
+  {
+    "commitPoint": "SqlTransaction",
+    "concern": "ObjectStorage",
+    "layer": "Namespace",
+    "name": "SeaweedFS filer on CNPG Postgres",
+    "product": "Upstream",
+    "role": "Leverage",
+    "source": "BL-2 estate-reality section 3.2",
+    "status": "Live",
+    "version": "4.48"
+  },
+  {
+    "commitPoint": "LogAppend",
+    "concern": "ChangeFeed",
+    "layer": "Namespace",
+    "name": "NATS JetStream streams SYNC_TASKS, HYDRATION_EVENTS, STATE_UPDATES",
+    "product": "Tcfs",
+    "role": "Leverage",
+    "source": "crates/tcfs-sync/src/nats.rs module docs",
+    "status": "Paused",
+    "version": "nats 2.10 (old stack, 0/0)"
+  },
+  {
+    "concern": "TableCatalog",
+    "layer": "Namespace",
+    "name": "Apache Iceberg, Delta Lake, DuckLake, lakeFS (table and versioned-data catalogs)",
+    "product": "Upstream",
+    "role": "Sibling",
+    "source": "BL-3 section 1; no such workload in the honey cluster (kubectl 2026-10-27)",
+    "status": "Absent",
+    "version": "Iceberg 1.12.0, Delta 4.4.1, DuckLake 1.0, lakeFS 1.88.0"
+  },
+  {
+    "concern": "VectorIndex",
+    "layer": "Namespace",
+    "name": "Milvus (Woodpecker WAL and Loon manifests on object storage) and pgvector",
+    "product": "Upstream",
+    "role": "Sibling",
+    "source": "BL-3 section 1; no Milvus workload in the honey cluster (kubectl 2026-10-27)",
+    "status": "Absent",
+    "version": "Milvus 3.0.4, pgvector 0.8.7"
+  },
+  {
+    "concern": "FileSync",
+    "layer": "SyncEngine",
+    "name": "tcfsd sync engine (chunk, encrypt, hydrate, unsync, reconcile)",
+    "product": "Tcfs",
+    "role": "Own",
+    "source": "BL2-Q10/11: disable tcfsd until the s3_hold flip",
+    "status": "Paused",
+    "version": "0.12.17"
+  },
+  {
+    "concern": "EstateConsolidation",
+    "layer": "SyncEngine",
+    "name": "bulkload estate consolidation",
+    "product": "Bulkload",
+    "role": "Interim",
+    "source": "bulkload docs/SPEC.md; BL2-Q12 publish if it beats rclone",
+    "status": "Live"
+  },
+  {
+    "concern": "FileSync",
+    "layer": "SyncEngine",
+    "name": "rclone VFS, JuiceFS CE, weed mount, Mountpoint for S3, ZeroFS",
+    "product": "Upstream",
+    "role": "Baseline",
+    "source": "BL2-Q9 No bridge: benchmark baselines only",
+    "status": "Absent",
+    "version": "rclone 1.75.2, JuiceFS 1.4.2, Mountpoint 1.24.0, ZeroFS 2.3.6"
+  },
+  {
+    "concern": "LinuxMount",
+    "layer": "Surface",
+    "name": "tcfs-fuse Linux mount (read-write)",
+    "product": "Tcfs",
+    "role": "Own",
+    "source": "BL-2 repo-tcfs section 2 client layers",
+    "status": "Paused"
+  },
+  {
+    "concern": "MacMount",
+    "layer": "Surface",
+    "name": "tcfs FileProvider extension (read-only until version-token publication)",
+    "product": "Tcfs",
+    "role": "Own",
+    "source": "crates/tcfs-file-provider/src/direct.rs:21",
+    "status": "Live",
+    "version": "io.tinyland.tcfs.fileprovider 0.2.0"
+  },
+  {
+    "concern": "MacMount",
+    "layer": "Surface",
+    "name": "tcfs-nfs NFSv3 loopback (read-only fallback)",
+    "product": "Tcfs",
+    "role": "Leverage",
+    "source": "crates/tcfs-nfs/src/adapter.rs NFS3ERR_ROFS",
+    "status": "Paused"
+  },
+  {
+    "concern": "MacMount",
+    "layer": "Surface",
+    "name": "Apple FSKit user-space file systems (macOS 15.4+)",
+    "product": "Apple",
+    "role": "Aspirational",
+    "source": "developer.apple.com/documentation/fskit",
+    "status": "Absent"
+  },
+  {
+    "concern": "MacMount",
+    "layer": "Surface",
+    "name": "macFUSE kext and FUSE-T",
+    "product": "Vendor",
+    "role": "Excluded",
+    "source": "BL-2 sota section 5 (closed kext; commercial licence)",
+    "status": "Absent",
+    "version": "macFUSE 5.4.0, FUSE-T 1.2.9"
+  },
+  {
+    "concern": "WindowsMount",
+    "layer": "Surface",
+    "name": "Windows Cloud Files API provider (skeleton)",
+    "product": "Tcfs",
+    "role": "Aspirational",
+    "source": "crates/tcfs-cloudfilter (613 lines)",
+    "status": "Proposed"
+  },
+  {
+    "concern": "AgentControl",
+    "layer": "Surface",
+    "name": "tcfs CLI and tcfs-mcp control surface",
+    "product": "Tcfs",
+    "role": "Own",
+    "source": "crates/tcfs-mcp/src/server.rs (7 tools)",
+    "status": "Live",
+    "version": "0.12.17"
+  },
+  {
+    "concern": "WorkspaceState",
+    "layer": "Workspace",
+    "name": "Git repos with linked worktrees, live SQLite, agent sessions",
+    "product": "Tcfs",
+    "role": "Own",
+    "source": "BL2-Q8 TCFS v1 must cover them (TIN-3692 36925e2d)",
+    "status": "Ruled"
+  },
+  {
+    "concern": "WorkspaceState",
+    "layer": "Workspace",
+    "name": "bulkload fold and reattach verbs for worktrees (until TCFS v1)",
+    "product": "Bulkload",
+    "role": "Interim",
+    "source": "TIN-7491; BL2-Q2 dated exception, verbs next",
+    "status": "Ruled"
+  },
+  {
+    "concern": "PathMapping",
+    "layer": "Workspace",
+    "name": "Host path map (/Users/jess/git on neo to /srv/fast-local/jess/git on sting)",
+    "product": "Tcfs",
+    "role": "Own",
+    "source": "TIN-2301 (Backlog); NC-1 respelled 15 pointer files by hand (TIN-3692 395ab4e0)",
+    "status": "Proposed"
+  }
+]
