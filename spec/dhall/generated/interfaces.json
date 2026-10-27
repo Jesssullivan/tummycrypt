@@ -1,0 +1,232 @@
+{
+  "interfaces": [
+    {
+      "completeness": [
+        "flush honesty is unmeasured on USB bridges; the neo Glyph RAID0 lost acknowledged writes (lab 2026-10-25 RCA; softconnect FlushHonesty)"
+      ],
+      "conditional": "NotApplicable",
+      "consistency": "Strong",
+      "crossesHosts": false,
+      "id": "I-MV media to volume",
+      "identity": "VolumeUuid",
+      "lower": "Media",
+      "metadata": "filesystem superblock and volume UUID",
+      "onFailure": [
+        "Hold",
+        "ErrorToCaller"
+      ],
+      "operations": [
+        "block read and write",
+        "flush and FUA write barriers",
+        "discard",
+        "identify by volume UUID, never by device node, label or path"
+      ],
+      "owner": "Lab",
+      "transport": "LocalOnly",
+      "upper": "Volume"
+    },
+    {
+      "completeness": [
+        "one volume server on one HDD, replication 000; the bumble rack is ruled (R-C778) and not delivered (blahaj#2219)",
+        "the volume server fsync setting is not recorded in blahaj tofu; unverified"
+      ],
+      "conditional": "NotApplicable",
+      "consistency": "Strong",
+      "crossesHosts": false,
+      "id": "I-VO volume to object store",
+      "identity": "VolumeUuid",
+      "lower": "Volume",
+      "metadata": "volume index in memory; volume ids in the master",
+      "onFailure": [
+        "ErrorToCaller",
+        "Refuse"
+      ],
+      "operations": [
+        "append needles to volume files",
+        "fsync policy per volume server",
+        "vacuum and compaction",
+        "placement by replication string"
+      ],
+      "owner": "Blahaj",
+      "transport": "LocalOnly",
+      "upper": "ObjectStore"
+    },
+    {
+      "completeness": [
+        "run verify_conditional_write_semantics against the live SeaweedFS endpoint before the s3_hold flip: conditional-write fixes landed after 4.48 (seaweedfs#11780, #11882)",
+        "bucket versioning for orphan GC is unverified on 4.48",
+        "path keys and manifests are plaintext (tummycrypt SPEC open decision on encrypted metadata)",
+        "every fleet config uses plain http endpoints with enforce_tls = false (lab nix/hosts/base.nix:908-913)",
+        "OpenDAL 0.55 has no ETag-conditional delete (crates/tcfs-cli/src/main.rs:2907)"
+      ],
+      "conditional": "CreateAndReplace",
+      "consistency": "Strong",
+      "crossesHosts": true,
+      "id": "I-ON object store to namespace",
+      "identity": "BucketKey",
+      "lower": "ObjectStore",
+      "metadata": "{prefix}/chunks/{hash}, {prefix}/manifests/{file_hash}, {prefix}/index/{rel_path}, tcfs-meta/devices.json",
+      "onFailure": [
+        "RetryBounded",
+        "ErrorToCaller",
+        "AbsenceIsNotDeletion"
+      ],
+      "operations": [
+        "PutObject with If-None-Match: * (create if absent)",
+        "PutObject with If-Match: <etag> (replace if unchanged)",
+        "GetObject with If-Match (exact-version read)",
+        "HeadObject, ListObjectsV2",
+        "DeleteObject on a versioned bucket",
+        "multipart upload for large chunks"
+      ],
+      "owner": "Tcfs",
+      "transport": "Tls",
+      "upper": "Namespace"
+    },
+    {
+      "completeness": [
+        "NATS authority is unstated; proposed: the index decides and NATS only wakes readers",
+        "SYNC_TASKS feeds server-side worker pods, which would need content keys under client-side encryption",
+        "wrap_mode = master on every host; per-device wrap is code only (I-45)",
+        "device secret keys are stored raw at mode 600 against device.rs:3-4 (BL2-Q10)"
+      ],
+      "conditional": "CreateAndReplace",
+      "consistency": "Strong",
+      "crossesHosts": true,
+      "id": "I-NS namespace to sync engine",
+      "identity": "DeviceKey",
+      "lower": "Namespace",
+      "metadata": "index entry {manifest_hash, size, chunks, kind}; device registry signed with a master-derived key",
+      "onFailure": [
+        "AbsenceIsNotDeletion",
+        "KeepBoth",
+        "RetryBounded"
+      ],
+      "operations": [
+        "read an index entry as Live, Deleted or Missing",
+        "publish Preparing then Committed by compare-and-swap",
+        "write a tombstone by compare-and-swap",
+        "fetch a manifest and its chunks by hash",
+        "subscribe to STATE_UPDATES as a wake-up hint"
+      ],
+      "owner": "Tcfs",
+      "transport": "Tls",
+      "upper": "SyncEngine"
+    },
+    {
+      "completeness": [
+        "three hydration paths: CLI pull, FileProvider fetch and the orphaned Hydrate verb (TIN-2683)",
+        "FileProvider and NFS are read-only until version-token conditional publication",
+        "two state vocabularies: tcfs-core FileState (no uses) and tcfs-sync FileSyncStatus; File.dhall proposes one",
+        "the errno and hold policy for an offline read of a stub is unstated"
+      ],
+      "conditional": "NotApplicable",
+      "consistency": "CloseToOpen",
+      "crossesHosts": false,
+      "id": "I-SS sync engine to surface",
+      "identity": "OsUser",
+      "lower": "SyncEngine",
+      "metadata": "per-path FileSyncStatus in the local state cache",
+      "onFailure": [
+        "ErrorToCaller",
+        "RetryBounded",
+        "KeepBoth"
+      ],
+      "operations": [
+        "gRPC TcfsDaemon over a Unix socket: Hydrate, Unsync, Pull, PullExact, Push, Watch, ListFiles, ResolveConflict",
+        "FUSE lookup, read, write, fsync, release",
+        "FileProvider enumerate, fetchContents, modifyItem with baseVersion, evict",
+        "NFSv3 read"
+      ],
+      "owner": "Tcfs",
+      "transport": "LocalOnly",
+      "upper": "Surface"
+    },
+    {
+      "completeness": "BL2-Q8 rules that TCFS v1 covers worktrees and live SQLite; no design exists yet. Worktree.dhall is the proposed contract",
+      "conditional": "NotApplicable",
+      "consistency": "LeaseOrdered",
+      "crossesHosts": true,
+      "id": "I-SW surface to workspace",
+      "identity": "DeviceKeyAndLease",
+      "lower": "Surface",
+      "metadata": "proposed: the lease is an index object written by compare-and-swap, so it adds no server",
+      "onFailure": [
+        "Refuse",
+        "KeepBoth"
+      ],
+      "operations": [
+        "enroll a root",
+        "attach and detach a host session",
+        "request a handoff of the writer lease",
+        "quiesce: no cwd, open file or write in 30 min; SQLite checkpointed; no index.lock; every file Clean or Stub on the source",
+        "respell host paths in gitdir pointers through the host path map",
+        "reconcile diverged writes keep-both"
+      ],
+      "owner": "Tcfs",
+      "transport": "Tls",
+      "upper": "Workspace"
+    }
+  ],
+  "replication": [
+    {
+      "completeness": [
+        "not seeded; R-C777 preconditions open",
+        "no restore drill of record"
+      ],
+      "from": "SeaweedFS on honey",
+      "id": "R-OFFSITE SeaweedFS filer.backup to DreamObjects tinyland-bk-s3repl",
+      "identity": "BucketKey",
+      "lagBound": "p95 under 24 h (BL-2 T1, proposed)",
+      "onFailure": [
+        "RetryBounded",
+        "ErrorToCaller"
+      ],
+      "operations": [
+        "replay filer events as S3 puts",
+        "Object Lock retention on the target",
+        "monthly restore drill with a tcfs decrypt"
+      ],
+      "owner": "Blahaj",
+      "to": "DreamObjects (Object Lock)",
+      "transport": "Tls"
+    },
+    {
+      "completeness": [
+        "inter-server TLS is not configured in blahaj tofu; unverified",
+        "not delivered (blahaj#2219, a GO per act under R-C754)"
+      ],
+      "from": "volume-honey",
+      "id": "R-RACK SeaweedFS honey rack to bumble rack (010)",
+      "identity": "BucketKey",
+      "lagBound": "synchronous; tcfs writes fail while bumble is down (R-C778)",
+      "onFailure": [
+        "ErrorToCaller"
+      ],
+      "operations": [
+        "synchronous replica write per needle"
+      ],
+      "owner": "Blahaj",
+      "to": "volume-bumble (tank/seaweedfs)",
+      "transport": "Tls"
+    },
+    {
+      "completeness": [
+        "metadata alone restores no chunk data; the chunk copy is R-OFFSITE"
+      ],
+      "from": "seaweedfs-filer-pg",
+      "id": "R-CNPG filer metadata to DreamObjects",
+      "identity": "BucketKey",
+      "lagBound": "CNPG WAL archive cadence",
+      "onFailure": [
+        "RetryBounded"
+      ],
+      "operations": [
+        "WAL archive and base backups"
+      ],
+      "owner": "Blahaj",
+      "to": "DreamObjects",
+      "transport": "Tls"
+    }
+  ]
+}
